@@ -1,0 +1,33 @@
+From f6160b9c3204b22f87a5fc6184d282e6703b9bd3 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 20:20:31 -0600
+Subject: [PATCH 06/10] test: m=128 P2MR control block is standard (control
+ block excluded from the stack item limit)
+
+---
+ test/functional/feature_p2mr.py | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/test/functional/feature_p2mr.py b/test/functional/feature_p2mr.py
+index 79253b4..ff4ca96 100755
+--- a/test/functional/feature_p2mr.py
++++ b/test/functional/feature_p2mr.py
+@@ -406,10 +406,11 @@ class P2MRTest(BitcoinTestFramework):
+         tx = self.build_spend([utxo], [[b"", bytes(LEAF_CSIG), control]])
+         sig = self.sign_leaf(tx, [utxo], 0, LEAF_CSIG, SEC_A)
+         tx = self.build_spend([utxo], [[sig, bytes(LEAF_CSIG), control]])
+-        # 4097 bytes is over MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE, so this
+-        # one only travels inside a block.
+-        self.assert_mempool_rejects(tx, "m=128 control block")
+-        self.assert_block_accepts(tx, "m=128 control block")
++        # The control block and the leaf script are excluded from the 80-byte
++        # stack item policy limit (as for taproot), so this relays as well.
++        self.assert_mempool_accepts(tx, "m=128 control block")
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in node.getblock(blockhash)["tx"], "spend not confirmed"
+ 
+         # A single leaf tree is anyone-can-spend: the leaf is never executed,
+         # so even an OP_RETURN leaf spends.
+-- 
+2.49.0.windows.1
+

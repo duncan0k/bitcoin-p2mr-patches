@@ -1,0 +1,635 @@
+From 1debee1f4647ee3e4a4cb811b1059d74ccc953e1 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 19:45:49 -0600
+Subject: [PATCH 04/10] test: add feature_p2mr.py covering BIP-360 activation
+ and consensus
+
+Drives a regtest node with -testactivationheight=p2mr@N and checks, in order:
+
+  * the construction helpers against all nine official BIP-360 vectors, run as
+    pure python before a datadir exists;
+  * that P2MR addresses, decodescript and validateaddress agree with them;
+  * that before activation a block spends a P2MR output with a garbage witness,
+    with no witness, and with a control block that misses the root, which is
+    the rule the soft fork tightens;
+  * that after activation script path spends at m=1, m=2 and m=128 confirm, and
+    that a single leaf tree is anyone-can-spend at m=0;
+  * that eleven classes of malformed spend are refused by sendrawtransaction
+    and by a block carrying them;
+  * that an upgraded leaf version and an annex are consensus valid but non
+    standard, while a signature that does not commit to a present annex is
+    invalid;
+  * one transaction spending a P2TR and a P2MR input, and that a signature made
+    for its first input does not satisfy its second;
+  * a reorg that moves the same malformed spend across the activation height,
+    valid below it and invalid above it.
+
+RELAY_P2MR_BEFORE_ACTIVATION at the top of the file records which side of the
+policy question the implementation took; no consensus assertion depends on it.
+---
+ test/functional/feature_p2mr.py | 580 ++++++++++++++++++++++++++++++++
+ test/functional/test_runner.py  |   1 +
+ 2 files changed, 581 insertions(+)
+ create mode 100755 test/functional/feature_p2mr.py
+
+diff --git a/test/functional/feature_p2mr.py b/test/functional/feature_p2mr.py
+new file mode 100755
+index 0000000..fb7e089
+--- /dev/null
++++ b/test/functional/feature_p2mr.py
+@@ -0,0 +1,580 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026-present The Bitcoin Core developers
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test BIP-360 Pay-to-Merkle-Root (P2MR) activation, consensus and policy.
++
++Covers, on regtest with -testactivationheight=p2mr@N:
++
++  * the construction helpers in test_framework/p2mr.py against all nine
++    official BIP-360 vectors, before any node is started;
++  * before activation, that a block may spend a P2MR output with any witness
++    at all, which is the rule P2MR tightens;
++  * after activation, that well formed script path spends relay and confirm,
++    and that each class of malformed spend is rejected both by
++    sendrawtransaction and by submitblock;
++  * that upgraded leaf versions and the annex are consensus valid but non
++    standard, so a block carries them and the mempool does not;
++  * that a single leaf tree, which BIP-360 makes anyone-can-spend, confirms;
++  * one transaction spending a P2TR and a P2MR input together;
++  * a reorg across the activation height, so the same spend is valid below it
++    and invalid above it.
++
++The vector file data/p2mr_construction.json is
++bip-0360/ref-impl/common/tests/data/p2mr_construction.json from bitcoin/bips
++commit 620871a7a442e276a058b487cd8743775fb499a4 (BIP-360 v0.12.1), unmodified.
++It is BSD-3-Clause, like the BIP it belongs to.
++"""
++
++import json
++import os
++
++from test_framework.blocktools import (
++    add_witness_commitment,
++    create_block,
++    create_coinbase,
++)
++from test_framework.key import compute_xonly_pubkey, sign_schnorr
++from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import (
++    ANNEX_TAG,
++    P2MR_CONTROL_MAX_NODE_COUNT,
++    P2MR_CONTROL_NODE_SIZE,
++    p2mr_address,
++    p2mr_construct,
++    p2mr_root_from_path,
++    p2mr_script_pubkey,
++    p2mr_tapleaf_hash,
++)
++from test_framework.script import (
++    CScript,
++    LEAF_VERSION_TAPSCRIPT,
++    OP_1,
++    OP_CHECKSIG,
++    OP_RETURN,
++    SIGHASH_DEFAULT,
++    TaprootSignatureHash,
++    taproot_construct,
++)
++from test_framework.segwit_addr import decode_segwit_address
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++# Height at which the P2MR rules start applying in this test.
++ACTIVATION_HEIGHT = 250
++# An upgraded, even, non-0xc0 leaf version. Its script is never executed.
++LEAF_VERSION_FUTURE = 0xfa
++# Value funded into each P2MR output, and the fee each spend pays.
++FUND_SATS = 50_000
++FEE_SATS = 2_000
++# No OP_CODESEPARATOR was executed.
++NO_CODESEPARATOR = 0xffffffff
++
++# Whether a valid P2MR spend relays before the rules are active. The design
++# puts SCRIPT_VERIFY_P2MR in STANDARD_SCRIPT_VERIFY_FLAGS unconditionally, the
++# way taproot does, so policy runs ahead of consensus and such a spend relays
++# early. Set this to False if the implementation gates the standard flag on
++# activation instead; no consensus assertion below depends on this.
++RELAY_P2MR_BEFORE_ACTIVATION = True
++
++SEC_A = bytes(range(1, 33))
++SEC_B = bytes(range(33, 65))
++PUB_A = compute_xonly_pubkey(SEC_A)[0]
++PUB_B = compute_xonly_pubkey(SEC_B)[0]
++
++LEAF_CSIG = CScript([PUB_A, OP_CHECKSIG])
++LEAF_RETURN = CScript([OP_RETURN])
++LEAF_TRUE = CScript([OP_1])
++
++
++def vector_tree(node):
++    """Translate a BIP-360 vector script tree into p2mr_tree_helper() input."""
++    if node is None:
++        return []
++    if isinstance(node, list):
++        return [vector_tree(child) for child in node]
++    return (node["id"], bytes.fromhex(node["script"]), node["leafVersion"])
++
++
++class P2MRTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++        self.extra_args = [[f"-testactivationheight=p2mr@{ACTIVATION_HEIGHT}"]]
++
++    def setup_chain(self):
++        # Pure python, so a broken construction helper fails before a datadir
++        # or a node exists.
++        self.check_construction_vectors()
++        super().setup_chain()
++
++    # ------------------------------------------------------------------
++    # Official BIP-360 construction vectors
++    # ------------------------------------------------------------------
++
++    def check_construction_vectors(self):
++        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "data",
++                            "p2mr_construction.json")
++        with open(path, encoding="utf-8") as f:
++            data = json.load(f)
++        assert_equal(data["version"], 1)
++        vectors = data["test_vectors"]
++        assert_equal(len(vectors), 9)
++
++        positives = 0
++        control_blocks = 0
++        for vector in vectors:
++            name = vector["id"]
++            given = vector["given"]
++            expected = vector["expected"]
++            # The upstream file spells the key both ways.
++            tree = given.get("scriptTree", given.get("script_tree"))
++
++            if "error" in expected:
++                if "internalPubkey" in given:
++                    # P2MR has no key path. This vector's scriptPubKey is
++                    # OP_2 <BIP-341 tweaked pubkey>, which is not a Merkle root,
++                    # so it must not be read as a valid P2MR output.
++                    assert_equal(expected["scriptPubKey"],
++                                 "5220" + vector["intermediary"]["tweakedPubkey"])
++                    assert tree is None, name
++                else:
++                    # A P2MR output commits to at least one leaf.
++                    assert not tree, name
++                    try:
++                        p2mr_construct([])
++                    except AssertionError:
++                        pass
++                    else:
++                        raise AssertionError(f"{name}: an empty script tree was accepted")
++                continue
++
++            positives += 1
++            scripts = vector_tree(tree)
++            if isinstance(scripts, tuple):
++                scripts = [scripts]
++            info = p2mr_construct(scripts)
++
++            assert_equal(info.merkle_root.hex(), vector["intermediary"]["merkleRoot"])
++            leaf_hashes = vector["intermediary"].get("leafHashes")
++            if leaf_hashes is not None:
++                assert_equal([leaf.leaf_hash.hex() for leaf in info.leaf_list], leaf_hashes)
++            assert_equal(info.scriptPubKey.hex(), expected["scriptPubKey"])
++            assert_equal([leaf.control_block.hex() for leaf in info.leaf_list],
++                         expected["scriptPathControlBlocks"])
++            control_blocks += len(info.leaf_list)
++            for leaf in info.leaf_list:
++                assert_equal(leaf.control_block[0] & 1, 1)
++                assert_equal(leaf.control_block[0] & 0xfe, leaf.leaf_ver)
++                assert len(leaf.merklebranch) // P2MR_CONTROL_NODE_SIZE <= P2MR_CONTROL_MAX_NODE_COUNT
++            # The vectors carry mainnet BIP-350 addresses.
++            assert_equal(p2mr_address(info.merkle_root, "bc"), expected["bip350Address"])
++
++        assert_equal(positives, 7)
++        assert_equal(control_blocks, 16)
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def fund(self, script_pubkey):
++        """Create a confirmed output paying script_pubkey."""
++        sent = self.wallet.send_to(from_node=self.nodes[0], scriptPubKey=script_pubkey,
++                                   amount=FUND_SATS)
++        self.generate(self.wallet, 1)
++        return {
++            "txid": int(sent["txid"], 16),
++            "txid_hex": sent["txid"],
++            "vout": sent["sent_vout"],
++            "value": FUND_SATS,
++            "script_pubkey": script_pubkey,
++        }
++
++    def build_spend(self, utxos, witnesses):
++        """Build a transaction spending utxos, each with a ready witness stack."""
++        tx = CTransaction()
++        tx.version = 2
++        tx.nLockTime = 0
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]), b"", 0) for u in utxos]
++        total = sum(u["value"] for u in utxos)
++        tx.vout = [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        tx.wit.vtxinwit = []
++        for stack in witnesses:
++            witin = CTxInWitness()
++            witin.scriptWitness.stack = list(stack)
++            tx.wit.vtxinwit.append(witin)
++        return tx
++
++    def sign_leaf(self, tx, utxos, index, leaf_script, sec, *, annex=None,
++                  leaf_ver=LEAF_VERSION_TAPSCRIPT):
++        """Sign one P2MR or P2TR script path input of tx."""
++        spent = [CTxOut(u["value"], u["script_pubkey"]) for u in utxos]
++        sighash = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, input_index=index,
++                                       scriptpath=True, leaf_script=leaf_script,
++                                       leaf_ver=leaf_ver, annex=annex,
++                                       codeseparator_pos=NO_CODESEPARATOR)
++        return sign_schnorr(sec, sighash)
++
++    def signed_spend(self, utxo, info, leaf_name, *, sec=SEC_A, annex=None, commit_annex=True):
++        """Build a one input P2MR spend of a leaf that ends in OP_CHECKSIG."""
++        leaf = info.leaves[leaf_name]
++        stack = [b"", bytes(leaf.script), leaf.control_block]
++        if annex is not None:
++            stack.append(annex)
++        tx = self.build_spend([utxo], [stack])
++        sig = self.sign_leaf(tx, [utxo], 0, leaf.script, sec,
++                             annex=annex if commit_annex else None, leaf_ver=leaf.leaf_ver)
++        stack[0] = sig
++        return self.build_spend([utxo], [stack])
++
++    def build_block(self, txs):
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        height = node.getblockcount() + 1
++        block = create_block(int(tip, 16), create_coinbase(height),
++                             node.getblock(tip)["mediantime"] + 1)
++        block.vtx.extend(txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def assert_block_accepts(self, tx, note):
++        node = self.nodes[0]
++        block = self.build_block([tx])
++        result = node.submitblock(block.serialize().hex())
++        assert result is None, f"{note}: block rejected with {result}"
++        assert_equal(node.getbestblockhash(), block.hash_hex)
++        self.wallet.rescan_utxos()
++        self.log.info(f"  block accepts: {note}")
++
++    def assert_block_rejects(self, tx, note):
++        node = self.nodes[0]
++        tip_before = node.getbestblockhash()
++        block = self.build_block([tx])
++        result = node.submitblock(block.serialize().hex())
++        assert result is not None, f"{note}: block was accepted"
++        # Every P2MR consensus rule reports through the script interpreter.
++        assert result.startswith("mandatory-script-verify-flag-failed"), \
++            f"{note}: unexpected reject reason {result}"
++        assert_equal(node.getbestblockhash(), tip_before)
++        self.log.info(f"  block rejects: {note} ({result})")
++
++    def assert_mempool_rejects(self, tx, note):
++        assert_raises_rpc_error(-26, None, self.nodes[0].sendrawtransaction,
++                                tx.serialize().hex(), 0)
++        self.log.info(f"  mempool rejects: {note}")
++
++    def assert_mempool_accepts(self, tx, note):
++        node = self.nodes[0]
++        node.sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in node.getrawmempool(), f"{note}: not in mempool"
++        self.log.info(f"  mempool accepts: {note}")
++
++    def mine_to(self, height):
++        missing = height - self.nodes[0].getblockcount()
++        if missing > 0:
++            self.generate(self.wallet, missing)
++        assert_equal(self.nodes[0].getblockcount(), height)
++
++    def assert_active(self, expected):
++        """getdeploymentinfo reports the rules for the block after the tip."""
++        info = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr"]
++        assert_equal(info["active"], expected)
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        node = self.nodes[0]
++        self.wallet = MiniWallet(node)
++        self.generate(self.wallet, 120)
++
++        self.log.info("The node knows the p2mr deployment")
++        deployments = node.getdeploymentinfo()["deployments"]
++        assert "p2mr" in deployments, f"no p2mr deployment, only {sorted(deployments)}"
++        assert_equal(deployments["p2mr"]["type"], "buried")
++        assert_equal(deployments["p2mr"]["height"], ACTIVATION_HEIGHT)
++
++        self.test_address_and_output_type()
++        self.test_before_activation()
++
++        # getdeploymentinfo, and GetBlockScriptFlags, look at the next block.
++        self.mine_to(ACTIVATION_HEIGHT - 2)
++        self.assert_active(False)
++        self.generate(self.wallet, 1)
++        self.assert_active(True)
++
++        self.test_valid_spends()
++        self.test_invalid_spends()
++        self.test_nonstandard_but_valid()
++        self.test_mixed_p2tr_and_p2mr()
++        self.test_reorg_across_activation()
++
++    def test_address_and_output_type(self):
++        """The node agrees with the helpers about P2MR addresses and output type."""
++        node = self.nodes[0]
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++        address = p2mr_address(info.merkle_root, "bcrt")
++        self.log.info(f"P2MR addresses and output type ({address})")
++        assert_equal(decode_segwit_address("bcrt", address), (2, list(info.merkle_root)))
++
++        validated = node.validateaddress(address)
++        assert_equal(validated["isvalid"], True)
++        assert_equal(validated["scriptPubKey"], info.scriptPubKey.hex())
++        assert_equal(validated["witness_version"], 2)
++        assert_equal(validated["witness_program"], info.merkle_root.hex())
++
++        decoded = node.decodescript(info.scriptPubKey.hex())
++        assert_equal(decoded["type"], "witness_v2_p2mr")
++        assert_equal(decoded["address"], address)
++
++    def test_before_activation(self):
++        """Before activation a block may spend a P2MR output with any witness."""
++        self.log.info("Before activation, consensus ignores the witness")
++        assert self.nodes[0].getblockcount() < ACTIVATION_HEIGHT - 10
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++
++        # Reserved for the reorg test, which rolls the chain back below the
++        # activation height and so needs a funding block from down here.
++        self.reorg_utxo = self.fund(info.scriptPubKey)
++        self.reorg_info = info
++
++        # A witness that is nonsense under P2MR still spends the output.
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.build_spend([utxo], [[b"\x00", b"\x01"]])
++        self.assert_mempool_rejects(tx, "garbage witness before activation")
++        self.assert_block_accepts(tx, "garbage witness before activation")
++
++        # So does the empty witness.
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.build_spend([utxo], [[]])
++        self.assert_block_accepts(tx, "empty witness before activation")
++
++        # And so does a control block that does not reach the root.
++        utxo = self.fund(info.scriptPubKey)
++        leaf = info.leaves["csig"]
++        bad_control = bytes([leaf.control_block[0]]) + bytes(P2MR_CONTROL_NODE_SIZE)
++        tx = self.build_spend([utxo], [[b"", bytes(LEAF_CSIG), bad_control]])
++        self.assert_mempool_rejects(tx, "root mismatch before activation")
++        self.assert_block_accepts(tx, "root mismatch before activation")
++
++        # A well formed spend relays early only if policy runs ahead of
++        # consensus. Either way, it confirms.
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.signed_spend(utxo, info, "csig")
++        if RELAY_P2MR_BEFORE_ACTIVATION:
++            self.assert_mempool_accepts(tx, "valid spend before activation")
++        else:
++            self.assert_mempool_rejects(tx, "valid spend before activation")
++        self.assert_block_accepts(tx, "valid spend before activation")
++
++    def test_valid_spends(self):
++        """After activation, well formed script path spends relay and confirm."""
++        node = self.nodes[0]
++        self.log.info("After activation, valid script path spends relay and confirm")
++
++        # m == 1.
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++        assert_equal(len(info.leaves["csig"].merklebranch), P2MR_CONTROL_NODE_SIZE)
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.signed_spend(utxo, info, "csig")
++        self.assert_mempool_accepts(tx, "m=1 script path spend")
++        self.generate(self.wallet, 1)
++        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++
++        # m == 2, with the leaf actually executed.
++        deep = p2mr_construct([("csig", LEAF_CSIG),
++                               [("true", LEAF_TRUE), ("ret", LEAF_RETURN)]])
++        leaf = deep.leaves["true"]
++        assert_equal(len(leaf.merklebranch), 2 * P2MR_CONTROL_NODE_SIZE)
++        utxo = self.fund(deep.scriptPubKey)
++        tx = self.build_spend([utxo], [[bytes(LEAF_TRUE), leaf.control_block]])
++        self.assert_mempool_accepts(tx, "m=2 script path spend")
++        self.generate(self.wallet, 1)
++        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++
++        # m == 128, the deepest control block the rules allow.
++        path = [bytes([0x11, i]) + bytes(P2MR_CONTROL_NODE_SIZE - 2)
++                for i in range(P2MR_CONTROL_MAX_NODE_COUNT)]
++        root = p2mr_root_from_path(p2mr_tapleaf_hash(LEAF_VERSION_TAPSCRIPT, LEAF_CSIG), path)
++        deep_spk = p2mr_script_pubkey(root)
++        control = bytes([LEAF_VERSION_TAPSCRIPT | 1]) + b"".join(path)
++        assert_equal(len(control), 4097)
++        utxo = self.fund(deep_spk)
++        tx = self.build_spend([utxo], [[b"", bytes(LEAF_CSIG), control]])
++        sig = self.sign_leaf(tx, [utxo], 0, LEAF_CSIG, SEC_A)
++        tx = self.build_spend([utxo], [[sig, bytes(LEAF_CSIG), control]])
++        # 4097 bytes is over MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE, so this
++        # one only travels inside a block.
++        self.assert_mempool_rejects(tx, "m=128 control block")
++        self.assert_block_accepts(tx, "m=128 control block")
++
++        # A single leaf tree is anyone-can-spend: the leaf is never executed,
++        # so even an OP_RETURN leaf spends.
++        lone = p2mr_construct([("ret", LEAF_RETURN)])
++        assert_equal(lone.leaves["ret"].control_block, b"\xc1")
++        utxo = self.fund(lone.scriptPubKey)
++        tx = self.build_spend([utxo], [[bytes(LEAF_RETURN), b"\xc1"]])
++        self.assert_block_accepts(tx, "m=0 spend of a single leaf tree")
++
++    def test_invalid_spends(self):
++        """Every malformed spend is refused by the mempool and by a block."""
++        self.log.info("After activation, malformed spends are refused twice over")
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++        leaf = info.leaves["csig"]
++
++        # A signature that is valid for one funding output is not reused for
++        # another, so take it only as filler where the spend fails earlier.
++        filler = bytes(64)
++        path129 = [bytes([0x12, i & 0xff]) + bytes(P2MR_CONTROL_NODE_SIZE - 2)
++                   for i in range(P2MR_CONTROL_MAX_NODE_COUNT + 1)]
++
++        cases = [
++            ([], "empty witness stack"),
++            ([leaf.control_block], "one element witness stack"),
++            ([bytes(LEAF_CSIG), bytes([ANNEX_TAG])], "two elements ending in 0x50"),
++            ([filler, bytes(LEAF_CSIG), leaf.control_block + b"\x00"],
++             "control block of 34 bytes"),
++            ([filler, bytes(LEAF_CSIG), b""], "empty control block"),
++            ([filler, bytes(LEAF_CSIG),
++              bytes([LEAF_VERSION_TAPSCRIPT | 1]) + b"".join(path129)],
++             "control block of 129 inner nodes"),
++            ([filler, bytes(LEAF_CSIG), bytes([LEAF_VERSION_TAPSCRIPT]) + leaf.merklebranch],
++             "c[0]=0xc0 with the low bit cleared"),
++            ([bytes(LEAF_TRUE), bytes([LEAF_VERSION_FUTURE]) + leaf.merklebranch],
++             "c[0]=0xfa with the low bit cleared"),
++            ([filler, bytes(LEAF_CSIG),
++              bytes([leaf.control_block[0]]) + bytes(P2MR_CONTROL_NODE_SIZE)],
++             "control block that misses the root"),
++            ([bytes(LEAF_TRUE), leaf.control_block], "leaf script not in the tree"),
++            ([bytes(LEAF_RETURN), info.leaves["ret"].control_block], "executed leaf fails"),
++        ]
++
++        for stack, note in cases:
++            utxo = self.fund(info.scriptPubKey)
++            tx = self.build_spend([utxo], [stack])
++            self.assert_mempool_rejects(tx, note)
++            self.assert_block_rejects(tx, note)
++
++        # A real signature, over the right message, from the wrong key.
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.signed_spend(utxo, info, "csig", sec=SEC_B)
++        self.assert_mempool_rejects(tx, "signature by the wrong key")
++        self.assert_block_rejects(tx, "signature by the wrong key")
++
++    def test_nonstandard_but_valid(self):
++        """Upgraded leaf versions and the annex are valid but do not relay."""
++        self.log.info("After activation, upgraded leaves and the annex are non standard")
++
++        # An upgraded leaf version succeeds without the script being executed,
++        # so even OP_RETURN under 0xfa spends.
++        upgraded = p2mr_construct([("csig", LEAF_CSIG),
++                                   ("future", LEAF_RETURN, LEAF_VERSION_FUTURE)])
++        leaf = upgraded.leaves["future"]
++        assert_equal(leaf.control_block[0], LEAF_VERSION_FUTURE | 1)
++        utxo = self.fund(upgraded.scriptPubKey)
++        tx = self.build_spend([utxo], [[bytes(LEAF_RETURN), leaf.control_block]])
++        self.assert_mempool_rejects(tx, "leaf version 0xfa")
++        self.assert_block_accepts(tx, "leaf version 0xfa")
++
++        # An annex is covered by the signature, contributes to weight and is
++        # otherwise ignored.
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++        annex = bytes([ANNEX_TAG]) + b"\xde\xad\xbe\xef"
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.signed_spend(utxo, info, "csig", annex=annex)
++        self.assert_mempool_rejects(tx, "annex present")
++        self.assert_block_accepts(tx, "annex present")
++
++        # A signature that does not commit to the annex is invalid.
++        utxo = self.fund(info.scriptPubKey)
++        tx = self.signed_spend(utxo, info, "csig", annex=annex, commit_annex=False)
++        self.assert_mempool_rejects(tx, "annex not committed to")
++        self.assert_block_rejects(tx, "annex not committed to")
++
++    def test_mixed_p2tr_and_p2mr(self):
++        """One transaction spending a P2TR input and a P2MR input."""
++        node = self.nodes[0]
++        self.log.info("A transaction spending P2TR and P2MR together")
++
++        tap = taproot_construct(PUB_B, [("csig", LEAF_CSIG)])
++        tap_leaf = tap.leaves["csig"]
++        tap_control = (bytes([tap_leaf.version + tap.negflag]) + tap.internal_pubkey
++                       + tap_leaf.merklebranch)
++        info = p2mr_construct([("csig", LEAF_CSIG), ("ret", LEAF_RETURN)])
++        p2mr_control = info.leaves["csig"].control_block
++
++        def build(utxos):
++            placeholder = [[b"", bytes(LEAF_CSIG), tap_control],
++                           [b"", bytes(LEAF_CSIG), p2mr_control]]
++            return self.build_spend(utxos, placeholder)
++
++        utxos = [self.fund(tap.scriptPubKey), self.fund(info.scriptPubKey)]
++        tx = build(utxos)
++        sig_tap = self.sign_leaf(tx, utxos, 0, LEAF_CSIG, SEC_A)
++        sig_p2mr = self.sign_leaf(tx, utxos, 1, LEAF_CSIG, SEC_A)
++        tx = self.build_spend(utxos, [[sig_tap, bytes(LEAF_CSIG), tap_control],
++                                      [sig_p2mr, bytes(LEAF_CSIG), p2mr_control]])
++        self.assert_mempool_accepts(tx, "P2TR and P2MR in one transaction")
++        self.generate(self.wallet, 1)
++        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++
++        # The two inputs are not signed over the same message: a signature made
++        # for input 0 must not satisfy input 1.
++        utxos = [self.fund(tap.scriptPubKey), self.fund(info.scriptPubKey)]
++        tx = build(utxos)
++        sig_tap = self.sign_leaf(tx, utxos, 0, LEAF_CSIG, SEC_A)
++        tx = self.build_spend(utxos, [[sig_tap, bytes(LEAF_CSIG), tap_control],
++                                      [sig_tap, bytes(LEAF_CSIG), p2mr_control]])
++        self.assert_mempool_rejects(tx, "P2MR signature over the wrong input index")
++        self.assert_block_rejects(tx, "P2MR signature over the wrong input index")
++
++    def test_reorg_across_activation(self):
++        """The same spend is valid below the activation height and invalid above it."""
++        node = self.nodes[0]
++        self.log.info("A reorg across the activation height re-evaluates the rules")
++
++        utxo = self.reorg_utxo
++        info = self.reorg_info
++        leaf = info.leaves["csig"]
++        bad_control = bytes([leaf.control_block[0]]) + bytes(P2MR_CONTROL_NODE_SIZE)
++        invalid = self.build_spend([utxo], [[b"", bytes(LEAF_CSIG), bad_control]])
++
++        # Above the activation height the spend is refused.
++        assert node.getblockcount() >= ACTIVATION_HEIGHT
++        self.assert_block_rejects(invalid, "root mismatch above the activation height")
++
++        # Roll back so the next block is the last one below the activation
++        # height. The funding block is far below it, so the output survives.
++        node.invalidateblock(node.getblockhash(ACTIVATION_HEIGHT - 1))
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 2)
++        self.wallet.rescan_utxos()
++        self.assert_active(False)
++        assert node.gettxout(utxo["txid_hex"], utxo["vout"]) is not None, \
++            "the funded output did not survive the rollback"
++
++        # Below the activation height the very same spend confirms.
++        self.assert_block_accepts(invalid, "root mismatch below the activation height")
++        spent_hash = node.getbestblockhash()
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 1)
++
++        # Undo it and re-mine, so the block that would carry the spend is the
++        # first one the rules apply to.
++        node.invalidateblock(spent_hash)
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 2)
++        self.wallet.rescan_utxos()
++        self.generate(self.wallet, 1)
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT - 1)
++        self.assert_active(True)
++        self.assert_block_rejects(invalid, "root mismatch at the activation height")
++
++        # A valid spend of the same output confirms there.
++        valid = self.signed_spend(utxo, info, "csig")
++        self.assert_block_accepts(valid, "valid spend at the activation height")
++        assert_equal(node.getblockcount(), ACTIVATION_HEIGHT)
++
++
++if __name__ == "__main__":
++    P2MRTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 298edf8..15fbacf 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -285,6 +285,7 @@ BASE_SCRIPTS = [
+     'wallet_balance.py',
+     'p2p_initial_headers_sync.py',
+     'feature_nulldummy.py',
++    'feature_p2mr.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+     'mempool_expiry.py',
+-- 
+2.49.0.windows.1
+

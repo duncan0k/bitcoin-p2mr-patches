@@ -1,0 +1,551 @@
+From 433d81cd563158b458f10687c2bc23dd93654e06 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 19:29:55 -0600
+Subject: [PATCH 02/10] policy: add P2MR (BIP 360) output type, address and
+ relay rules
+
+Give witness v2 programs of 32 bytes their own output type,
+TxoutType::WITNESS_V2_P2MR, reported as "witness_v2_p2mr", and their own
+destination type, WitnessV2P2MR, encoded as a bech32m address with witness
+version 2 (bc1z / tb1z / bcrt1z). Such outputs are standard, and spending
+them is subject to the same relay limits as a Taproot script path spend:
+annexes are non-standard and, for leaf version 0xc0, witness stack items
+are limited to MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE.
+
+SCRIPT_VERIFY_P2MR joins STANDARD_SCRIPT_VERIFY_FLAGS but not
+MANDATORY_SCRIPT_VERIFY_FLAGS, so a P2MR spend that breaks the rules is
+rejected from the mempool without punishing the peer, while blocks
+containing it are still rejected once the deployment is active.
+
+There is no wallet support: signing returns false for these outputs and
+IsMine never matches them. doc/p2mr.md records the rules, the activation
+heights, the naming and the limits of this implementation.
+---
+ doc/p2mr.md                        | 116 +++++++++++++++++++++++++++++
+ src/addresstype.cpp                |  12 +++
+ src/addresstype.h                  |  12 ++-
+ src/key_io.cpp                     |  15 ++++
+ src/policy/policy.cpp              |  27 +++++++
+ src/policy/policy.h                |   3 +-
+ src/rpc/rawtransaction.cpp         |   2 +
+ src/rpc/util.cpp                   |  10 +++
+ src/script/sign.cpp                |   2 +
+ src/script/solver.cpp              |   5 ++
+ src/script/solver.h                |   1 +
+ src/test/fuzz/util.cpp             |   7 +-
+ src/test/script_standard_tests.cpp |  26 ++++++-
+ src/test/transaction_tests.cpp     |   9 ++-
+ src/wallet/rpc/addresses.cpp       |   1 +
+ src/wallet/scriptpubkeyman.cpp     |   1 +
+ 16 files changed, 238 insertions(+), 11 deletions(-)
+ create mode 100644 doc/p2mr.md
+
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+new file mode 100644
+index 0000000..85324d7
+--- /dev/null
++++ b/doc/p2mr.md
+@@ -0,0 +1,116 @@
++# P2MR (BIP 360) in this build
++
++This build implements the Pay-to-Merkle-Root (P2MR) spending rules of
++[BIP 360](https://github.com/bitcoin/bips/blob/620871a7a442e276a058b487cd8743775fb499a4/bip-0360.mediawiki)
++(draft v0.12.1, bips commit `620871a7a442e276a058b487cd8743775fb499a4`) on top of Bitcoin Core v31.1.
++
++The scope is the consensus and policy treatment of witness v2 outputs. No post-quantum signature
++algorithm is implemented, no wallet descriptor is added and no signing support exists.
++
++## Output format
++
++A P2MR output is a native SegWit output with witness version 2 and a 32-byte witness program:
++
++```
++OP_2 OP_PUSHBYTES_32 <32-byte script tree Merkle root>
++```
++
++The witness program is the Merkle root of the script tree itself. Unlike BIP 341 there is no
++internal public key and no taproot tweak, so there is no key path spend.
++
++Addresses use bech32m with witness version 2, which yields the `bc1z` / `tb1z` / `bcrt1z` prefixes.
++`Solver` reports the type as `witness_v2_p2mr`; `getaddressinfo`, `validateaddress` and
++`decodescript` report witness version 2 and the program.
++
++## Spending rules
++
++The rules below are enforced by `VerifyWitnessProgram` in `src/script/interpreter.cpp` when
++`SCRIPT_VERIFY_P2MR` is set. They follow the BIP 360 Script Validation section, which in turn
++mirrors the BIP 341 script path.
++
++Let `q` be the 32-byte witness program.
++
++1. The witness stack must have two or more elements.
++2. If the stack has exactly two elements and the first byte of the last one is `0x50`, the spend
++   fails. With three or more elements, a last element starting with `0x50` is the annex: it is
++   removed from the stack, covered by the signature and counted in the transaction weight, but is
++   otherwise ignored. Annexes are non-standard.
++3. The last remaining element is the control block `c`, and the one before it is the script `s`.
++4. `c` must be `1 + 32*m` bytes long, for `m` between 0 and 128 inclusive. The upper bound is 4097
++   bytes (`P2MR_CONTROL_MAX_SIZE`).
++5. The last bit of `c[0]` must be 1. P2MR has no internal key parity to encode, so this bit is
++   unused and is checked for every leaf version, not only for `0xc0`. Failure yields
++   `SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY`.
++6. The leaf version is `v = c[0] & 0xfe`. The tapleaf hash and the Merkle path folding are exactly
++   those of BIP 341, computed by `ComputeTapleafHash` and `ComputeTapbranchHash`.
++7. The resulting root `r` must equal `q`, otherwise the spend fails. No tweak is applied and no
++   internal public key is parsed.
++8. If `m = 0` the spend succeeds immediately and the script is **not** executed. Such an output is
++   spendable by anyone who learns `v` and `s`, so tools must not produce depth-zero P2MR outputs.
++9. Otherwise, for leaf version `0xc0` the script is executed under the BIP 342 rules, with the
++   tapleaf hash and annex recorded in the script execution data. `OP_SUCCESSx` keeps its BIP 342
++   meaning.
++10. For any other leaf version the spend succeeds without executing the script.
++    `SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION` makes this non-standard, so such spends
++    are rejected by the mempool but accepted in blocks.
++11. The signature message is the BIP 342 common signature message, unchanged. It commits to the
++    actual `OP_2 <root>` scriptPubKey through the spent scripts hash.
++
++P2SH-wrapped witness v2 programs are not P2MR; they keep the unknown witness program behaviour.
++
++## Activation
++
++P2MR is a buried deployment, `Consensus::DEPLOYMENT_P2MR`, with the height parameter
++`consensus.P2MRHeight`:
++
++| Chain | Activation height |
++| --- | --- |
++| mainnet | never (`std::numeric_limits<int>::max()`) |
++| testnet3 | never |
++| testnet4 | never |
++| signet, default challenge | never |
++| signet, custom challenge (`-signetchallenge`) | 1 |
++| regtest | 0, overridable with `-testactivationheight=p2mr@N` |
++
++`GetBlockScriptFlags` sets `SCRIPT_VERIFY_P2MR` from the activation height onwards, so block
++validation only enforces these rules on chains where the deployment is enabled. When the deployment
++is enabled, the node logs `P2MR consensus rules active from height N` at startup, and
++`getdeploymentinfo` reports a `p2mr` buried deployment.
++
++`SCRIPT_VERIFY_P2MR` is part of `STANDARD_SCRIPT_VERIFY_FLAGS` but not of
++`MANDATORY_SCRIPT_VERIFY_FLAGS`. The mempool therefore applies these rules on every chain, including
++the ones where the deployment never activates: a P2MR spend that breaks them is rejected as
++`mempool-script-verify-flag-failed (<script error>)` with result `TX_NOT_STANDARD`, and a block
++containing it is rejected as `block-script-verify-flag-failed (<script error>)` once the deployment
++is active. Script check failures never disconnect or ban a peer.
++
++Relay policy for P2MR spends matches Taproot script path spends: witness stack items are limited to
++`MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE` (80 bytes) for leaf version `0xc0`, and annexes are
++non-standard.
++
++## Naming
++
++| Item | Name |
++| --- | --- |
++| Script verification flag | `SCRIPT_VERIFY_P2MR`, test name `P2MR` |
++| Deployment | `Consensus::DEPLOYMENT_P2MR`, height `P2MRHeight`, argument name `p2mr` |
++| Output type | `TxoutType::WITNESS_V2_P2MR`, RPC string `witness_v2_p2mr` |
++| Destination type | `WitnessV2P2MR` |
++| Script predicate | `CScript::IsPayToMerkleRoot()` |
++| Constants | `WITNESS_V2_P2MR_SIZE`, `P2MR_CONTROL_BASE_SIZE`, `P2MR_CONTROL_NODE_SIZE`, `P2MR_CONTROL_MAX_NODE_COUNT`, `P2MR_CONTROL_MAX_SIZE` |
++| New script error | `SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY` |
++
++All other failures reuse existing script errors: `SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY`,
++`SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE`, `SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH` and
++`SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION`.
++
++## Limits of this implementation
++
++- BIP 360 is a draft. This build follows one specific draft revision and is not compatible with
++  other revisions or with other implementations that pin a different one.
++- No post-quantum signature algorithm is implemented. A P2MR leaf script can only use the opcodes
++  that BIP 342 already defines.
++- There is no wallet support: no descriptor, no address generation, no signing and no coin
++  selection. `IsMine` never matches a P2MR output.
++- P2MR is disabled on mainnet, testnet3, testnet4 and the public signet, and there is no mechanism
++  in this build to enable it there.
+diff --git a/src/addresstype.cpp b/src/addresstype.cpp
+index 410879b..065ce74 100644
+--- a/src/addresstype.cpp
++++ b/src/addresstype.cpp
+@@ -87,6 +87,12 @@ bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet)
+         addressRet = tap;
+         return true;
+     }
++    case TxoutType::WITNESS_V2_P2MR: {
++        WitnessV2P2MR merkle_root;
++        std::copy(vSolutions[0].begin(), vSolutions[0].end(), merkle_root.begin());
++        addressRet = merkle_root;
++        return true;
++    }
+     case TxoutType::ANCHOR: {
+         addressRet = PayToAnchor();
+         return true;
+@@ -143,6 +149,11 @@ public:
+         return CScript() << OP_1 << ToByteVector(tap);
+     }
+ 
++    CScript operator()(const WitnessV2P2MR& merkle_root) const
++    {
++        return CScript() << OP_2 << ToByteVector(merkle_root);
++    }
++
+     CScript operator()(const WitnessUnknown& id) const
+     {
+         return CScript() << CScript::EncodeOP_N(id.GetWitnessVersion()) << id.GetWitnessProgram();
+@@ -159,6 +170,7 @@ public:
+     bool operator()(const WitnessV0KeyHash& dest) const { return true; }
+     bool operator()(const WitnessV0ScriptHash& dest) const { return true; }
+     bool operator()(const WitnessV1Taproot& dest) const { return true; }
++    bool operator()(const WitnessV2P2MR& dest) const { return true; }
+     bool operator()(const WitnessUnknown& dest) const { return true; }
+ };
+ } // namespace
+diff --git a/src/addresstype.h b/src/addresstype.h
+index 862049d..e43d6fe 100644
+--- a/src/addresstype.h
++++ b/src/addresstype.h
+@@ -91,6 +91,13 @@ struct WitnessV1Taproot : public XOnlyPubKey
+     explicit WitnessV1Taproot(const XOnlyPubKey& xpk) : XOnlyPubKey(xpk) {}
+ };
+ 
++//! BIP360 pay-to-merkle-root: the 32-byte Merkle root of a script tree.
++struct WitnessV2P2MR : public BaseHash<uint256>
++{
++    WitnessV2P2MR() : BaseHash() {}
++    explicit WitnessV2P2MR(const uint256& hash) : BaseHash(hash) {}
++};
++
+ //! CTxDestination subtype to encode any future Witness version
+ struct WitnessUnknown
+ {
+@@ -136,11 +143,12 @@ struct PayToAnchor : public WitnessUnknown
+  *  * WitnessV0ScriptHash: TxoutType::WITNESS_V0_SCRIPTHASH destination (P2WSH address)
+  *  * WitnessV0KeyHash: TxoutType::WITNESS_V0_KEYHASH destination (P2WPKH address)
+  *  * WitnessV1Taproot: TxoutType::WITNESS_V1_TAPROOT destination (P2TR address)
++ *  * WitnessV2P2MR: TxoutType::WITNESS_V2_P2MR destination (P2MR address)
+  *  * PayToAnchor: TxoutType::ANCHOR destination (P2A address)
+  *  * WitnessUnknown: TxoutType::WITNESS_UNKNOWN destination (P2W??? address)
+  *  A CTxDestination is the internal data type encoded in a bitcoin address
+  */
+-using CTxDestination = std::variant<CNoDestination, PubKeyDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash, WitnessV1Taproot, PayToAnchor, WitnessUnknown>;
++using CTxDestination = std::variant<CNoDestination, PubKeyDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash, WitnessV1Taproot, WitnessV2P2MR, PayToAnchor, WitnessUnknown>;
+ 
+ /** Check whether a CTxDestination corresponds to one with an address. */
+ bool IsValidDestination(const CTxDestination& dest);
+@@ -152,7 +160,7 @@ bool IsValidDestination(const CTxDestination& dest);
+  * is assigned to addressRet.
+  * For all other scripts. addressRet is assigned as a CNoDestination containing the scriptPubKey.
+  *
+- * Returns true for standard destinations with addresses - P2PKH, P2SH, P2WPKH, P2WSH, P2TR and P2W??? scripts.
++ * Returns true for standard destinations with addresses - P2PKH, P2SH, P2WPKH, P2WSH, P2TR, P2MR and P2W??? scripts.
+  * Returns false for non-standard destinations and those without addresses - P2PK, bare multisig, null data, and nonstandard scripts.
+  */
+ bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet);
+diff --git a/src/key_io.cpp b/src/key_io.cpp
+index 3726d22..1a04334 100644
+--- a/src/key_io.cpp
++++ b/src/key_io.cpp
+@@ -65,6 +65,14 @@ public:
+         return bech32::Encode(bech32::Encoding::BECH32M, m_params.Bech32HRP(), data);
+     }
+ 
++    std::string operator()(const WitnessV2P2MR& merkle_root) const
++    {
++        std::vector<unsigned char> data = {2};
++        data.reserve(53);
++        ConvertBits<8, 5, true>([&](unsigned char c) { data.push_back(c); }, merkle_root.begin(), merkle_root.end());
++        return bech32::Encode(bech32::Encoding::BECH32M, m_params.Bech32HRP(), data);
++    }
++
+     std::string operator()(const WitnessUnknown& id) const
+     {
+         const std::vector<unsigned char>& program = id.GetWitnessProgram();
+@@ -181,6 +189,13 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
+                 return tap;
+             }
+ 
++            if (version == 2 && data.size() == WITNESS_V2_P2MR_SIZE) {
++                static_assert(WITNESS_V2_P2MR_SIZE == uint256::size());
++                WitnessV2P2MR merkle_root;
++                std::copy(data.begin(), data.end(), merkle_root.begin());
++                return merkle_root;
++            }
++
+             if (CScript::IsPayToAnchor(version, data)) {
+                 return PayToAnchor();
+             }
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 46ec238..52ca3a7 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -333,6 +333,33 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 return false;
+             }
+         }
++
++        // Check policy limits for P2MR spends, which are the same as for Taproot script path
++        // spends (see BIP 360):
++        // - MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE limit for stack item size
++        // - No annexes
++        if (witnessversion == 2 && witnessprogram.size() == WITNESS_V2_P2MR_SIZE && !p2sh) {
++            // P2MR spend (non-P2SH-wrapped, version 2, witness program size 32; see BIP 360)
++            std::span stack{tx.vin[i].scriptWitness.stack};
++            if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
++                // Annexes are nonstandard as long as no semantics are defined for them.
++                return false;
++            }
++            if (stack.size() < 2) {
++                // Fewer than 2 stack elements; this is already invalid by consensus rules
++                return false;
++            }
++            // Script path spend is the only spend type (2 or more stack elements)
++            const auto& control_block = SpanPopBack(stack);
++            SpanPopBack(stack); // Ignore script
++            if (control_block.empty()) return false; // Empty control block is invalid
++            if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
++                // Leaf version 0xc0 (aka Tapscript, see BIP 342)
++                for (const auto& item : stack) {
++                    if (item.size() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) return false;
++                }
++            }
++        }
+     }
+     return true;
+ }
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index 0bc7b32..ecf5cbf 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -128,7 +128,8 @@ static constexpr script_verify_flags STANDARD_SCRIPT_VERIFY_FLAGS{MANDATORY_SCRI
+                                                              SCRIPT_VERIFY_CONST_SCRIPTCODE |
+                                                              SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION |
+                                                              SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS |
+-                                                             SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE};
++                                                             SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE |
++                                                             SCRIPT_VERIFY_P2MR};
+ 
+ /** For convenience, standard but not mandatory verify flags. */
+ static constexpr script_verify_flags STANDARD_NOT_MANDATORY_VERIFY_FLAGS{STANDARD_SCRIPT_VERIFY_FLAGS & ~MANDATORY_SCRIPT_VERIFY_FLAGS};
+diff --git a/src/rpc/rawtransaction.cpp b/src/rpc/rawtransaction.cpp
+index 5885422..d034170 100644
+--- a/src/rpc/rawtransaction.cpp
++++ b/src/rpc/rawtransaction.cpp
+@@ -509,6 +509,7 @@ static RPCHelpMan decodescript()
+         case TxoutType::SCRIPTHASH:
+         case TxoutType::WITNESS_UNKNOWN:
+         case TxoutType::WITNESS_V1_TAPROOT:
++        case TxoutType::WITNESS_V2_P2MR:
+         case TxoutType::ANCHOR:
+             // Should not be wrapped
+             return false;
+@@ -552,6 +553,7 @@ static RPCHelpMan decodescript()
+             case TxoutType::WITNESS_V0_KEYHASH:
+             case TxoutType::WITNESS_V0_SCRIPTHASH:
+             case TxoutType::WITNESS_V1_TAPROOT:
++            case TxoutType::WITNESS_V2_P2MR:
+             case TxoutType::ANCHOR:
+                 // Should not be wrapped
+                 return false;
+diff --git a/src/rpc/util.cpp b/src/rpc/util.cpp
+index 49569c7..b50b826 100644
+--- a/src/rpc/util.cpp
++++ b/src/rpc/util.cpp
+@@ -326,6 +326,16 @@ public:
+         return obj;
+     }
+ 
++    UniValue operator()(const WitnessV2P2MR& merkle_root) const
++    {
++        UniValue obj(UniValue::VOBJ);
++        obj.pushKV("isscript", true);
++        obj.pushKV("iswitness", true);
++        obj.pushKV("witness_version", 2);
++        obj.pushKV("witness_program", HexStr(merkle_root));
++        return obj;
++    }
++
+     UniValue operator()(const PayToAnchor& anchor) const
+     {
+         UniValue obj(UniValue::VOBJ);
+diff --git a/src/script/sign.cpp b/src/script/sign.cpp
+index 9ea2157..f80216e 100644
+--- a/src/script/sign.cpp
++++ b/src/script/sign.cpp
+@@ -639,6 +639,8 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
+     case TxoutType::NONSTANDARD:
+     case TxoutType::NULL_DATA:
+     case TxoutType::WITNESS_UNKNOWN:
++    // Signing for P2MR (BIP360) outputs is not implemented.
++    case TxoutType::WITNESS_V2_P2MR:
+         return false;
+     case TxoutType::PUBKEY:
+         if (!CreateSig(creator, sigdata, provider, sig, CPubKey(vSolutions[0]), scriptPubKey, sigversion)) return false;
+diff --git a/src/script/solver.cpp b/src/script/solver.cpp
+index 783baf0..a54ed00 100644
+--- a/src/script/solver.cpp
++++ b/src/script/solver.cpp
+@@ -28,6 +28,7 @@ std::string GetTxnOutputType(TxoutType t)
+     case TxoutType::WITNESS_V0_KEYHASH: return "witness_v0_keyhash";
+     case TxoutType::WITNESS_V0_SCRIPTHASH: return "witness_v0_scripthash";
+     case TxoutType::WITNESS_V1_TAPROOT: return "witness_v1_taproot";
++    case TxoutType::WITNESS_V2_P2MR: return "witness_v2_p2mr";
+     case TxoutType::WITNESS_UNKNOWN: return "witness_unknown";
+     } // no default case, so the compiler can warn about missing cases
+     assert(false);
+@@ -166,6 +167,10 @@ TxoutType Solver(const CScript& scriptPubKey, std::vector<std::vector<unsigned c
+             vSolutionsRet.push_back(std::move(witnessprogram));
+             return TxoutType::WITNESS_V1_TAPROOT;
+         }
++        if (witnessversion == 2 && witnessprogram.size() == WITNESS_V2_P2MR_SIZE) {
++            vSolutionsRet.push_back(std::move(witnessprogram));
++            return TxoutType::WITNESS_V2_P2MR;
++        }
+         if (scriptPubKey.IsPayToAnchor()) {
+             return TxoutType::ANCHOR;
+         }
+diff --git a/src/script/solver.h b/src/script/solver.h
+index d2b7fb8..70a23bf 100644
+--- a/src/script/solver.h
++++ b/src/script/solver.h
+@@ -31,6 +31,7 @@ enum class TxoutType {
+     WITNESS_V0_SCRIPTHASH,
+     WITNESS_V0_KEYHASH,
+     WITNESS_V1_TAPROOT,
++    WITNESS_V2_P2MR, //!< BIP360 pay-to-merkle-root
+     WITNESS_UNKNOWN, //!< Only for Witness versions not already defined above
+ };
+ 
+diff --git a/src/test/fuzz/util.cpp b/src/test/fuzz/util.cpp
+index f505357..8ca9ae2 100644
+--- a/src/test/fuzz/util.cpp
++++ b/src/test/fuzz/util.cpp
+@@ -218,6 +218,9 @@ CTxDestination ConsumeTxDestination(FuzzedDataProvider& fuzzed_data_provider) no
+         [&] {
+             tx_destination = WitnessV1Taproot{XOnlyPubKey{ConsumeUInt256(fuzzed_data_provider)}};
+         },
++        [&] {
++            tx_destination = WitnessV2P2MR{ConsumeUInt256(fuzzed_data_provider)};
++        },
+         [&] {
+             tx_destination = PayToAnchor{};
+         },
+@@ -226,7 +229,9 @@ CTxDestination ConsumeTxDestination(FuzzedDataProvider& fuzzed_data_provider) no
+             if (program.size() < 2) {
+                 program = {0, 0};
+             }
+-            tx_destination = WitnessUnknown{fuzzed_data_provider.ConsumeIntegralInRange<unsigned int>(2, 16), program};
++            // Witness versions 0 to 2 have defined destination types for some program sizes, so
++            // only generate versions above them here to keep address round trips unambiguous.
++            tx_destination = WitnessUnknown{fuzzed_data_provider.ConsumeIntegralInRange<unsigned int>(3, 16), program};
+         })};
+     Assert(call_size == std::variant_size_v<CTxDestination>);
+     return tx_destination;
+diff --git a/src/test/script_standard_tests.cpp b/src/test/script_standard_tests.cpp
+index a1e0c46..c163bab 100644
+--- a/src/test/script_standard_tests.cpp
++++ b/src/test/script_standard_tests.cpp
+@@ -123,6 +123,13 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_success)
+     BOOST_CHECK_EQUAL(solutions.size(), 1U);
+     BOOST_CHECK(solutions[0] == ToByteVector(uint256::ZERO));
+ 
++    // TxoutType::WITNESS_V2_P2MR
++    s.clear();
++    s << OP_2 << ToByteVector(uint256::ZERO);
++    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_V2_P2MR);
++    BOOST_CHECK_EQUAL(solutions.size(), 1U);
++    BOOST_CHECK(solutions[0] == ToByteVector(uint256::ZERO));
++
+     // TxoutType::WITNESS_UNKNOWN
+     s.clear();
+     s << OP_16 << ToByteVector(uint256::ONE);
+@@ -211,6 +218,11 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_failure)
+     s << OP_1 << std::vector<unsigned char>(33, 0x01);
+     BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_UNKNOWN);
+ 
++    // TxoutType::WITNESS_V2_P2MR with incorrect program size (-> undefined, but still policy-valid)
++    s.clear();
++    s << OP_2 << std::vector<unsigned char>(31, 0x01);
++    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_UNKNOWN);
++
+     // TxoutType::ANCHOR but wrong witness version
+     s.clear();
+     s << OP_2 << ANCHOR_BYTES;
+@@ -298,11 +310,19 @@ BOOST_AUTO_TEST_CASE(script_standard_ExtractDestination)
+     WitnessUnknown unk_v1{1, ToByteVector(pubkey)};
+     BOOST_CHECK(std::get<WitnessUnknown>(address) == unk_v1);
+     s.clear();
+-    // -> segwit versions 2+ are not specified yet
++    // -> segwit versions 3+ are not specified yet
++    s << OP_3 << ToByteVector(xpk);
++    BOOST_CHECK(ExtractDestination(s, address));
++    WitnessUnknown unk_v3{3, ToByteVector(xpk)};
++    BOOST_CHECK(std::get<WitnessUnknown>(address) == unk_v3);
++
++    // TxoutType::WITNESS_V2_P2MR
++    s.clear();
+     s << OP_2 << ToByteVector(xpk);
+     BOOST_CHECK(ExtractDestination(s, address));
+-    WitnessUnknown unk_v2{2, ToByteVector(xpk)};
+-    BOOST_CHECK(std::get<WitnessUnknown>(address) == unk_v2);
++    WitnessV2P2MR merkle_root;
++    std::copy(xpk.begin(), xpk.end(), merkle_root.begin());
++    BOOST_CHECK(std::get<WitnessV2P2MR>(address) == merkle_root);
+ }
+ 
+ BOOST_AUTO_TEST_CASE(script_standard_GetScriptFor_)
+diff --git a/src/test/transaction_tests.cpp b/src/test/transaction_tests.cpp
+index 916f565..c8c6e19 100644
+--- a/src/test/transaction_tests.cpp
++++ b/src/test/transaction_tests.cpp
+@@ -1178,8 +1178,8 @@ BOOST_AUTO_TEST_CASE(spends_witness_prog)
+     std::vector<std::vector<uint8_t>> sol_dummy;
+ 
+     // CNoDestination, PubKeyDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash,
+-    // WitnessV1Taproot, PayToAnchor, WitnessUnknown.
+-    static_assert(std::variant_size_v<CTxDestination> == 9);
++    // WitnessV1Taproot, WitnessV2P2MR, PayToAnchor, WitnessUnknown.
++    static_assert(std::variant_size_v<CTxDestination> == 10);
+ 
+     // Go through all defined output types and sanity check SpendsNonAnchorWitnessProg.
+ 
+@@ -1297,11 +1297,12 @@ BOOST_AUTO_TEST_CASE(spends_witness_prog)
+     tx_spend.vin[0].scriptSig.clear();
+     BOOST_CHECK(!::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
+ 
+-    // Various undefined version >1 32-byte witness programs.
++    // Various version >1 32-byte witness programs. Version 2 is P2MR (BIP360), the rest are undefined.
+     const auto program{ToByteVector(XOnlyPubKey{pubkey})};
+     for (int i{2}; i <= 16; ++i) {
++        const TxoutType expected_type{i == 2 ? TxoutType::WITNESS_V2_P2MR : TxoutType::WITNESS_UNKNOWN};
+         tx_create.vout[0].scriptPubKey = GetScriptForDestination(WitnessUnknown{i, program});
+-        BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), TxoutType::WITNESS_UNKNOWN);
++        BOOST_CHECK_EQUAL(Solver(tx_create.vout[0].scriptPubKey, sol_dummy), expected_type);
+         tx_spend.vin[0].prevout.hash = tx_create.GetHash();
+         AddCoins(coins, CTransaction{tx_create}, 0, false);
+         BOOST_CHECK(::SpendsNonAnchorWitnessProg(CTransaction{tx_spend}, coins));
+diff --git a/src/wallet/rpc/addresses.cpp b/src/wallet/rpc/addresses.cpp
+index a04e090..6ee1578 100644
+--- a/src/wallet/rpc/addresses.cpp
++++ b/src/wallet/rpc/addresses.cpp
+@@ -349,6 +349,7 @@ public:
+     }
+ 
+     UniValue operator()(const WitnessV1Taproot& id) const { return UniValue(UniValue::VOBJ); }
++    UniValue operator()(const WitnessV2P2MR& id) const { return UniValue(UniValue::VOBJ); }
+     UniValue operator()(const PayToAnchor& id) const { return UniValue(UniValue::VOBJ); }
+     UniValue operator()(const WitnessUnknown& id) const { return UniValue(UniValue::VOBJ); }
+ };
+diff --git a/src/wallet/scriptpubkeyman.cpp b/src/wallet/scriptpubkeyman.cpp
+index 8a1c0a4..ccb7e72 100644
+--- a/src/wallet/scriptpubkeyman.cpp
++++ b/src/wallet/scriptpubkeyman.cpp
+@@ -94,6 +94,7 @@ IsMineResult LegacyWalletIsMineInnerDONOTUSE(const LegacyDataSPKM& keystore, con
+     case TxoutType::NULL_DATA:
+     case TxoutType::WITNESS_UNKNOWN:
+     case TxoutType::WITNESS_V1_TAPROOT:
++    case TxoutType::WITNESS_V2_P2MR:
+     case TxoutType::ANCHOR:
+         break;
+     case TxoutType::PUBKEY:
+-- 
+2.49.0.windows.1
+

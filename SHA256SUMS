@@ -1,0 +1,10 @@
+97bcc62c1efed1099a9e957c12f10eb3cfab513b08d402eb507757915152afbc *0001-script-add-P2MR-BIP-360-witness-v2-program-validatio.patch
+cf59eab3184cf6bcf889079b81d0fd0d9f4c8ba29ef24a0891cb0abf9aefb02b *0002-policy-add-P2MR-BIP-360-output-type-address-and-rela.patch
+79103e5ee237773ddd7a0bee732659641b1fb31eae0d48a8c4549e1eb57d3dc9 *0003-test-add-BIP-360-P2MR-script_tests-vectors-and-their.patch
+5cc745cf396e935a88122d4418d661c030df633a40f8c4d21ab3a1a29f597d56 *0004-test-add-feature_p2mr.py-covering-BIP-360-activation.patch
+525d1410ea16cfffb2236b546571129359dc1a8b8e0fd1ba0031a87fa5491403 *0005-test-align-P2MR-vector-error-names-with-the-implemen.patch
+942e8b20ddbecc376e22593a023727d7167244cff7f1037f8a92d103fa250e2b *0006-test-m-128-P2MR-control-block-is-standard-control-bl.patch
+9993400919121fc62ba0e3cb952f843801a038fc9e1907f0185131cf32250f3a *0007-test-block-level-P2MR-rejections-are-reported-as-blo.patch
+2b8484acf7561660b356edcf2c3f037be6a13b15cc440808c97de938caffb0d0 *0008-p2mr-policy-checks-control-block-shape-signet-activa.patch
+419cc40d8e8ff466a2a583676bb30741b0cf29f30f4dbfe7852c7efdaad1466f *0009-policy-SCRIPT_VERIFY_P2MR-is-a-consensus-mandatory-f.patch
+538312e9a70ff748b559d1c582f8931427a6a041de79819f0e6747e117f5e12c *0010-test-p2p_segwit-uses-33-byte-v2-programs-as-future-v.patch

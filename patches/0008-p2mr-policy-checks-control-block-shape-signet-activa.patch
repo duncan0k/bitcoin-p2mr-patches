@@ -1,0 +1,141 @@
+From d72041a7eb606636d1709deea8174fbefd7a6e6c Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 20:42:37 -0600
+Subject: [PATCH 08/10] p2mr: policy checks control block shape; signet
+ activation test; m=0 future-leaf vector (Codex review follow-ups)
+
+---
+ src/policy/policy.cpp                   |  5 +++
+ src/test/data/script_tests.json         | 12 +++++++
+ test/functional/feature_p2mr_signet.py  | 45 +++++++++++++++++++++++++
+ test/functional/test_runner.py          |  1 +
+ test/util/generate_p2mr_script_tests.py | 10 ++++++
+ 5 files changed, 73 insertions(+)
+ create mode 100755 test/functional/feature_p2mr_signet.py
+
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 52ca3a7..a5cd8a0 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -353,6 +353,11 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+             const auto& control_block = SpanPopBack(stack);
+             SpanPopBack(stack); // Ignore script
+             if (control_block.empty()) return false; // Empty control block is invalid
++            if (control_block.size() > P2MR_CONTROL_MAX_SIZE ||
++                (control_block.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE != 0) {
++                // Control block must be 1 + 32m bytes with m <= 128; already invalid by consensus rules
++                return false;
++            }
+             if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
+                 // Leaf version 0xc0 (aka Tapscript, see BIP 342)
+                 for (const auto& item : stack) {
+diff --git a/src/test/data/script_tests.json b/src/test/data/script_tests.json
+index bd6d856..aec798e 100644
+--- a/src/test/data/script_tests.json
++++ b/src/test/data/script_tests.json
+@@ -2778,6 +2778,18 @@
+     "OK",
+     "P2MR: m=0 succeeds without executing the leaf (leaf is OP_RETURN)"
+ ],
++[
++    [
++        "6a",
++        "fb",
++        0.00000001
++    ],
++    "",
++    "0x52 0x20 0x1ab5229b48fb31f4aebc56e2dee567bf7ba352c6c3615b44a029752a401ad5af",
++    "P2SH,WITNESS,TAPROOT,P2MR,DISCOURAGE_UPGRADABLE_TAPROOT_VERSION",
++    "OK",
++    "P2MR: m=0 with leaf version 0xfa succeeds before the leaf version is considered"
++],
+ [
+     [
+         "6a",
+diff --git a/test/functional/feature_p2mr_signet.py b/test/functional/feature_p2mr_signet.py
+new file mode 100755
+index 0000000..f1ce10a
+--- /dev/null
++++ b/test/functional/feature_p2mr_signet.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the P2MR (BIP 360) activation parameters on signet.
++
++P2MR is a buried deployment that only activates on custom signets, i.e. when
++the operator supplies their own -signetchallenge. The default (public) signet
++keeps it disabled forever.
++"""
++
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++
++NEVER = 2147483647  # std::numeric_limits<int>::max()
++
++
++class P2MRSignetTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        # node0: custom signet (OP_TRUE challenge); node1: default signet parameters
++        self.extra_args = [["-signetchallenge=51"], []]
++
++    def setup_network(self):
++        # The two nodes are on different signets; never connect them.
++        self.setup_nodes()
++
++    def run_test(self):
++        custom = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr"]
++        assert_equal(custom["type"], "buried")
++        assert_equal(custom["height"], 1)
++        assert_equal(custom["active"], False)  # still at the genesis block
++        self.log.info("custom signet: p2mr activates at height 1")
++
++        default = self.nodes[1].getdeploymentinfo()["deployments"]["p2mr"]
++        assert_equal(default["type"], "buried")
++        assert_equal(default["height"], NEVER)
++        assert_equal(default["active"], False)
++        self.log.info("default signet: p2mr never activates")
++
++
++if __name__ == "__main__":
++    P2MRSignetTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 15fbacf..b391ac9 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -286,6 +286,7 @@ BASE_SCRIPTS = [
+     'p2p_initial_headers_sync.py',
+     'feature_nulldummy.py',
+     'feature_p2mr.py',
++    'feature_p2mr_signet.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+     'mempool_expiry.py',
+diff --git a/test/util/generate_p2mr_script_tests.py b/test/util/generate_p2mr_script_tests.py
+index 6ec6696..ac729a6 100755
+--- a/test/util/generate_p2mr_script_tests.py
++++ b/test/util/generate_p2mr_script_tests.py
+@@ -233,6 +233,16 @@ def build_rows():
+                     FLAGS_P2MR, "OK",
+                     "P2MR: m=0 succeeds without executing the leaf (leaf is OP_RETURN)"))
+ 
++    # m == 0 with a future leaf version: the depth-zero short circuit comes before
++    # the leaf version dispatch, so DISCOURAGE_UPGRADABLE_TAPROOT_VERSION does not
++    # apply either.
++    lone_future = p2mr_construct([("ret", LEAF_RETURN, LEAF_VERSION_FUTURE)])
++    leaf = lone_future.leaves["ret"]
++    assert leaf.control_block == bytes([LEAF_VERSION_FUTURE | 1])
++    rows.append(row([LEAF_RETURN, leaf.control_block], lone_future.scriptPubKey,
++                    FLAGS_P2MR + ",DISCOURAGE_UPGRADABLE_TAPROOT_VERSION", "OK",
++                    "P2MR: m=0 with leaf version 0xfa succeeds before the leaf version is considered"))
++
+     # The same OP_RETURN leaf one level deeper is executed, and fails.
+     leaf = TREE_PAIR.leaves["ret"]
+     rows.append(row([LEAF_RETURN, leaf.control_block], TREE_PAIR.scriptPubKey,
+-- 
+2.49.0.windows.1
+

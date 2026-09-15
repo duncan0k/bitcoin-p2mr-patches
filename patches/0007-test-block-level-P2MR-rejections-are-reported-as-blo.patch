@@ -1,0 +1,29 @@
+From 7fce9778b34857dffe634d1fbcca5582a59bddcf Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 20:20:57 -0600
+Subject: [PATCH 07/10] test: block-level P2MR rejections are reported as
+ block-script-verify-flag-failed
+
+---
+ test/functional/feature_p2mr.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/test/functional/feature_p2mr.py b/test/functional/feature_p2mr.py
+index ff4ca96..2b016a6 100755
+--- a/test/functional/feature_p2mr.py
++++ b/test/functional/feature_p2mr.py
+@@ -254,8 +254,9 @@ class P2MRTest(BitcoinTestFramework):
+         block = self.build_block([tx])
+         result = node.submitblock(block.serialize().hex())
+         assert result is not None, f"{note}: block was accepted"
+-        # Every P2MR consensus rule reports through the script interpreter.
+-        assert result.startswith("mandatory-script-verify-flag-failed"), \
++        # Every P2MR consensus rule reports through the script interpreter
++        # (Core v31 labels these block-script-verify-flag-failed).
++        assert result.startswith("block-script-verify-flag-failed"), \
+             f"{note}: unexpected reject reason {result}"
+         assert_equal(node.getbestblockhash(), tip_before)
+         self.log.info(f"  block rejects: {note} ({result})")
+-- 
+2.49.0.windows.1
+

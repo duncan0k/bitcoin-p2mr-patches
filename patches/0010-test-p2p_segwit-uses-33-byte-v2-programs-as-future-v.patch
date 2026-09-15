@@ -1,0 +1,102 @@
+From 2b304da6c307fcc6740fa515f723edca1b53befe Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 21:01:23 -0600
+Subject: [PATCH 10/10] test: p2p_segwit uses 33-byte v2 programs as future
+ versions (32-byte v2 is P2MR); signet test expects activation for the next
+ block; doc wording
+
+---
+ doc/p2mr.md                            | 15 +++++++++------
+ test/functional/feature_p2mr_signet.py | 14 +++++++-------
+ test/functional/p2p_segwit.py          |  8 ++++----
+ 3 files changed, 20 insertions(+), 17 deletions(-)
+
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index 85324d7..0158615 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -77,12 +77,15 @@ validation only enforces these rules on chains where the deployment is enabled.
+ is enabled, the node logs `P2MR consensus rules active from height N` at startup, and
+ `getdeploymentinfo` reports a `p2mr` buried deployment.
+ 
+-`SCRIPT_VERIFY_P2MR` is part of `STANDARD_SCRIPT_VERIFY_FLAGS` but not of
+-`MANDATORY_SCRIPT_VERIFY_FLAGS`. The mempool therefore applies these rules on every chain, including
+-the ones where the deployment never activates: a P2MR spend that breaks them is rejected as
+-`mempool-script-verify-flag-failed (<script error>)` with result `TX_NOT_STANDARD`, and a block
+-containing it is rejected as `block-script-verify-flag-failed (<script error>)` once the deployment
+-is active. Script check failures never disconnect or ban a peer.
++`SCRIPT_VERIFY_P2MR` is part of `MANDATORY_SCRIPT_VERIFY_FLAGS` (and therefore of
++`STANDARD_SCRIPT_VERIFY_FLAGS`), like `SCRIPT_VERIFY_TAPROOT`. The mempool applies these rules on
++every chain, including the ones where the deployment never activates: a P2MR spend that breaks them
++is rejected as `mempool-script-verify-flag-failed (<script error>)` with result `TX_NOT_STANDARD`.
++Once the deployment is active, a block containing such a spend is rejected as
++`block-script-verify-flag-failed (<script error>)` with result `TX_CONSENSUS`; listing the flag as
++mandatory is what keeps that classification correct (block validation labels a failure as a
++mempool-only failure whenever any non-mandatory flag is set). Script check failures never
++disconnect or ban a peer.
+ 
+ Relay policy for P2MR spends matches Taproot script path spends: witness stack items are limited to
+ `MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE` (80 bytes) for leaf version `0xc0`, and annexes are
+diff --git a/test/functional/feature_p2mr_signet.py b/test/functional/feature_p2mr_signet.py
+index f1ce10a..b5c4ba7 100755
+--- a/test/functional/feature_p2mr_signet.py
++++ b/test/functional/feature_p2mr_signet.py
+@@ -12,8 +12,6 @@ keeps it disabled forever.
+ from test_framework.test_framework import BitcoinTestFramework
+ from test_framework.util import assert_equal
+ 
+-NEVER = 2147483647  # std::numeric_limits<int>::max()
+-
+ 
+ class P2MRSignetTest(BitcoinTestFramework):
+     def set_test_params(self):
+@@ -31,13 +29,15 @@ class P2MRSignetTest(BitcoinTestFramework):
+         custom = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr"]
+         assert_equal(custom["type"], "buried")
+         assert_equal(custom["height"], 1)
+-        assert_equal(custom["active"], False)  # still at the genesis block
++        # "active" describes the block after the queried tip (genesis here), i.e. height 1
++        assert_equal(custom["active"], True)
+         self.log.info("custom signet: p2mr activates at height 1")
+ 
+-        default = self.nodes[1].getdeploymentinfo()["deployments"]["p2mr"]
+-        assert_equal(default["type"], "buried")
+-        assert_equal(default["height"], NEVER)
+-        assert_equal(default["active"], False)
++        # A buried deployment whose height is INT_MAX is reported as absent
++        # (DeploymentEnabled is false), which is how "never activates" shows up.
++        deployments = self.nodes[1].getdeploymentinfo()["deployments"]
++        assert "p2mr" not in deployments, deployments
++        assert "segwit" in deployments  # sanity: other buried deployments are listed
+         self.log.info("default signet: p2mr never activates")
+ 
+ 
+diff --git a/test/functional/p2p_segwit.py b/test/functional/p2p_segwit.py
+index 17f8085..db08cb5 100755
+--- a/test/functional/p2p_segwit.py
++++ b/test/functional/p2p_segwit.py
+@@ -1345,8 +1345,8 @@ class SegWitTest(BitcoinTestFramework):
+         assert_equal(len(self.nodes[1].getrawmempool()), 0)
+         for version in list(range(OP_1, OP_16 + 1)) + [OP_0]:
+             # First try to spend to a future version segwit script_pubkey.
+-            if version == OP_1:
+-                # Don't use 32-byte v1 witness (used by Taproot; see BIP 341)
++            if version in (OP_1, OP_2):
++                # Don't use 32-byte v1/v2 witness programs (Taproot, BIP 341; P2MR, BIP 360)
+                 script_pubkey = CScript([CScriptOp(version), witness_hash + b'\x00'])
+             else:
+                 script_pubkey = CScript([CScriptOp(version), witness_hash])
+@@ -1361,8 +1361,8 @@ class SegWitTest(BitcoinTestFramework):
+         assert len(self.nodes[0].getrawmempool()) == 0
+ 
+         # Finally, verify that version 0 -> version 2 transactions
+-        # are standard
+-        script_pubkey = CScript([CScriptOp(OP_2), witness_hash])
++        # are standard (33-byte program: 32-byte v2 programs are P2MR, see BIP 360)
++        script_pubkey = CScript([CScriptOp(OP_2), witness_hash + b'\x00'])
+         tx2 = CTransaction()
+         tx2.vin = [CTxIn(COutPoint(tx.txid_int, 0), b"")]
+         tx2.vout = [CTxOut(tx.vout[0].nValue - 1000, script_pubkey)]
+-- 
+2.49.0.windows.1
+

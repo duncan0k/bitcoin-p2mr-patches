@@ -1,0 +1,118 @@
+From f1a1427c4739f26147965c52cc6f6c4e96cb1737 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 20:12:57 -0600
+Subject: [PATCH 05/10] test: align P2MR vector error names with the
+ implementation; confirm spends via block hash
+
+---
+ src/test/data/script_tests.json         |  8 ++++----
+ test/functional/feature_p2mr.py         | 12 ++++++------
+ test/util/generate_p2mr_script_tests.py |  6 +++---
+ 3 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/src/test/data/script_tests.json b/src/test/data/script_tests.json
+index 1d1090a..bd6d856 100644
+--- a/src/test/data/script_tests.json
++++ b/src/test/data/script_tests.json
+@@ -2939,7 +2939,7 @@
+     "",
+     "0x52 0x20 0x1706209750f7592f94a93af236b4db536c5f73d838177277985b88e943b0e518",
+     "P2SH,WITNESS,TAPROOT,P2MR",
+-    "TAPROOT_WRONG_CONTROL_SIZE",
++    "P2MR_WRONG_CONTROL_PARITY",
+     "P2MR: c[0]=0xc0 has the low bit cleared"
+ ],
+ [
+@@ -2951,7 +2951,7 @@
+     "",
+     "0x52 0x20 0x42cb48f7416b397d6fec879737dbd429fc324b038f642f2667ed08da63e49bf4",
+     "P2SH,WITNESS,TAPROOT,P2MR",
+-    "TAPROOT_WRONG_CONTROL_SIZE",
++    "P2MR_WRONG_CONTROL_PARITY",
+     "P2MR: c[0]=0xfa has the low bit cleared"
+ ],
+ [
+@@ -2984,7 +2984,7 @@
+     "",
+     "0x52 0x20 0x1706209750f7592f94a93af236b4db536c5f73d838177277985b88e943b0e518",
+     "P2SH,WITNESS,TAPROOT,P2MR",
+-    "WITNESS_PROGRAM_MISMATCH",
++    "WITNESS_PROGRAM_WITNESS_EMPTY",
+     "P2MR: witness stack of one element has no script and control block"
+ ],
+ [
+@@ -2996,7 +2996,7 @@
+     "",
+     "0x52 0x20 0x1706209750f7592f94a93af236b4db536c5f73d838177277985b88e943b0e518",
+     "P2SH,WITNESS,TAPROOT,P2MR",
+-    "WITNESS_PROGRAM_MISMATCH",
++    "WITNESS_PROGRAM_WITNESS_EMPTY",
+     "P2MR: two elements with 0x50 last leaves nothing to spend with"
+ ],
+ [
+diff --git a/test/functional/feature_p2mr.py b/test/functional/feature_p2mr.py
+index fb7e089..79253b4 100755
+--- a/test/functional/feature_p2mr.py
++++ b/test/functional/feature_p2mr.py
+@@ -381,8 +381,8 @@ class P2MRTest(BitcoinTestFramework):
+         utxo = self.fund(info.scriptPubKey)
+         tx = self.signed_spend(utxo, info, "csig")
+         self.assert_mempool_accepts(tx, "m=1 script path spend")
+-        self.generate(self.wallet, 1)
+-        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in node.getblock(blockhash)["tx"], "spend not confirmed"
+ 
+         # m == 2, with the leaf actually executed.
+         deep = p2mr_construct([("csig", LEAF_CSIG),
+@@ -392,8 +392,8 @@ class P2MRTest(BitcoinTestFramework):
+         utxo = self.fund(deep.scriptPubKey)
+         tx = self.build_spend([utxo], [[bytes(LEAF_TRUE), leaf.control_block]])
+         self.assert_mempool_accepts(tx, "m=2 script path spend")
+-        self.generate(self.wallet, 1)
+-        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in node.getblock(blockhash)["tx"], "spend not confirmed"
+ 
+         # m == 128, the deepest control block the rules allow.
+         path = [bytes([0x11, i]) + bytes(P2MR_CONTROL_NODE_SIZE - 2)
+@@ -518,8 +518,8 @@ class P2MRTest(BitcoinTestFramework):
+         tx = self.build_spend(utxos, [[sig_tap, bytes(LEAF_CSIG), tap_control],
+                                       [sig_p2mr, bytes(LEAF_CSIG), p2mr_control]])
+         self.assert_mempool_accepts(tx, "P2TR and P2MR in one transaction")
+-        self.generate(self.wallet, 1)
+-        assert_equal(node.getrawtransaction(tx.txid_hex, True)["confirmations"], 1)
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in node.getblock(blockhash)["tx"], "spend not confirmed"
+ 
+         # The two inputs are not signed over the same message: a signature made
+         # for input 0 must not satisfy input 1.
+diff --git a/test/util/generate_p2mr_script_tests.py b/test/util/generate_p2mr_script_tests.py
+index 8f88b1a..6ec6696 100755
+--- a/test/util/generate_p2mr_script_tests.py
++++ b/test/util/generate_p2mr_script_tests.py
+@@ -86,7 +86,7 @@ from test_framework.script import (  # noqa: E402
+ )
+ 
+ # Error name for "the low bit of c[0] is not set". See the module docstring.
+-CONTROL_PARITY_ERROR = "TAPROOT_WRONG_CONTROL_SIZE"
++CONTROL_PARITY_ERROR = "P2MR_WRONG_CONTROL_PARITY"
+ 
+ # Flag string for rows validated with the P2MR consensus rules active. TAPROOT
+ # is listed because a real node sets both, not because P2MR depends on it.
+@@ -341,10 +341,10 @@ def build_rows():
+                     "WITNESS_PROGRAM_WITNESS_EMPTY",
+                     "P2MR: empty witness stack"))
+     rows.append(row([leaf.control_block], TREE_PAIR.scriptPubKey, FLAGS_P2MR,
+-                    "WITNESS_PROGRAM_MISMATCH",
++                    "WITNESS_PROGRAM_WITNESS_EMPTY",
+                     "P2MR: witness stack of one element has no script and control block"))
+     rows.append(row([LEAF_CSIG, bytes([ANNEX_TAG])], TREE_PAIR.scriptPubKey, FLAGS_P2MR,
+-                    "WITNESS_PROGRAM_MISMATCH",
++                    "WITNESS_PROGRAM_WITNESS_EMPTY",
+                     "P2MR: two elements with 0x50 last leaves nothing to spend with"))
+ 
+     # --- Annex ---
+-- 
+2.49.0.windows.1
+

@@ -1,0 +1,496 @@
+From 5b50be3e6dc85eb920610d6f1db6c14809f7180c Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 14 Sep 2026 19:29:55 -0600
+Subject: [PATCH 01/10] script: add P2MR (BIP 360) witness v2 program
+ validation
+
+Implement the Pay-to-Merkle-Root spending rules of BIP 360 draft v0.12.1
+(bips commit 620871a7a442e276a058b487cd8743775fb499a4) behind a new
+SCRIPT_VERIFY_P2MR flag.
+
+A P2MR output is a native SegWit output with witness version 2 and a
+32-byte witness program holding the Merkle root of the script tree. There
+is no internal public key and no taproot tweak, so every spend takes the
+BIP 341 script path directly: the control block is 1 + 32*m bytes instead
+of 33 + 32*m, the folded Merkle root is compared to the witness program as
+is, and a leaf at depth zero succeeds without executing the script. The
+last bit of the control byte is unused by P2MR and must be 1 for every
+leaf version, which the new SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY reports.
+Leaf version 0xc0 is executed under the BIP 342 rules and reuses the BIP
+342 signature message unchanged, so PrecomputedTransactionData::Init
+precomputes the BIP 341 data for P2MR spends too.
+
+Without SCRIPT_VERIFY_P2MR the branch is skipped entirely, which keeps the
+existing unknown witness program behaviour, including
+SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM.
+
+Activation uses a new buried deployment, DEPLOYMENT_P2MR, with the height
+parameter P2MRHeight. It never activates on mainnet, testnet3, testnet4 or
+the default signet; it activates at height 1 on a custom signet and at
+height 0 on regtest, where -testactivationheight=p2mr@N overrides it.
+GetBlockScriptFlags sets the flag from that height onwards.
+
+Since witness v2 programs of 32 bytes are no longer unconstrained on
+regtest, feature_taproot.py no longer asserts that they are spendable with
+an arbitrary witness, and rpc_blockchain.py expects the extra script flag
+and deployment.
+---
+ src/chainparamsbase.cpp            |  2 +-
+ src/consensus/params.h             |  8 +++-
+ src/deploymentinfo.cpp             |  4 ++
+ src/init.cpp                       |  5 +++
+ src/kernel/chainparams.cpp         | 11 +++++
+ src/rpc/blockchain.cpp             |  1 +
+ src/script/interpreter.cpp         | 68 +++++++++++++++++++++++++++++-
+ src/script/interpreter.h           | 20 +++++++++
+ src/script/script.cpp              |  8 ++++
+ src/script/script.h                |  5 +++
+ src/script/script_error.cpp        |  2 +
+ src/script/script_error.h          |  3 ++
+ src/test/script_tests.cpp          |  3 ++
+ src/validation.cpp                 |  5 +++
+ test/functional/feature_taproot.py |  5 +++
+ test/functional/rpc_blockchain.py  |  3 +-
+ 16 files changed, 148 insertions(+), 5 deletions(-)
+
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index d816d1a..2146d1a 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 93ee071..c03a431 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -28,8 +28,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_DERSIG,
+     DEPLOYMENT_CSV,
+     DEPLOYMENT_SEGWIT,
++    DEPLOYMENT_P2MR,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_SEGWIT; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -104,6 +105,9 @@ struct Params {
+      * Note that segwit v0 script rules are enforced on all blocks except the
+      * BIP 16 exception blocks. */
+     int SegwitHeight;
++    /** Block height at which P2MR (BIP360) becomes active. Set to
++     * std::numeric_limits<int>::max() on chains where it must never activate. */
++    int P2MRHeight;
+     /** Don't warn about unknown BIP 9 activations below this height.
+      * This prevents us from warning about the CSV and segwit activations. */
+     int MinBIP9WarningHeight;
+@@ -149,6 +153,8 @@ struct Params {
+             return CSVHeight;
+         case DEPLOYMENT_SEGWIT:
+             return SegwitHeight;
++        case DEPLOYMENT_P2MR:
++            return P2MRHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index e1447d4..9567da3 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -33,6 +33,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "csv";
+     case Consensus::DEPLOYMENT_SEGWIT:
+         return "segwit";
++    case Consensus::DEPLOYMENT_P2MR:
++        return "p2mr";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -49,6 +51,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_CLTV;
+     } else if (name == "csv") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_CSV;
++    } else if (name == "p2mr") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index fb4b8fa..f0d9aa8 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -955,6 +955,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+         LogInfo("Warning: Support for testnet3 is deprecated and will be removed in an upcoming release. Consider switching to testnet4.\n");
+     }
+ 
++    // P2MR (BIP360) is an experimental deployment that is disabled on all public chains.
++    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR)) {
++        LogInfo("P2MR consensus rules active from height %d", chainparams.GetConsensus().P2MRHeight);
++    }
++
+     // Warn if unrecognized section name are present in the config file.
+     bilingual_str warnings;
+     for (const auto& section : args.GetUnrecognizedSections()) {
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 64809a7..8705aa4 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -27,6 +27,7 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <iterator>
++#include <limits>
+ #include <map>
+ #include <span>
+ #include <utility>
+@@ -92,6 +93,7 @@ public:
+         consensus.BIP66Height = 363725; // 00000000000000000379eaa19dce8c9b722d46ae6a57c2f1a988119488b50931
+         consensus.CSVHeight = 419328; // 000000000000000004a1b34462cb8aeebd5799177f7a29cf28f2d1961716b5b5
+         consensus.SegwitHeight = 481824; // 0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893
++        consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on mainnet
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -223,6 +225,7 @@ public:
+         consensus.BIP66Height = 330776; // 000000002104c8c45e99a8853285a3b592602a3ccde2b832481da85e9e4ba182
+         consensus.CSVHeight = 770112; // 00000000025e930139bac5c6c31a403776da130831ab85be56578f3fa75369bb
+         consensus.SegwitHeight = 834624; // 00000000002b980fcd729daaa248fd9316a5200e9b367f4ff2c42453e84201ca
++        consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet3
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -330,6 +333,7 @@ public:
+         consensus.BIP66Height = 1;
+         consensus.CSVHeight = 1;
+         consensus.SegwitHeight = 1;
++        consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet4
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -482,6 +486,9 @@ public:
+         consensus.BIP66Height = 1;
+         consensus.CSVHeight = 1;
+         consensus.SegwitHeight = 1;
++        // P2MR (BIP360) is only activated on custom signets, i.e. when the operator supplies their
++        // own challenge. The default (public) signet keeps it disabled.
++        consensus.P2MRHeight = options.challenge ? 1 : std::numeric_limits<int>::max();
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         consensus.fPowAllowMinDifficultyBlocks = false;
+@@ -571,6 +578,7 @@ public:
+         consensus.BIP66Height = 1;  // Always active unless overridden
+         consensus.CSVHeight = 1;    // Always active unless overridden
+         consensus.SegwitHeight = 0; // Always active unless overridden
++        consensus.P2MRHeight = 0;   // Always active unless overridden
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -622,6 +630,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_CSV:
+                 consensus.CSVHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR:
++                consensus.P2MRHeight = int{height};
++                break;
+             }
+         }
+ 
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index c631a93..5edf4d5 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1480,6 +1480,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_CLTV);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_CSV);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 443714c..9bc7f35 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -1415,12 +1415,14 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut>&& spent
+     bool uses_bip341_taproot = force;
+     for (size_t inpos = 0; inpos < txTo.vin.size() && !(uses_bip143_segwit && uses_bip341_taproot); ++inpos) {
+         if (!txTo.vin[inpos].scriptWitness.IsNull()) {
+-            if (m_spent_outputs_ready && m_spent_outputs[inpos].scriptPubKey.size() == 2 + WITNESS_V1_TAPROOT_SIZE &&
+-                m_spent_outputs[inpos].scriptPubKey[0] == OP_1) {
++            if (m_spent_outputs_ready && ((m_spent_outputs[inpos].scriptPubKey.size() == 2 + WITNESS_V1_TAPROOT_SIZE &&
++                                           m_spent_outputs[inpos].scriptPubKey[0] == OP_1) ||
++                                          m_spent_outputs[inpos].scriptPubKey.IsPayToMerkleRoot())) {
+                 // Treat every witness-bearing spend with 34-byte scriptPubKey that starts with OP_1 as a Taproot
+                 // spend. This only works if spent_outputs was provided as well, but if it wasn't, actual validation
+                 // will fail anyway. Note that this branch may trigger for scriptPubKeys that aren't actually segwit
+                 // but in that case validation will fail as SCRIPT_ERR_WITNESS_UNEXPECTED anyway.
++                // BIP360 P2MR spends reuse the BIP341/BIP342 signature message, so they need the same data.
+                 uses_bip341_taproot = true;
+             } else {
+                 // Treat every spend that's not known to native witness v1 as a Witness v0 spend. This branch may
+@@ -1900,6 +1902,21 @@ uint256 ComputeTaprootMerkleRoot(std::span<const unsigned char> control, const u
+     return k;
+ }
+ 
++uint256 ComputeP2MRMerkleRoot(std::span<const unsigned char> control, const uint256& tapleaf_hash)
++{
++    assert(control.size() >= P2MR_CONTROL_BASE_SIZE);
++    assert(control.size() <= P2MR_CONTROL_MAX_SIZE);
++    assert((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE == 0);
++
++    const int path_len = (control.size() - P2MR_CONTROL_BASE_SIZE) / P2MR_CONTROL_NODE_SIZE;
++    uint256 k = tapleaf_hash;
++    for (int i = 0; i < path_len; ++i) {
++        std::span node{control.subspan(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * i, P2MR_CONTROL_NODE_SIZE)};
++        k = ComputeTapbranchHash(k, node);
++    }
++    return k;
++}
++
+ static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, const std::vector<unsigned char>& program, const uint256& tapleaf_hash)
+ {
+     assert(control.size() >= TAPROOT_CONTROL_BASE_SIZE);
+@@ -1987,6 +2004,52 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion,
+             }
+             return set_success(serror);
+         }
++    } else if (witversion == 2 && program.size() == WITNESS_V2_P2MR_SIZE && !is_p2sh && (flags & SCRIPT_VERIFY_P2MR)) {
++        // BIP360 P2MR: 32-byte non-P2SH witness v2 program (which encodes the script tree Merkle
++        // root). Every spend is a BIP341 script path spend: there is no internal key, no tweak and
++        // no key path. Note that this branch is skipped entirely without SCRIPT_VERIFY_P2MR, so
++        // that such programs keep the unknown witness program behaviour below.
++        if (stack.size() < 2) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
++        if (!stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
++            // A script and a control block must be left after removing the annex.
++            if (stack.size() == 2) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
++            // Drop annex (this is non-standard; see IsWitnessStandard)
++            const valtype& annex = SpanPopBack(stack);
++            execdata.m_annex_hash = (HashWriter{} << annex).GetSHA256();
++            execdata.m_annex_present = true;
++        } else {
++            execdata.m_annex_present = false;
++        }
++        execdata.m_annex_init = true;
++        const valtype& control = SpanPopBack(stack);
++        const valtype& script = SpanPopBack(stack);
++        if (control.size() < P2MR_CONTROL_BASE_SIZE || control.size() > P2MR_CONTROL_MAX_SIZE || ((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE) != 0) {
++            return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
++        }
++        // P2MR has no internal key parity to encode, so the last bit of the control byte is unused
++        // and must be 1. This is required for every leaf version, not just 0xc0.
++        if ((control[0] & 1) != 1) return set_error(serror, SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY);
++        execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, script);
++        const uint256 merkle_root{ComputeP2MRMerkleRoot(control, execdata.m_tapleaf_hash)};
++        if (!std::equal(merkle_root.begin(), merkle_root.end(), program.begin())) {
++            return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
++        }
++        execdata.m_tapleaf_hash_init = true;
++        if (control.size() == P2MR_CONTROL_BASE_SIZE) {
++            // The leaf sits at depth zero (m = 0): succeed without executing the script.
++            return set_success(serror);
++        }
++        if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
++            // Tapscript (leaf version 0xc0)
++            exec_script = CScript(script.begin(), script.end());
++            execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
++            execdata.m_validation_weight_left_init = true;
++            return ExecuteWitnessScript(stack, exec_script, flags, SigVersion::TAPSCRIPT, checker, execdata, serror);
++        }
++        if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
++            return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION);
++        }
++        return set_success(serror);
+     } else if (!is_p2sh && CScript::IsPayToAnchor(witversion, program)) {
+         return true;
+     } else {
+@@ -2187,6 +2250,7 @@ const std::map<std::string, script_verify_flag_name>& ScriptFlagNamesToEnum()
+         FLAG_NAME(WITNESS_PUBKEYTYPE),
+         FLAG_NAME(CONST_SCRIPTCODE),
+         FLAG_NAME(TAPROOT),
++        FLAG_NAME(P2MR),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_PUBKEYTYPE),
+         FLAG_NAME(DISCOURAGE_OP_SUCCESS),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_TAPROOT_VERSION),
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index cbb137e..d19d2a8 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -145,6 +145,13 @@ enum class script_verify_flag_name : uint8_t {
+     // Making unknown public key versions (in BIP 342 scripts) non-standard
+     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
+ 
++    // Pay-to-Merkle-Root validation (BIP 360): witness v2 programs of 32 bytes
++    // commit to a script tree Merkle root and are spent through the BIP 341
++    // script path only. Without this flag such programs keep their unknown
++    // witness program behaviour.
++    //
++    SCRIPT_VERIFY_P2MR,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+@@ -245,6 +252,16 @@ static constexpr size_t TAPROOT_CONTROL_NODE_SIZE = 32;
+ static constexpr size_t TAPROOT_CONTROL_MAX_NODE_COUNT = 128;
+ static constexpr size_t TAPROOT_CONTROL_MAX_SIZE = TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
+ 
++/** BIP360 P2MR witness program size: the 32-byte script tree Merkle root. */
++static constexpr size_t WITNESS_V2_P2MR_SIZE = 32;
++/** BIP360 P2MR control block: one leaf version byte followed by the Merkle path.
++ *  There is no internal public key, so the base size is 1 instead of the 33 bytes of BIP341. */
++static constexpr size_t P2MR_CONTROL_BASE_SIZE = 1;
++static constexpr size_t P2MR_CONTROL_NODE_SIZE = 32;
++static constexpr size_t P2MR_CONTROL_MAX_NODE_COUNT = 128;
++static constexpr size_t P2MR_CONTROL_MAX_SIZE = P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * P2MR_CONTROL_MAX_NODE_COUNT;
++static_assert(P2MR_CONTROL_MAX_SIZE == 4097);
++
+ extern const HashWriter HASHER_TAPSIGHASH; //!< Hasher with tag "TapSighash" pre-fed to it.
+ extern const HashWriter HASHER_TAPLEAF;    //!< Hasher with tag "TapLeaf" pre-fed to it.
+ extern const HashWriter HASHER_TAPBRANCH;  //!< Hasher with tag "TapBranch" pre-fed to it.
+@@ -372,6 +389,9 @@ uint256 ComputeTapbranchHash(std::span<const unsigned char> a, std::span<const u
+ /** Compute the BIP341 taproot script tree Merkle root from control block and leaf hash.
+  *  Requires control block to have valid length (33 + k*32, with k in {0,1,..,128}). */
+ uint256 ComputeTaprootMerkleRoot(std::span<const unsigned char> control, const uint256& tapleaf_hash);
++/** Compute the BIP360 P2MR script tree Merkle root from control block and leaf hash.
++ *  Requires control block to have valid length (1 + k*32, with k in {0,1,..,128}). */
++uint256 ComputeP2MRMerkleRoot(std::span<const unsigned char> control, const uint256& tapleaf_hash);
+ 
+ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, script_verify_flags flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* error = nullptr);
+ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, script_verify_flags flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* error = nullptr);
+diff --git a/src/script/script.cpp b/src/script/script.cpp
+index 829e351..b65b436 100644
+--- a/src/script/script.cpp
++++ b/src/script/script.cpp
+@@ -245,6 +245,14 @@ bool CScript::IsPayToTaproot() const
+             (*this)[1] == 0x20);
+ }
+ 
++bool CScript::IsPayToMerkleRoot() const
++{
++    // Extra-fast test for pay-to-merkle-root CScripts:
++    return (this->size() == 34 &&
++            (*this)[0] == OP_2 &&
++            (*this)[1] == 0x20);
++}
++
+ // A witness program is any valid CScript that consists of a 1-byte push opcode
+ // followed by a data push between 2 and 40 bytes.
+ bool CScript::IsWitnessProgram(int& version, std::vector<unsigned char>& program) const
+diff --git a/src/script/script.h b/src/script/script.h
+index b06be9c..0fce68f 100644
+--- a/src/script/script.h
++++ b/src/script/script.h
+@@ -548,6 +548,11 @@ public:
+ 
+     bool IsPayToTaproot() const;
+ 
++    /*
++     * OP_2 OP_PUSHBYTES_32 <32-byte script tree Merkle root> (BIP360 P2MR)
++     */
++    bool IsPayToMerkleRoot() const;
++
+     /** Called by IsStandardTx and P2SH/BIP62 VerifyScript (which makes it consensus-critical). */
+     bool IsPushOnly(const_iterator pc) const;
+     bool IsPushOnly() const;
+diff --git a/src/script/script_error.cpp b/src/script/script_error.cpp
+index b0e7a6e..99239a3 100644
+--- a/src/script/script_error.cpp
++++ b/src/script/script_error.cpp
+@@ -105,6 +105,8 @@ std::string ScriptErrorString(const ScriptError serror)
+             return "Invalid Schnorr signature";
+         case SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE:
+             return "Invalid Taproot control block size";
++        case SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY:
++            return "Last bit of P2MR control block first byte must be 1";
+         case SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT:
+             return "Too much signature validation relative to witness weight";
+         case SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG:
+diff --git a/src/script/script_error.h b/src/script/script_error.h
+index 60ab3e5..aa91a19 100644
+--- a/src/script/script_error.h
++++ b/src/script/script_error.h
+@@ -75,6 +75,9 @@ typedef enum ScriptError_t
+     SCRIPT_ERR_SCHNORR_SIG_HASHTYPE,
+     SCRIPT_ERR_SCHNORR_SIG,
+     SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE,
++
++    /* P2MR (BIP360) */
++    SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY,
+     SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT,
+     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
+     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
+diff --git a/src/test/script_tests.cpp b/src/test/script_tests.cpp
+index 1478cf9..fb67f2c 100644
+--- a/src/test/script_tests.cpp
++++ b/src/test/script_tests.cpp
+@@ -91,6 +91,9 @@ static ScriptErrorDesc script_errors[]={
+     {SCRIPT_ERR_WITNESS_MALLEATED_P2SH, "WITNESS_MALLEATED_P2SH"},
+     {SCRIPT_ERR_WITNESS_UNEXPECTED, "WITNESS_UNEXPECTED"},
+     {SCRIPT_ERR_WITNESS_PUBKEYTYPE, "WITNESS_PUBKEYTYPE"},
++    {SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION, "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"},
++    {SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE, "TAPROOT_WRONG_CONTROL_SIZE"},
++    {SCRIPT_ERR_P2MR_WRONG_CONTROL_PARITY, "P2MR_WRONG_CONTROL_PARITY"},
+     {SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY, "TAPSCRIPT_EMPTY_PUBKEY"},
+     {SCRIPT_ERR_OP_CODESEPARATOR, "OP_CODESEPARATOR"},
+     {SCRIPT_ERR_SIG_FINDANDDELETE, "SIG_FINDANDDELETE"},
+diff --git a/src/validation.cpp b/src/validation.cpp
+index d3cabe4..96a69c7 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2289,6 +2289,11 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_NULLDUMMY;
+     }
+ 
++    // Enforce P2MR (BIP360)
++    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR)) {
++        flags |= SCRIPT_VERIFY_P2MR;
++    }
++
+     return flags;
+ }
+ 
+diff --git a/test/functional/feature_taproot.py b/test/functional/feature_taproot.py
+index 8891e0f..97503ec 100755
+--- a/test/functional/feature_taproot.py
++++ b/test/functional/feature_taproot.py
+@@ -848,6 +848,11 @@ def spenders_taproot_active():
+     for p2sh in [False, True]:
+         for witver in range(1, 17):
+             for witlen in [20, 31, 32, 33]:
++                # Native witness v2 programs of 32 bytes are P2MR (BIP 360), which is active from
++                # height 0 on regtest, so they are not unconstrained. Their applicability is
++                # covered by feature_p2mr.py instead.
++                if not p2sh and witver == 2 and witlen == 32:
++                    continue
+                 def mutate(spk):
+                     prog = spk[2:]
+                     assert len(prog) == 32
+diff --git a/test/functional/rpc_blockchain.py b/test/functional/rpc_blockchain.py
+index cecd0c0..ab9acbd 100755
+--- a/test/functional/rpc_blockchain.py
++++ b/test/functional/rpc_blockchain.py
+@@ -213,13 +213,14 @@ class BlockchainTest(BitcoinTestFramework):
+         assert_equal(gdi_result, {
+           "hash": blockhash,
+           "height": height,
+-          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2SH","TAPROOT","WITNESS"],
++          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2SH","TAPROOT","WITNESS"],
+           "deployments": {
+             'bip34': {'type': 'buried', 'active': True, 'height': 2},
+             'bip66': {'type': 'buried', 'active': True, 'height': 3},
+             'bip65': {'type': 'buried', 'active': True, 'height': 4},
+             'csv': {'type': 'buried', 'active': True, 'height': 5},
+             'segwit': {'type': 'buried', 'active': True, 'height': 6},
++            'p2mr': {'type': 'buried', 'active': True, 'height': 0},
+             'testdummy': {
+                 'type': 'bip9',
+                 'bip9': {
+-- 
+2.49.0.windows.1
+
