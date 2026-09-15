@@ -1,0 +1,101 @@
+From 14958e425a75e0307d78cd546ebec8a15ba21fc5 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:46:07 -0600
+Subject: [PATCH 23/23] doc: record the P2MR deployment gate and the Schnorr
+ sighash convention
+
+Describe why importdescriptors and deriveaddresses refuse a tmr() descriptor
+where the deployment is disabled, and what stays available there: parsing,
+checksums and loading a wallet that already holds one. Note that P2MR follows
+the Taproot sighash convention in PSBTs, that only control blocks matching the
+output are used for signing, and that size estimation asks whether the spend
+uses the witness rather than what address type it has.
+---
+ doc/descriptors.md |  2 +-
+ doc/p2mr.md        | 33 +++++++++++++++++++++++++++++++--
+ 2 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/doc/descriptors.md b/doc/descriptors.md
+index 0d8f2ba..4d73fa7 100644
+--- a/doc/descriptors.md
++++ b/doc/descriptors.md
+@@ -67,7 +67,7 @@ Descriptors consist of several types of expressions. The top level expression is
+ - `multi_a(k,KEY_1,KEY_2,...,KEY_N)` (only inside `tr`): k-of-n multisig script using OP_CHECKSIG, OP_CHECKSIGADD, and OP_NUMEQUAL, defined in [BIP 387](https://github.com/bitcoin/bips/blob/master/bip-0387.mediawiki).
+ - `sortedmulti_a(k,KEY_1,KEY_2,...,KEY_N)` (only inside `tr`): similar to `multi_a`, but the (x-only) public keys in it will be sorted lexicographically, defined in [BIP 387](https://github.com/bitcoin/bips/blob/master/bip-0387.mediawiki).
+ - `tr(KEY)` or `tr(KEY,TREE)` (top level only): P2TR output with the specified key as internal key, and optionally a tree of script paths, defined in [BIP 386](https://github.com/bitcoin/bips/blob/master/bip-0386.mediawiki).
+-- `tmr(TREE)` (top level only): **provisional**. P2MR output ([BIP 360](https://github.com/bitcoin/bips/blob/620871a7a442e276a058b487cd8743775fb499a4/bip-0360.mediawiki) draft) committing to the given tree of script paths. `TREE` uses the same syntax as in `tr()`, and its leaves are parsed and executed as BIP 342 tapscripts with leaf version `0xc0`, but there is no internal key and therefore no key path: the witness program is the script tree Merkle root itself. BIP 360 does not define a descriptor language, so this name and syntax are a placeholder for this build and may change; see [p2mr.md](p2mr.md). The tree must have at least two leaves, because a leaf at depth zero produces an `m = 0` control block, which BIP 360 accepts without executing the leaf script, making the output anyone-can-spend. Use `addr(ADDR)` or `raw(HEX)` if you need to express such an output. `tmr()` has no address type of its own, so it cannot be an active descriptor and the wallet never generates P2MR addresses or change for it.
++- `tmr(TREE)` (top level only): **provisional**. P2MR output ([BIP 360](https://github.com/bitcoin/bips/blob/620871a7a442e276a058b487cd8743775fb499a4/bip-0360.mediawiki) draft) committing to the given tree of script paths. `TREE` uses the same syntax as in `tr()`, and its leaves are parsed and executed as BIP 342 tapscripts with leaf version `0xc0`, but there is no internal key and therefore no key path: the witness program is the script tree Merkle root itself. BIP 360 does not define a descriptor language, so this name and syntax are a placeholder for this build and may change; see [p2mr.md](p2mr.md). The tree must have at least two leaves, because a leaf at depth zero produces an `m = 0` control block, which BIP 360 accepts without executing the leaf script, making the output anyone-can-spend. Use `addr(ADDR)` or `raw(HEX)` if you need to express such an output. `tmr()` has no address type of its own, so it cannot be an active descriptor and the wallet never generates P2MR addresses or change for it. It can only be imported, and addresses can only be derived from it, on a chain where the P2MR deployment is enabled; elsewhere such an output is anyone-can-spend.
+ - `addr(ADDR)` (top level only): the script which ADDR expands to, defined in [BIP 385](https://github.com/bitcoin/bips/blob/master/bip-0385.mediawiki).
+ - `raw(HEX)` (top level only): the script whose hex encoding is HEX, defined in [BIP 385](https://github.com/bitcoin/bips/blob/master/bip-0385.mediawiki).
+ - `rawtr(KEY)` (top level only): P2TR output with the specified key as output key. NOTE: while it's possible to use this to construct wallets, it has several downsides, like being unable to prove no hidden script path exists. Use at your own risk.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index edffcf1..8473045 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -117,6 +117,25 @@ are both valid. The differences from `tr()` follow from BIP 360:
+ knows the tree, which is what makes `getaddressinfo` and `listunspent` report a `desc` field for
+ P2MR outputs. Otherwise it falls back to `addr(<bech32m address>)`.
+ 
++### Only on chains where P2MR is deployed
++
++Where the deployment never activates, the consensus rules above are not applied: a 32 byte witness
++v2 program is an unknown witness program, any witness satisfies it, and a miner can take coins paid
++to such an address. Producing a P2MR receiving address there would be handing out an address that
++cannot hold money, so both entry points that do so refuse when
++`DeploymentEnabled(..., Consensus::DEPLOYMENT_P2MR)` is false, which is the case on mainnet,
++testnet3, testnet4 and the default signet:
++
++- `importdescriptors` rejects a descriptor whose scripts are P2MR outputs. The wallet then never
++  treats those scripts as its own.
++- `deriveaddresses` rejects such a descriptor, because it is the documented way to get an address
++  for a `tmr()` descriptor and is therefore a receiving entry point rather than mere inspection.
++
++Parsing stays available everywhere: `getdescriptorinfo` still parses a `tmr()` descriptor and
++returns its checksum, so descriptors can be inspected and checksummed off-chain. Loading a wallet
++that already contains a `tmr()` descriptor is also left alone, so funds stay recoverable if a chain
++gains the deployment later.
++
+ ### Receiving and spending
+ 
+ Import the descriptor with `importdescriptors`; ranged `tmr()` descriptors work like any other. The
+@@ -129,11 +148,18 @@ inputs. Every spend is a script path spend, with the witness
+ `[<leaf satisfaction>, <leaf script>, <control block>]` and no annex. When several leaves can be
+ satisfied, the one giving the smallest witness is used.
+ 
++When more than one control block is offered for a leaf, only those that actually reconstruct the
++Merkle root of the output being spent are considered, so spending data taken from a PSBT written by
++someone else cannot shadow a usable path with a malformed one.
++
+ In PSBTs, P2MR inputs provisionally reuse the BIP 371 Taproot fields: the Merkle root goes in
+ `PSBT_IN_TAP_MERKLE_ROOT`, the leaves in `PSBT_IN_TAP_LEAF_SCRIPT` and the signatures in
+ `PSBT_IN_TAP_SCRIPT_SIG`. `PSBT_IN_TAP_INTERNAL_KEY` is absent, which is how a reader tells the two
+ apart, together with the scriptPubKey of the input. This is another provisional choice: BIP 174 and
+-BIP 371 do not describe P2MR.
++BIP 371 do not describe P2MR. Since P2MR carries Schnorr signatures, it follows the Taproot sighash
++convention rather than the legacy one: `SIGHASH_DEFAULT` produces a 64 byte signature and is left
++out of `PSBT_IN_SIGHASH_TYPE`, every other type produces 65 bytes and is recorded there, so a
++separate finalizer asks for the right length.
+ 
+ ### No output type of its own
+ 
+@@ -143,6 +169,8 @@ here and would be unsafe on any chain where the deployment is not active. The co
+ 
+ - `getnewaddress` and `getrawchangeaddress` never return a P2MR address. Get addresses for an
+   imported `tmr()` descriptor with `deriveaddresses` instead.
++- Size estimation asks the descriptor whether spending it uses the witness, which is a separate
++  question from the address type, so a P2MR input is counted as the witness input it is.
+ - `importdescriptors` with `"active": true` succeeds but warns `Unknown output type, cannot set
+   descriptor to active.`, and the descriptor stays inactive.
+ - Wallet change for a transaction spending P2MR inputs uses the wallet's own address type.
+@@ -174,6 +202,7 @@ All other failures reuse existing script errors: `SCRIPT_ERR_WITNESS_PROGRAM_WIT
+ - The `tmr()` descriptor is provisional and unspecified, as is the reuse of the BIP 371 PSBT fields
+   for P2MR inputs. Neither is interoperable with anything outside this build.
+ - The wallet never generates P2MR addresses or change, because P2MR has no output type. It can only
+-  receive on and spend from an explicitly imported `tmr()` descriptor.
++  receive on and spend from an explicitly imported `tmr()` descriptor, and only on a chain where
++  the deployment is enabled.
+ - P2MR is disabled on mainnet, testnet3, testnet4 and the public signet, and there is no mechanism
+   in this build to enable it there.
+-- 
+2.49.0.windows.1
+

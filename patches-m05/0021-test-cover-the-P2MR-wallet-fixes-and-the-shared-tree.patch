@@ -1,0 +1,600 @@
+From e9e8d0b877cf46f1b5725cc434e4e76a839b1f27 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:46:07 -0600
+Subject: [PATCH 21/23] test: cover the P2MR wallet fixes and the shared tree
+ reconstruction
+
+Unit tests: infer_script_tree_test pins InferTaprootTree() and InferP2MRTree()
+against the same three shapes, since they now share one reconstruction helper.
+It covers a complete unbalanced tree, two identical subtrees under the root,
+whose leaves have identical control blocks, a tree missing a leaf, and a Merkle
+root that does not belong to the output. tmr_max_depth_test accepts a tree 128
+nesting levels deep, checks that its deepest leaf needs the full 4097 byte
+control block, and refuses 129 levels. The descriptor cache comparison now also
+compares tr_trees and p2mr_trees, not just the scripts and keys.
+
+Functional tests: one depth-1 pk() P2MR input paying two P2WPKH outputs is
+charged for, and really weighs, 590 weight units and 148 virtual bytes; a PSBT
+signed without finalizing survives serialization and combining and then
+finalizes, for SIGHASH_DEFAULT and for all six explicit types; a poisoned
+second control block for a leaf does not prevent signing; a P2MR input cannot
+be signed while another input of the same transaction has no spent output, and
+signs as soon as one is supplied; signing falls through to a deeper leaf when
+the shallow one is unsignable and prefers the cheapest control block when the
+same leaf appears twice; and a single transaction spends P2MR together with
+legacy, P2SH-SegWit, P2WPKH and P2TR inputs.
+---
+ src/test/descriptor_tests.cpp  | 114 ++++++++++++
+ test/functional/wallet_p2mr.py | 326 ++++++++++++++++++++++++++-------
+ 2 files changed, 378 insertions(+), 62 deletions(-)
+
+diff --git a/src/test/descriptor_tests.cpp b/src/test/descriptor_tests.cpp
+index 5aa5959..7d49eca 100644
+--- a/src/test/descriptor_tests.cpp
++++ b/src/test/descriptor_tests.cpp
+@@ -325,6 +325,8 @@ void DoCheck(std::string prv, std::string pub, const std::string& norm_pub, int
+             BOOST_CHECK(spks == spks_cached);
+             BOOST_CHECK(GetKeyData(script_provider, flags) == GetKeyData(script_provider_cached, flags));
+             BOOST_CHECK(script_provider.scripts == script_provider_cached.scripts);
++            BOOST_CHECK(script_provider.tr_trees == script_provider_cached.tr_trees);
++            BOOST_CHECK(script_provider.p2mr_trees == script_provider_cached.p2mr_trees);
+             BOOST_CHECK(GetKeyOriginData(script_provider, flags) == GetKeyOriginData(script_provider_cached, flags));
+ 
+             // Check whether keys are in the cache
+@@ -432,6 +434,8 @@ void DoCheck(std::string prv, std::string pub, const std::string& norm_pub, int
+                 BOOST_CHECK(spks1 == spk1_from_cache);
+                 BOOST_CHECK(GetKeyData(script_provider1, flags) == GetKeyData(script_provider_cached1, flags));
+                 BOOST_CHECK(script_provider1.scripts == script_provider_cached1.scripts);
++                BOOST_CHECK(script_provider1.tr_trees == script_provider_cached1.tr_trees);
++                BOOST_CHECK(script_provider1.p2mr_trees == script_provider_cached1.p2mr_trees);
+                 BOOST_CHECK(GetKeyOriginData(script_provider1, flags) == GetKeyOriginData(script_provider_cached1, flags));
+             }
+ 
+@@ -1294,6 +1298,116 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
+     CheckUnparsable("tr(musig(tuus(oldepk(gg)ggggfgg)<,z(((((((((((((((((((((st)", "tr(musig(tuus(oldepk(gg)ggggfgg)<,z(((((((((((((((((((((st)","tr(): Too many ')' in musig() expression");
+ }
+ 
++namespace {
++//! A distinct, never executed leaf script.
++CScript TestLeaf(uint8_t tag)
++{
++    return CScript() << std::vector<unsigned char>(4, tag) << OP_CHECKSIG;
++}
++
++using TreeLeaves = std::vector<std::tuple<int, std::vector<unsigned char>, int>>;
++
++TreeLeaves ExpectedLeaves(const std::vector<std::pair<int, CScript>>& leaves)
++{
++    TreeLeaves ret;
++    for (const auto& [depth, script] : leaves) {
++        ret.emplace_back(depth, std::vector<unsigned char>(script.begin(), script.end()), TAPROOT_LEAF_TAPSCRIPT);
++    }
++    return ret;
++}
++
++TaprootBuilder BuildTree(const std::vector<std::pair<int, CScript>>& leaves)
++{
++    TaprootBuilder builder;
++    for (const auto& [depth, script] : leaves) builder.Add(depth, script, TAPROOT_LEAF_TAPSCRIPT);
++    BOOST_CHECK(builder.IsComplete());
++    return builder;
++}
++} // namespace
++
++/** InferTaprootTree() and InferP2MRTree() share one reconstruction helper, which differs only in
++ *  the fixed prefix of a control block. Pin both against the same three tree shapes. */
++BOOST_AUTO_TEST_CASE(infer_script_tree_test)
++{
++    const XOnlyPubKey internal_key{"a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"_hex_u8};
++    BOOST_CHECK(internal_key.IsFullyValid());
++
++    // An unbalanced tree with three distinct leaves.
++    const std::vector<std::pair<int, CScript>> unbalanced{{1, TestLeaf(1)}, {2, TestLeaf(2)}, {2, TestLeaf(3)}};
++    // Two identical subtrees under the root, which the reconstruction has to special case because
++    // the leaves below them have identical control blocks.
++    const std::vector<std::pair<int, CScript>> duplicated{{2, TestLeaf(4)}, {2, TestLeaf(5)}, {2, TestLeaf(4)}, {2, TestLeaf(5)}};
++
++    for (const auto& leaves : {unbalanced, duplicated}) {
++        TaprootBuilder builder{BuildTree(leaves)};
++
++        // BIP360: the output is the Merkle root, and control blocks carry no internal key.
++        const WitnessV2P2MR p2mr_output{builder.GetP2MROutput()};
++        P2MRSpendData p2mr_spend{builder.GetP2MRSpendData()};
++        const auto p2mr_tree{InferP2MRTree(p2mr_spend, p2mr_output)};
++        BOOST_REQUIRE(p2mr_tree.has_value());
++        BOOST_CHECK(*p2mr_tree == ExpectedLeaves(leaves));
++
++        // BIP341: the same tree under a tweaked internal key.
++        builder.Finalize(internal_key);
++        const WitnessV1Taproot tr_output{builder.GetOutput()};
++        TaprootSpendData tr_spend{builder.GetSpendData()};
++        const auto tr_tree{InferTaprootTree(tr_spend, tr_output)};
++        BOOST_REQUIRE(tr_tree.has_value());
++        BOOST_CHECK(*tr_tree == ExpectedLeaves(leaves));
++
++        // Dropping any leaf leaves a branch that cannot be explored, so neither reconstructs.
++        P2MRSpendData p2mr_partial{p2mr_spend};
++        p2mr_partial.scripts.erase(p2mr_partial.scripts.begin());
++        BOOST_CHECK(!InferP2MRTree(p2mr_partial, p2mr_output).has_value());
++        TaprootSpendData tr_partial{tr_spend};
++        tr_partial.scripts.erase(tr_partial.scripts.begin());
++        BOOST_CHECK(!InferTaprootTree(tr_partial, tr_output).has_value());
++
++        // A Merkle root that does not belong to the output is refused before any reconstruction.
++        P2MRSpendData p2mr_wrong{p2mr_spend};
++        p2mr_wrong.merkle_root = uint256::ONE;
++        BOOST_CHECK(!InferP2MRTree(p2mr_wrong, p2mr_output).has_value());
++        TaprootSpendData tr_wrong{tr_spend};
++        tr_wrong.merkle_root = uint256::ONE;
++        BOOST_CHECK(!InferTaprootTree(tr_wrong, tr_output).has_value());
++    }
++}
++
++/** BIP360 allows a Merkle path of at most 128 nodes, so tmr() accepts 128 nesting levels and
++ *  refuses 129. */
++BOOST_AUTO_TEST_CASE(tmr_max_depth_test)
++{
++    const std::string key_a{"a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"};
++    const std::string key_b{"03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5"};
++    const auto caterpillar{[&](int depth) {
++        std::string desc{"tmr("};
++        for (int i = 0; i < depth; ++i) desc += "{";
++        desc += "pk(" + key_a + ")";
++        for (int i = 0; i < depth; ++i) desc += ",pk(" + key_b + ")}";
++        return desc + ")";
++    }};
++
++    FlatSigningProvider keys;
++    std::string error;
++    auto parsed{Parse(caterpillar(128), keys, error)};
++    BOOST_CHECK_MESSAGE(parsed.size() == 1, error);
++    std::vector<CScript> scripts;
++    FlatSigningProvider out;
++    BOOST_CHECK(parsed.at(0)->Expand(0, keys, scripts, out));
++    BOOST_CHECK_EQUAL(scripts.size(), 1U);
++    BOOST_CHECK_EQUAL(scripts.at(0).size(), 34U);
++    // The single leaf at the bottom of the caterpillar needs the full 128 node Merkle path.
++    BOOST_REQUIRE_EQUAL(out.p2mr_trees.size(), 1U);
++    const CScript deep_leaf{CScript() << "a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"_hex_v_u8 << OP_CHECKSIG};
++    const P2MRSpendData deep_spend{out.p2mr_trees.begin()->second.GetP2MRSpendData()};
++    const auto deep_it{deep_spend.scripts.find({std::vector<unsigned char>(deep_leaf.begin(), deep_leaf.end()), TAPROOT_LEAF_TAPSCRIPT})};
++    BOOST_REQUIRE(deep_it != deep_spend.scripts.end());
++    BOOST_CHECK_EQUAL(deep_it->second.begin()->size(), P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * 128);
++
++    CheckUnparsable("", caterpillar(129), "tmr() supports at most 128 nesting levels");
++}
++
+ BOOST_AUTO_TEST_CASE(descriptor_literal_null_byte)
+ {
+     // Trailing '\0' string literal should be ignored.
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+index 3b64cdd..0209520 100644
+--- a/test/functional/wallet_p2mr.py
++++ b/test/functional/wallet_p2mr.py
+@@ -5,14 +5,19 @@
+ """Wallet support for BIP360 P2MR outputs through the provisional tmr() descriptor.
+ 
+ Covers importing a tmr() descriptor, receiving to the resulting bcrt1z address,
+-spending it automatically with send() and through the PSBT flow, the descriptor
+-inferred for a P2MR output, and the refusal to express an anyone-can-spend
+-single-leaf tree.
++spending it automatically and through the full PSBT flow, which control block
++signing picks, size estimation, mixed input transactions, and the refusal to
++express an anyone-can-spend single-leaf tree.
+ """
+ 
+ from decimal import Decimal
++from io import BytesIO
+ 
+ from test_framework.descriptors import descsum_create
++from test_framework.psbt import (
++    PSBT,
++    PSBT_IN_TAP_LEAF_SCRIPT,
++)
+ from test_framework.test_framework import BitcoinTestFramework
+ from test_framework.util import (
+     assert_equal,
+@@ -26,9 +31,21 @@ P2MR_CONTROL_BASE_SIZE = 1
+ P2MR_CONTROL_NODE_SIZE = 32
+ # BIP341 tapscript leaf version, the only one tmr() builds.
+ TAPROOT_LEAF_TAPSCRIPT = 0xC0
++# Control block sizes for a leaf one and two Merkle nodes below the root.
++CONTROL_DEPTH_1 = P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE
++CONTROL_DEPTH_2 = P2MR_CONTROL_BASE_SIZE + 2 * P2MR_CONTROL_NODE_SIZE
+ # Test-only extended private key, reused from wallet_taproot.py.
+ XPRV = "tprv8ZgxMBicQKsPeNLUGrbv3b7qhUk1LQJZAGMuk9gVuKh9sd4BWGp1eMsehUni6qGb8bjkdwBxCbgNGdh2bYGACK5C5dRTaif9KBKGVnSezxV"
+ 
++# Size of a transaction spending one depth-1 pk() P2MR input to two P2WPKH outputs, derived by
++# hand: 8 bytes of version and locktime, two 1 byte counts and a 41 byte input at 4 weight units
++# each (200), the 2 byte segwit marker and flag, 2 outputs of 31 bytes at 4 weight units each
++# (248), and a 136 byte witness holding a stack count, a 65 byte SIGHASH_ALL signature, a 34 byte
++# leaf script and a 33 byte control block. The wallet has to reach the same number when it
++# estimates the fee.
++EXPECTED_WEIGHT = 590
++EXPECTED_VSIZE = 148
++
+ 
+ class WalletP2MRTest(BitcoinTestFramework):
+     def set_test_params(self):
+@@ -59,6 +76,16 @@ class WalletP2MRTest(BitcoinTestFramework):
+         request.update(kwargs)
+         return wallet.importdescriptors([request])[0], desc
+ 
++    def new_p2mr_wallet(self, name, inner):
++        """Create a wallet holding only the given tmr() tree, and return it with its address."""
++        self.nodes[0].createwallet(wallet_name=name)
++        wallet = self.nodes[0].get_wallet_rpc(name)
++        result, desc = self.import_tmr(wallet, inner)
++        assert_equal(result["success"], True)
++        address = self.derive_address(desc)
++        self.assert_p2mr_address(wallet, address)
++        return wallet, address
++
+     def derive_address(self, desc, desc_range=None):
+         args = [desc] if desc_range is None else [desc, desc_range]
+         addresses = self.nodes[0].deriveaddresses(*args)
+@@ -82,7 +109,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         assert info["desc"].startswith("tmr("), info["desc"]
+         return info
+ 
+-    def assert_p2mr_spend(self, txid, expected_control_len=None):
++    def assert_p2mr_spend(self, txid, expected_control_len=None, expected_inputs=None):
+         """Check that every P2MR input of `txid` is a BIP360 script path spend."""
+         tx = self.nodes[0].getrawtransaction(txid, True)
+         p2mr_inputs = 0
+@@ -105,8 +132,52 @@ class WalletP2MRTest(BitcoinTestFramework):
+             if expected_control_len is not None:
+                 assert_equal(len(control), expected_control_len)
+         assert_greater_than(p2mr_inputs, 0)
++        if expected_inputs is not None:
++            assert_equal(p2mr_inputs, expected_inputs)
+         return tx
+ 
++    def fund(self, address, amount):
++        txid = self.funder.sendtoaddress(address, amount)
++        self.generate(self.nodes[0], 1)
++        return txid
++
++    def pinned_psbt(self, wallet, utxo, destination, amount=1, fee_rate=10, change_address=None):
++        """Fund a PSBT that spends exactly `utxo`."""
++        options = {"fee_rate": fee_rate, "add_inputs": False}
++        if change_address is not None:
++            options["changeAddress"] = change_address
++        return wallet.walletcreatefundedpsbt(
++            inputs=[{"txid": utxo["txid"], "vout": utxo["vout"]}],
++            outputs=[{destination: amount}],
++            options=options,
++        )
++
++    def only_utxo(self, wallet, address):
++        return next(u for u in wallet.listunspent() if u["address"] == address)
++
++    def sign_without_finalizing(self, wallet, psbt, sighash="DEFAULT", index=0):
++        """Sign a PSBT input without finalizing it and return the resulting PSBT.
++
++        walletprocesspsbt reports "complete" only once every input is finalized, so the signature
++        itself has to be read out of the tap script signature field.
++        """
++        signed = wallet.walletprocesspsbt(psbt, True, sighash, True, False)
++        decoded = self.nodes[0].decodepsbt(signed["psbt"])["inputs"][index]
++        assert "final_scriptwitness" not in decoded, decoded
++        # The wallet signs every leaf it can satisfy, so there is one signature per such leaf.
++        sigs = decoded["taproot_script_path_sigs"]
++        assert_greater_than(len(sigs), 0)
++        for sig in sigs:
++            # SIGHASH_DEFAULT signatures are 64 bytes and carry no sighash byte.
++            assert_equal(len(bytes.fromhex(sig["sig"])), 64 if sighash == "DEFAULT" else 65)
++        # Like taproot, the sighash field stays out of the PSBT for the default type and is
++        # recorded for every other one, so that a separate finalizer asks for the right length.
++        if sighash == "DEFAULT":
++            assert "sighash" not in decoded, decoded
++        else:
++            assert_equal(decoded["sighash"], sighash)
++        return signed["psbt"]
++
+     # -- test cases ----------------------------------------------------------
+ 
+     def run_test(self):
+@@ -118,29 +189,27 @@ class WalletP2MRTest(BitcoinTestFramework):
+ 
+         self.test_import_and_receive()
+         self.test_send()
+-        self.test_psbt()
++        self.test_fee_estimate()
++        self.test_psbt_roundtrip()
++        self.test_sighash_types()
++        self.test_bogus_control_block()
++        self.test_missing_spent_output()
++        self.test_leaf_selection()
++        self.test_mixed_inputs()
+         self.test_single_leaf_refused()
+         self.test_ranged_and_no_output_type()
+-        self.test_nested_tree()
+ 
+     def test_import_and_receive(self):
+         self.log.info("Import a two leaf tmr() descriptor and receive to it")
+         node = self.nodes[0]
+-        node.createwallet(wallet_name="p2mr")
+-        self.wallet = node.get_wallet_rpc("p2mr")
+-
+         keys = self.make_leaf_keys(2)
+         inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
+-        result, desc = self.import_tmr(self.wallet, inner)
+-        assert_equal(result["success"], True)
+-
+-        self.address = self.derive_address(desc)
+-        info = self.assert_p2mr_address(self.wallet, self.address)
++        self.wallet, self.address = self.new_p2mr_wallet("p2mr", inner)
++        info = self.wallet.getaddressinfo(self.address)
+         for _, xonly in keys:
+             assert xonly in info["desc"], info["desc"]
+ 
+-        self.funder.sendtoaddress(self.address, 5)
+-        self.generate(node, 1)
++        self.fund(self.address, 5)
+ 
+         utxos = self.wallet.listunspent()
+         assert_equal(len(utxos), 1)
+@@ -157,7 +226,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         assert_equal(result["complete"], True)
+         txid = result["txid"]
+ 
+-        tx = self.assert_p2mr_spend(txid, expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE)
++        tx = self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+         assert_equal(len(tx["vin"]), 1)
+ 
+         # The change must not be P2MR: the wallet cannot generate P2MR addresses.
+@@ -176,28 +245,190 @@ class WalletP2MRTest(BitcoinTestFramework):
+         assert self.address not in {u["address"] for u in self.wallet.listunspent()}
+         assert_greater_than(self.wallet.getbalance(), Decimal("3"))
+ 
+-    def test_psbt(self):
+-        self.log.info("Spend a P2MR output through the PSBT flow")
++    def test_fee_estimate(self):
++        self.log.info("Size estimation treats a P2MR input as a witness input")
+         node = self.nodes[0]
+-        self.funder.sendtoaddress(self.address, 2)
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_fee", inner)
++        self.fund(address, 5)
++
++        fee_rate = 10
++        funded = self.pinned_psbt(
++            wallet,
++            self.only_utxo(wallet, address),
++            self.funder.getnewaddress(address_type="bech32"),
++            fee_rate=fee_rate,
++            change_address=wallet.getnewaddress(address_type="bech32"),
++        )
++        decoded = node.decodepsbt(funded["psbt"])
++        assert_equal(len(decoded["tx"]["vin"]), 1)
++        assert_equal(len(decoded["tx"]["vout"]), 2)
++        # The fee the wallet charges is its size estimate times the requested rate. Missing the
++        # segwit marker, flag and witness stack count would make it three weight units short.
++        assert_equal(funded["fee"], Decimal(fee_rate * EXPECTED_VSIZE) / Decimal(100000000))
++
++        # Signing with ALL produces the 65 byte signature the estimate assumes, so the broadcast
++        # transaction is exactly the size the arithmetic above predicts.
++        signed = self.sign_without_finalizing(wallet, funded["psbt"], "ALL")
++        final = node.finalizepsbt(signed)
++        assert_equal(final["complete"], True)
++        decoded_tx = node.decoderawtransaction(final["hex"])
++        assert_equal(decoded_tx["weight"], EXPECTED_WEIGHT)
++        assert_equal(decoded_tx["vsize"], EXPECTED_VSIZE)
++        node.sendrawtransaction(final["hex"])
+         self.generate(node, 1)
+ 
+-        utxo = next(u for u in self.wallet.listunspent() if u["address"] == self.address)
+-        destination = self.funder.getnewaddress()
+-        funded = self.wallet.walletcreatefundedpsbt(
+-            inputs=[{"txid": utxo["txid"], "vout": utxo["vout"]}],
+-            outputs=[{destination: 1}],
+-            options={"fee_rate": 10, "add_inputs": False},
+-        )
+-        processed = self.wallet.walletprocesspsbt(funded["psbt"])
+-        assert_equal(processed["complete"], True)
+-        finalized = node.finalizepsbt(processed["psbt"])
++    def test_psbt_roundtrip(self):
++        self.log.info("Round trip a P2MR PSBT through signing, serialization and combining")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_psbt", inner)
++        self.fund(address, 2)
++
++        funded = self.pinned_psbt(wallet, self.only_utxo(wallet, address), self.funder.getnewaddress())
++        # Sign with an explicit DEFAULT but without finalizing, which is what a coordinator does.
++        # Leaving the sighash field out here is what used to make the later finalization ask for a
++        # 65 byte signature and fail.
++        signed = self.sign_without_finalizing(wallet, funded["psbt"])
++
++        # Serialize, deserialize and combine before finalizing; the tap fields must survive.
++        reserialized = PSBT.from_base64(signed).to_base64()
++        combined = node.combinepsbt([signed, reserialized])
++        finalized = node.finalizepsbt(combined)
+         assert_equal(finalized["complete"], True)
++        txid = node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+ 
++    def test_sighash_types(self):
++        self.log.info("Sign a P2MR input under every supported sighash type")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_sighash", inner)
++
++        for sighash in ["DEFAULT", "ALL", "NONE", "SINGLE", "ALL|ANYONECANPAY",
++                        "NONE|ANYONECANPAY", "SINGLE|ANYONECANPAY"]:
++            self.fund(address, 1)
++            funded = self.pinned_psbt(
++                wallet, self.only_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++            # Sign first, finalize separately, so the sighash field has to survive the hand-off.
++            signed = self.sign_without_finalizing(wallet, funded["psbt"], sighash)
++            finalized = node.finalizepsbt(signed)
++            assert_equal(finalized["complete"], True)
++            txid = node.sendrawtransaction(finalized["hex"])
++            self.generate(node, 1)
++            self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++            self.log.info(f"  {sighash} signed, finalized and accepted")
++
++    def test_bogus_control_block(self):
++        self.log.info("A malformed control block in a PSBT does not shadow the usable one")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_bogus", inner)
++        self.fund(address, 1)
++
++        funded = self.pinned_psbt(
++            wallet, self.only_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        # Add a second control block for the same leaf whose last bit is clear, which consensus
++        # rejects for every leaf version. It is the same length and sorts first.
++        psbt = PSBT.from_base64(funded["psbt"])
++        leaves = {k: v for k, v in psbt.i[0].map.items()
++                  if isinstance(k, bytes) and k[0] == PSBT_IN_TAP_LEAF_SCRIPT}
++        assert_greater_than(len(leaves), 0)
++        for key, value in leaves.items():
++            control = bytearray(key[1:])
++            control[0] &= 0xFE
++            psbt.i[0].map[bytes([PSBT_IN_TAP_LEAF_SCRIPT]) + bytes(control)] = value
++        poisoned = psbt.to_base64()
++
++        def control_blocks(psbt_b64):
++            entries = node.decodepsbt(psbt_b64)["inputs"][0]["taproot_scripts"]
++            return sum(len(entry["control_blocks"]) for entry in entries)
++
++        assert_equal(control_blocks(poisoned), 2 * control_blocks(funded["psbt"]))
++
++        signed = self.sign_without_finalizing(wallet, poisoned)
++        finalized = node.finalizepsbt(signed)
++        assert_equal(finalized["complete"], True)
+         txid = node.sendrawtransaction(finalized["hex"])
+         self.generate(node, 1)
+-        self.assert_p2mr_spend(txid, expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE)
+-        assert_equal(self.wallet.gettransaction(txid)["confirmations"], 1)
++        # The witness carries the valid control block, not the poisoned one.
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++
++    def test_missing_spent_output(self):
++        self.log.info("Signing a P2MR input needs every spent output of the transaction")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_spent", inner)
++        self.fund(address, 1)
++
++        p2mr_utxo = self.only_utxo(wallet, address)
++        # An input belonging to another wallet, so this wallet cannot fill its UTXO in by itself.
++        external = next(u for u in self.funder.listunspent() if u["amount"] > 1)
++        amount = p2mr_utxo["amount"] + external["amount"] - Decimal("0.001")
++        psbt = node.createpsbt(
++            [{"txid": p2mr_utxo["txid"], "vout": p2mr_utxo["vout"]},
++             {"txid": external["txid"], "vout": external["vout"]}],
++            [{self.funder.getnewaddress(): amount}],
++        )
++
++        # The BIP341 message commits to every spent output, so one missing UTXO makes the P2MR
++        # input unsignable even though its own UTXO is known.
++        incomplete = wallet.walletprocesspsbt(psbt, True, "DEFAULT", True, False)
++        decoded = node.decodepsbt(incomplete["psbt"])["inputs"][0]
++        assert "witness_utxo" in decoded, decoded
++        assert "taproot_script_path_sigs" not in decoded, decoded
++
++        # Supplying the missing spent output is all it takes for the same input to sign.
++        self.sign_without_finalizing(wallet, node.utxoupdatepsbt(psbt))
++
++    def test_leaf_selection(self):
++        self.log.info("Signing picks a leaf it can satisfy, and its cheapest control block")
++        node = self.nodes[0]
++        signable = self.make_leaf_keys(1)[0]
++        watch_only = self.make_leaf_keys(2)
++
++        # The shallow leaf cannot be signed for, so the deeper one has to be used.
++        deep_inner = "{{pk({}),{{pk({}),pk({})}}}}".format(watch_only[0][1], signable[0], watch_only[1][1])
++        deep_wallet, deep_address = self.new_p2mr_wallet("p2mr_deep_leaf", deep_inner)
++        self.fund(deep_address, 1)
++        result = deep_wallet.sendall([self.funder.getnewaddress()])
++        assert_equal(result["complete"], True)
++        self.generate(node, 1)
++        self.assert_p2mr_spend(result["txid"], expected_control_len=CONTROL_DEPTH_2)
++
++        # The same signable leaf sits at depth 1 and depth 2, so the 33 byte path wins.
++        dup_inner = "{{pk({}),{{pk({}),pk({})}}}}".format(signable[0], signable[0], watch_only[0][1])
++        dup_wallet, dup_address = self.new_p2mr_wallet("p2mr_dup_leaf", dup_inner)
++        self.fund(dup_address, 1)
++        result = dup_wallet.sendall([self.funder.getnewaddress()])
++        assert_equal(result["complete"], True)
++        self.generate(node, 1)
++        self.assert_p2mr_spend(result["txid"], expected_control_len=CONTROL_DEPTH_1)
++
++    def test_mixed_inputs(self):
++        self.log.info("Spend P2MR together with legacy and segwit inputs in one transaction")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_mixed", inner)
++
++        self.fund(address, 1)
++        for address_type in ["legacy", "p2sh-segwit", "bech32", "bech32m"]:
++            self.fund(wallet.getnewaddress(address_type=address_type), 1)
++        assert_equal(len(wallet.listunspent()), 5)
++
++        result = wallet.sendall([self.funder.getnewaddress()])
++        assert_equal(result["complete"], True)
++        self.generate(node, 1)
++        tx = self.assert_p2mr_spend(result["txid"], expected_control_len=CONTROL_DEPTH_1, expected_inputs=1)
++        assert_equal(len(tx["vin"]), 5)
++        assert_equal(wallet.getbalance(), Decimal("0"))
+ 
+     def test_single_leaf_refused(self):
+         self.log.info("A single leaf tmr() tree is refused because it is anyone-can-spend")
+@@ -232,8 +463,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         assert not wallet.getrawchangeaddress().startswith("bcrt1z")
+ 
+         # The derived P2MR outputs are still spendable.
+-        self.funder.sendtoaddress(addresses[3], 1)
+-        self.generate(node, 1)
++        self.fund(addresses[3], 1)
+         assert_equal(wallet.getbalance(), Decimal("1"))
+         result = wallet.sendall([self.funder.getnewaddress()])
+         assert_equal(result["complete"], True)
+@@ -241,34 +471,6 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.generate(node, 1)
+         assert_equal(wallet.getbalance(), Decimal("0"))
+ 
+-    def test_nested_tree(self):
+-        self.log.info("Receive and spend a nested three leaf tmr() tree")
+-        node = self.nodes[0]
+-        node.createwallet(wallet_name="p2mr_nested")
+-        wallet = node.get_wallet_rpc("p2mr_nested")
+-        keys = self.make_leaf_keys(3)
+-        inner = "{{{{pk({}),pk({})}},pk({})}}".format(keys[0][0], keys[1][0], keys[2][0])
+-        result, desc = self.import_tmr(wallet, inner)
+-        assert_equal(result["success"], True)
+-
+-        address = self.derive_address(desc)
+-        self.assert_p2mr_address(wallet, address)
+-
+-        self.funder.sendtoaddress(address, 3)
+-        self.generate(node, 1)
+-        assert_equal(wallet.getbalance(), Decimal("3"))
+-
+-        result = wallet.sendall([self.funder.getnewaddress()])
+-        assert_equal(result["complete"], True)
+-        # Two leaves sit at depth 2 and one at depth 1; signing picks the cheapest
+-        # control block, which is the single Merkle node of the shallow leaf.
+-        self.assert_p2mr_spend(
+-            result["txid"], expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE
+-        )
+-
+-        self.generate(node, 1)
+-        assert_equal(wallet.getbalance(), Decimal("0"))
+-
+ 
+ if __name__ == "__main__":
+     WalletP2MRTest(__file__).main()
+-- 
+2.49.0.windows.1
+

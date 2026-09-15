@@ -1,0 +1,172 @@
+From 4fd75b3eb2d2c304f75298fbe5b6277fedb4c241 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 04:19:29 -0600
+Subject: [PATCH 12/23] wallet: sign BIP360 P2MR script path spends
+
+Every P2MR spend is a BIP 341 script path spend of a BIP 342 tapscript leaf,
+so SignP2MR() reuses the tapscript signing of SignTaproot() unchanged and only
+builds a different witness: the leaf satisfaction, the leaf script and a
+1 + 32*m byte control block, with no key path branch and no annex. When more
+than one leaf can be satisfied, the one giving the smallest witness wins.
+
+SignStep() dispatches WITNESS_V2_P2MR to it instead of refusing to sign, and
+ProduceSignature() treats it like WITNESS_V1_TAPROOT when moving the result
+into the witness. This makes send, sendtoaddress, sendall and
+signrawtransactionwithwallet spend P2MR outputs.
+
+In PSBTs, P2MR inputs provisionally reuse the BIP 371 taproot fields: the
+Merkle root, the leaf scripts and the leaf signatures share an encoding with
+taproot script path spends, and the absent internal key plus the scriptPubKey
+of the input tell the two apart. BIP 174 and BIP 371 say nothing about P2MR,
+so this is a placeholder like the descriptor itself.
+
+The wallet's GetOutputType() maps P2MR to OutputType::UNKNOWN deliberately
+rather than by omission. Giving P2MR an OutputType would expose it through
+-addresstype and -changetype and let the wallet mint P2MR change, which is out
+of scope and unsafe on chains where the deployment is not active; the UNKNOWN
+grouping only affects per-type reporting, not selection or signing.
+---
+ src/psbt.cpp         | 14 ++++++++++++++
+ src/script/sign.cpp  | 41 ++++++++++++++++++++++++++++++++++++++---
+ src/script/sign.h    |  1 +
+ src/wallet/spend.cpp |  7 +++++++
+ 4 files changed, 60 insertions(+), 3 deletions(-)
+
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index 4ee5f5b..22f8954 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -133,6 +133,14 @@ void PSBTInput::FillSignatureData(SignatureData& sigdata) const
+     for (const auto& [leaf_script, control_block] : m_tap_scripts) {
+         sigdata.tr_spenddata.scripts.emplace(leaf_script, control_block);
+     }
++    // BIP360 P2MR provisionally reuses the BIP371 Taproot fields; the scriptPubKey type of the
++    // input decides which of the two spending data sets is consumed (see doc/p2mr.md).
++    if (!m_tap_merkle_root.IsNull()) {
++        sigdata.p2mr_spenddata.merkle_root = m_tap_merkle_root;
++    }
++    for (const auto& [leaf_script, control_block] : m_tap_scripts) {
++        sigdata.p2mr_spenddata.scripts.emplace(leaf_script, control_block);
++    }
+     for (const auto& [pubkey, leaf_origin] : m_tap_bip32_paths) {
+         sigdata.taproot_misc_pubkeys.emplace(pubkey, leaf_origin);
+         sigdata.tap_pubkeys.emplace(Hash160(pubkey), pubkey);
+@@ -200,6 +208,12 @@ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
+     for (const auto& [leaf_script, control_block] : sigdata.tr_spenddata.scripts) {
+         m_tap_scripts.emplace(leaf_script, control_block);
+     }
++    if (m_tap_merkle_root.IsNull() && !sigdata.p2mr_spenddata.merkle_root.IsNull()) {
++        m_tap_merkle_root = sigdata.p2mr_spenddata.merkle_root;
++    }
++    for (const auto& [leaf_script, control_block] : sigdata.p2mr_spenddata.scripts) {
++        m_tap_scripts.emplace(leaf_script, control_block);
++    }
+     for (const auto& [pubkey, leaf_origin] : sigdata.taproot_misc_pubkeys) {
+         m_tap_bip32_paths.emplace(pubkey, leaf_origin);
+     }
+diff --git a/src/script/sign.cpp b/src/script/sign.cpp
+index f80216e..fe97a52 100644
+--- a/src/script/sign.cpp
++++ b/src/script/sign.cpp
+@@ -619,6 +619,40 @@ static bool SignTaproot(const SigningProvider& provider, const BaseSignatureCrea
+     return false;
+ }
+ 
++static bool SignP2MR(const SigningProvider& provider, const BaseSignatureCreator& creator, const WitnessV2P2MR& output, SignatureData& sigdata, std::vector<valtype>& result)
++{
++    P2MRSpendData spenddata;
++    if (provider.GetP2MRSpendData(output, spenddata)) {
++        sigdata.p2mr_spenddata.Merge(spenddata);
++    }
++    if (auto agg_keys = provider.GetAllMuSig2ParticipantPubkeys(); !agg_keys.empty()) {
++        sigdata.musig2_pubkeys.insert(agg_keys.begin(), agg_keys.end());
++    }
++
++    // BIP360 has no internal key and no key path, so script path spending is the only option. The
++    // leaves themselves are ordinary BIP342 tapscripts, signed exactly as in a tr() script path
++    // spend; only the control block differs (1 + 32*m bytes, with no internal key).
++    std::vector<std::vector<unsigned char>> smallest_result_stack;
++    for (const auto& [key, control_blocks] : sigdata.p2mr_spenddata.scripts) {
++        const auto& [script, leaf_ver] = key;
++        std::vector<std::vector<unsigned char>> result_stack;
++        if (SignTaprootScript(provider, creator, sigdata, leaf_ver, script, result_stack)) {
++            result_stack.emplace_back(std::begin(script), std::end(script)); // Push the script
++            result_stack.push_back(*control_blocks.begin()); // Push the smallest control block
++            if (smallest_result_stack.size() == 0 ||
++                GetSerializeSize(result_stack) < GetSerializeSize(smallest_result_stack)) {
++                smallest_result_stack = std::move(result_stack);
++            }
++        }
++    }
++    if (smallest_result_stack.size() != 0) {
++        result = std::move(smallest_result_stack);
++        return true;
++    }
++
++    return false;
++}
++
+ /**
+  * Sign scriptPubKey using signature made with creator.
+  * Signatures are returned in scriptSigRet (or returns false if scriptPubKey can't be signed),
+@@ -639,8 +673,6 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
+     case TxoutType::NONSTANDARD:
+     case TxoutType::NULL_DATA:
+     case TxoutType::WITNESS_UNKNOWN:
+-    // Signing for P2MR (BIP360) outputs is not implemented.
+-    case TxoutType::WITNESS_V2_P2MR:
+         return false;
+     case TxoutType::PUBKEY:
+         if (!CreateSig(creator, sigdata, provider, sig, CPubKey(vSolutions[0]), scriptPubKey, sigversion)) return false;
+@@ -705,6 +737,9 @@ static bool SignStep(const SigningProvider& provider, const BaseSignatureCreator
+     case TxoutType::WITNESS_V1_TAPROOT:
+         return SignTaproot(provider, creator, WitnessV1Taproot(XOnlyPubKey{vSolutions[0]}), sigdata, ret);
+ 
++    case TxoutType::WITNESS_V2_P2MR:
++        return SignP2MR(provider, creator, WitnessV2P2MR(uint256{vSolutions[0]}), sigdata, ret);
++
+     case TxoutType::ANCHOR:
+         return true;
+     } // no default case, so the compiler can warn about missing cases
+@@ -781,7 +816,7 @@ bool ProduceSignature(const SigningProvider& provider, const BaseSignatureCreato
+         sigdata.scriptWitness.stack = result;
+         sigdata.witness = true;
+         result.clear();
+-    } else if (whichType == TxoutType::WITNESS_V1_TAPROOT && !P2SH) {
++    } else if ((whichType == TxoutType::WITNESS_V1_TAPROOT || whichType == TxoutType::WITNESS_V2_P2MR) && !P2SH) {
+         sigdata.witness = true;
+         if (solved) {
+             sigdata.scriptWitness.stack = std::move(result);
+diff --git a/src/script/sign.h b/src/script/sign.h
+index 8d50275..96905e7 100644
+--- a/src/script/sign.h
++++ b/src/script/sign.h
+@@ -83,6 +83,7 @@ struct SignatureData {
+     CScriptWitness scriptWitness; ///< The scriptWitness of an input. Contains complete signatures or the traditional partial signatures format. scriptWitness is part of a transaction input per BIP 144.
+     TaprootSpendData tr_spenddata; ///< Taproot spending data.
+     std::optional<TaprootBuilder> tr_builder; ///< Taproot tree used to build tr_spenddata.
++    P2MRSpendData p2mr_spenddata; ///< BIP360 P2MR spending data.
+     std::map<CKeyID, SigPair> signatures; ///< BIP 174 style partial signatures for the input. May contain all signatures necessary for producing a final scriptSig or scriptWitness.
+     std::map<CKeyID, std::pair<CPubKey, KeyOriginInfo>> misc_pubkeys;
+     std::vector<unsigned char> taproot_key_path_sig; /// Schnorr signature for key path spending
+diff --git a/src/wallet/spend.cpp b/src/wallet/spend.cpp
+index 6133753..1498f89 100644
+--- a/src/wallet/spend.cpp
++++ b/src/wallet/spend.cpp
+@@ -252,6 +252,13 @@ static OutputType GetOutputType(TxoutType type, bool is_from_p2sh)
+     switch (type) {
+         case TxoutType::WITNESS_V1_TAPROOT:
+             return OutputType::BECH32M;
++        case TxoutType::WITNESS_V2_P2MR:
++            // Deliberately UNKNOWN: BIP360 outputs are spendable through a tmr() descriptor, but
++            // they have no OutputType of their own, so they are never picked by -addresstype or
++            // -changetype and the wallet never generates P2MR change. Coin selection groups them
++            // under UNKNOWN, which only affects the per-type grouping in listunspent-style output,
++            // not whether they can be selected and signed.
++            return OutputType::UNKNOWN;
+         case TxoutType::WITNESS_V0_KEYHASH:
+         case TxoutType::WITNESS_V0_SCRIPTHASH:
+             if (is_from_p2sh) return OutputType::P2SH_SEGWIT;
+-- 
+2.49.0.windows.1
+

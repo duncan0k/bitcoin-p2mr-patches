@@ -79,3 +79,23 @@ validation only after activation.
   "the only", "the real bc1z", "mainnet-ready", or "a quantum-resistant network".
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
+
+## Follow-up series: M0.5 wallet support (branch `m05`, not part of the first release)
+
+`patches-m05/` (checksums in `SHA256SUMS-m05`) applies on top of the ten consensus patches and adds:
+
+- a **provisional** `tmr(TREE)` descriptor (same tree grammar as `tr()`, no internal key, single-leaf
+  trees rejected because they are anyone-can-spend, depth limited to 128);
+- P2MR spend data in the signing provider and script-path signing in the wallet (`send`, PSBT);
+- a deployment gate: importing or deriving `tmr()` receiving addresses is refused on chains where the
+  P2MR deployment is disabled (mainnet, testnets, the default signet), since such outputs would be
+  anyone-can-spend there;
+- fee estimation that treats P2MR inputs as witness inputs, control-block validation before signing,
+  a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`.
+
+Review status: two rounds of independent review; the second round found the earlier high and medium
+findings fixed. Published separately once it has been exercised on the experimental signet.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch
+```

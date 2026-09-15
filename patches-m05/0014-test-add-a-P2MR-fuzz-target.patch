@@ -1,0 +1,207 @@
+From 5e09b74121b0448217ac1f97219b40ea46e30529 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 04:25:42 -0600
+Subject: [PATCH 14/23] test: add a P2MR fuzz target
+
+Feed structured and corrupted BIP 360 spends to VerifyScript with
+SCRIPT_VERIFY_P2MR. The witness program, the control block, the leaf script,
+the leaf satisfaction and the annex are each either taken from a well-formed
+spend of a generated script tree or replaced with fuzz data, so both sides of
+every consensus rule are reachable. Fuzzed leaf depths that do not describe a
+tree fall back to a balanced shape rather than ending the run, so that most
+inputs reach script verification.
+
+Besides the usual agreement between the return value and the script error, the
+target asserts that clearing SCRIPT_VERIFY_P2MR turns any of those inputs back
+into an accepted unknown witness program.
+---
+ src/test/fuzz/CMakeLists.txt |   1 +
+ src/test/fuzz/p2mr.cpp       | 164 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 165 insertions(+)
+ create mode 100644 src/test/fuzz/p2mr.cpp
+
+diff --git a/src/test/fuzz/CMakeLists.txt b/src/test/fuzz/CMakeLists.txt
+index fc82fdc..13b93b8 100644
+--- a/src/test/fuzz/CMakeLists.txt
++++ b/src/test/fuzz/CMakeLists.txt
+@@ -75,6 +75,7 @@ add_executable(fuzz
+   netbase_dns_lookup.cpp
+   node_eviction.cpp
+   overflow.cpp
++  p2mr.cpp
+   p2p_handshake.cpp
+   p2p_headers_presync.cpp
+   p2p_transport_serialization.cpp
+diff --git a/src/test/fuzz/p2mr.cpp b/src/test/fuzz/p2mr.cpp
+new file mode 100644
+index 0000000..e564458
+--- /dev/null
++++ b/src/test/fuzz/p2mr.cpp
+@@ -0,0 +1,164 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <consensus/amount.h>
++#include <policy/policy.h>
++#include <primitives/transaction.h>
++#include <script/interpreter.h>
++#include <script/script.h>
++#include <script/signingprovider.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/fuzz/util.h>
++#include <uint256.h>
++
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++namespace {
++//! Leaves in a generated script tree.
++constexpr int MAX_TREE_LEAVES{5};
++//! Cap on the generated Merkle path so that the target stays fast.
++constexpr int MAX_TREE_DEPTH{4};
++
++//! Assign depths for a balanced tree over [lo, hi), which ValidDepths() always accepts.
++void BalancedDepths(int lo, int hi, int depth, std::vector<int>& depths)
++{
++    if (hi - lo == 1) {
++        depths.push_back(depth);
++        return;
++    }
++    const int mid{lo + (hi - lo) / 2};
++    BalancedDepths(lo, mid, depth + 1, depths);
++    BalancedDepths(mid, hi, depth + 1, depths);
++}
++
++//! Build a script tree out of fuzz input, falling back to a balanced shape when the fuzzed depths
++//! do not describe a tree, so that most inputs reach script verification.
++TaprootBuilder ConsumeScriptTree(FuzzedDataProvider& provider)
++{
++    const int leaves{provider.ConsumeIntegralInRange<int>(1, MAX_TREE_LEAVES)};
++    std::vector<int> depths;
++    depths.reserve(leaves);
++    for (int i = 0; i < leaves; ++i) {
++        depths.push_back(provider.ConsumeIntegralInRange<int>(0, MAX_TREE_DEPTH));
++    }
++    if (!TaprootBuilder::ValidDepths(depths)) {
++        depths.clear();
++        BalancedDepths(0, leaves, 0, depths);
++        assert(TaprootBuilder::ValidDepths(depths));
++    }
++
++    TaprootBuilder builder;
++    for (int i = 0; i < leaves; ++i) {
++        // Leaf versions always have their last bit clear; the control block sets it.
++        const int leaf_version{provider.ConsumeBool() ? TAPROOT_LEAF_TAPSCRIPT
++                                                      : (provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK)};
++        builder.Add(depths[i], ConsumeScript(provider), leaf_version);
++    }
++    assert(builder.IsComplete());
++    return builder;
++}
++} // namespace
++
++/** Feed structured and corrupted BIP360 P2MR spends to VerifyScript.
++ *
++ * The witness program, the control block, the leaf script, the leaf satisfaction and the annex are
++ * each either taken from a well-formed spend of a generated script tree or replaced with fuzz data,
++ * so that both the accepting and the rejecting side of every consensus rule is reachable.
++ */
++FUZZ_TARGET(p2mr)
++{
++    FuzzedDataProvider provider{buffer.data(), buffer.size()};
++
++    const P2MRSpendData spenddata{ConsumeScriptTree(provider).GetP2MRSpendData()};
++    assert(!spenddata.scripts.empty());
++
++    // Pick one of the tracked leaves to spend.
++    auto leaf_it{spenddata.scripts.begin()};
++    std::advance(leaf_it, provider.ConsumeIntegralInRange<size_t>(0, spenddata.scripts.size() - 1));
++    const auto& [leaf_script, leaf_version]{leaf_it->first};
++    const std::vector<unsigned char>& control_block{*leaf_it->second.begin()};
++
++    // The witness program: the real Merkle root, or fuzz data of an arbitrary length.
++    uint256 program{spenddata.merkle_root};
++    if (provider.ConsumeBool()) {
++        const auto fuzzed{provider.ConsumeBytes<unsigned char>(32)};
++        std::copy(fuzzed.begin(), fuzzed.end(), program.begin());
++    }
++    const CScript script_pubkey{CScript() << OP_2 << ToByteVector(program)};
++
++    CScriptWitness witness;
++    // Leaf satisfaction.
++    const int stack_items{provider.ConsumeIntegralInRange<int>(0, 4)};
++    for (int i = 0; i < stack_items; ++i) {
++        witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/80));
++    }
++    // Leaf script: the real one, or fuzz data.
++    if (provider.ConsumeBool()) {
++        witness.stack.push_back(leaf_script);
++    } else {
++        witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/128));
++    }
++    // Control block: the real one, or the real one with a mutated leaf version byte, or fuzz data.
++    switch (provider.ConsumeIntegralInRange<int>(0, 2)) {
++    case 0:
++        witness.stack.push_back(control_block);
++        break;
++    case 1: {
++        std::vector<unsigned char> mutated{control_block};
++        mutated[0] = provider.ConsumeIntegral<uint8_t>();
++        witness.stack.push_back(std::move(mutated));
++        break;
++    }
++    default:
++        witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/4200));
++        break;
++    }
++    // Annex.
++    if (provider.ConsumeBool()) {
++        auto annex{ConsumeRandomLengthByteVector(provider, /*max_length=*/64)};
++        annex.insert(annex.begin(), ANNEX_TAG);
++        witness.stack.push_back(std::move(annex));
++    }
++
++    // A minimal transaction spending the generated output.
++    CMutableTransaction tx;
++    tx.vin.resize(1);
++    tx.vin[0].scriptWitness = witness;
++    tx.vout.resize(1);
++    tx.vout[0].nValue = 1;
++    const CAmount amount{provider.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY)};
++
++    std::vector<CTxOut> spent_outputs{CTxOut{amount, script_pubkey}};
++    const CTransaction tx_const{tx};
++    PrecomputedTransactionData txdata;
++    txdata.Init(tx_const, std::move(spent_outputs));
++    const TransactionSignatureChecker checker{&tx_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL};
++
++    script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR};
++    for (const auto optional_flag : {SCRIPT_VERIFY_TAPROOT,
++                                     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION,
++                                     SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS,
++                                     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
++                                     SCRIPT_VERIFY_CLEANSTACK,
++                                     SCRIPT_VERIFY_MINIMALIF,
++                                     SCRIPT_VERIFY_NULLFAIL}) {
++        if (provider.ConsumeBool()) flags |= optional_flag;
++    }
++
++    ScriptError serror{SCRIPT_ERR_OK};
++    const bool ret{VerifyScript(CScript{}, script_pubkey, &witness, flags, checker, &serror)};
++    assert(ret == (serror == SCRIPT_ERR_OK));
++
++    // Without the flag, a witness v2 program is an unknown witness program: it is accepted unless
++    // upgradable witness programs are discouraged. This must hold for every input above.
++    script_verify_flags no_p2mr{flags};
++    no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_P2MR};
++    no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM};
++    ScriptError serror_no_p2mr{SCRIPT_ERR_OK};
++    assert(VerifyScript(CScript{}, script_pubkey, &witness, no_p2mr, checker, &serror_no_p2mr));
++    assert(serror_no_p2mr == SCRIPT_ERR_OK);
++}
+-- 
+2.49.0.windows.1
+

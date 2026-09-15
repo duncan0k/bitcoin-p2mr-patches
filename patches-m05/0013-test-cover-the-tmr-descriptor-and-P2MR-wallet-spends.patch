@@ -1,0 +1,362 @@
+From 81d40b1df4991b20d3d0ea26aced08f14a6f0dc6 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 04:19:45 -0600
+Subject: [PATCH 13/23] test: cover the tmr() descriptor and P2MR wallet spends
+
+descriptor_tests gains two tmr() vectors, a flat two leaf tree and a nested
+three leaf tree whose Merkle root matches the internal tree of the tr() vector
+above it, so the shared tree hashing is checked against a known value. Both go
+through the full Check() path: parse, serialize, expand, sign and infer back.
+The unparsable cases pin the single-leaf refusal and the tree syntax errors.
+
+wallet_p2mr.py imports a tmr() descriptor, receives on the derived bcrt1z
+address, spends it with send() and again through the PSBT flow, and repeats
+both for a nested tree and for a ranged descriptor. It asserts the shape of
+every P2MR witness (script path only, control block 1 + 32*m with m > 0 and
+the last bit of c[0] set), that change is never P2MR, that the anyone-can-spend
+single-leaf tree is refused, and that an active import warns about the missing
+output type instead of generating P2MR addresses.
+---
+ src/test/descriptor_tests.cpp  |  17 +-
+ test/functional/test_runner.py |   1 +
+ test/functional/wallet_p2mr.py | 274 +++++++++++++++++++++++++++++++++
+ 3 files changed, 291 insertions(+), 1 deletion(-)
+ create mode 100644 test/functional/wallet_p2mr.py
+
+diff --git a/src/test/descriptor_tests.cpp b/src/test/descriptor_tests.cpp
+index a646fc8..5aa5959 100644
+--- a/src/test/descriptor_tests.cpp
++++ b/src/test/descriptor_tests.cpp
+@@ -74,7 +74,8 @@ bool EqualSigningProviders(const FlatSigningProvider& a, const FlatSigningProvid
+         && a.pubkeys == b.pubkeys
+         && a.origins == b.origins
+         && a.keys == b.keys
+-        && a.tr_trees == b.tr_trees;
++        && a.tr_trees == b.tr_trees
++        && a.p2mr_trees == b.p2mr_trees;
+ }
+ 
+ std::string UseHInsteadOfApostrophe(const std::string& desc)
+@@ -623,6 +624,12 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
+     Check("sh(wsh(pk(L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1)))", "sh(wsh(pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)))", "sh(wsh(pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)))", SIGNABLE, {{"a91472d0c5a3bfad8c3e7bd5303a72b94240e80b6f1787"}}, OutputType::P2SH_SEGWIT);
+     Check("sh(wsh(pkh(L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1)))", "sh(wsh(pkh(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)))", "sh(wsh(pkh(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)))", SIGNABLE, {{"a914b61b92e2ca21bac1e72a3ab859a742982bea960a87"}}, OutputType::P2SH_SEGWIT);
+     Check("tr(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5,{pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", "tr(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5,{pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", "tr(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5,{pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", XONLY_KEYS | SIGNABLE | MISSING_PRIVKEYS, {{"51201497ae16f30dacb88523ed9301bff17773b609e8a90518a3f96ea328a47d1500"}}, OutputType::BECH32M);
++    // BIP360 P2MR. tmr() is the same tree syntax as tr() without an internal key, so the
++    // scriptPubKey is the bare Merkle root and there is no key path. Provisional spelling.
++    Check("tmr({pk(L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)})", "tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)})", "tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)})", XONLY_KEYS | SIGNABLE | MISSING_PRIVKEYS, {{"5220c6a55dd4b7455c47388b953fcd42ec995042a516df6fc0bd8667fc7c1096360e"}}, std::nullopt);
++    // Same tree as the tr() vector above, so the Merkle root matches its internal tree; the leaf
++    // script of the second key appears at two depths, which exercises control block selection.
++    Check("tmr({pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", "tmr({pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", "tmr({pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),{pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}})", XONLY_KEYS | SIGNABLE | MISSING_PRIVKEYS, {{"52209aaef684b86a271aa76a768f899f8fba71c80400b8b5f68ee4d89d9370574bb2"}}, std::nullopt);
+ 
+     // Versions with BIP32 derivations
+     Check("combo([01234567]xprvA1RpRA33e1JQ7ifknakTFpgNXPmW2YvmhqLQYMmrj4xJXXWYpDPS3xz7iAxn8L39njGVyuoseXzU6rcxFLJ8HFsTjSyQbLYnMpCqE2VbFWc)", "combo([01234567]xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL)", "combo([01234567]xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL)", SIGNABLE, {{"2102d2b36900396c9282fa14628566582f206a5dd0bcc8d5e892611806cafb0301f0ac","76a91431a507b815593dfc51ffc7245ae7e5aee304246e88ac","001431a507b815593dfc51ffc7245ae7e5aee304246e","a9142aafb926eb247cb18240a7f4c07983ad1f37922687"}}, std::nullopt, /*op_desc_id=*/uint256{"7f127f7861594e3ede449eb47a7cc623c753acc0b0f0fc03fbb2dac636c20d6f"});
+@@ -1004,6 +1011,14 @@ BOOST_AUTO_TEST_CASE(descriptor_test)
+     CheckUnparsable("", "multi(0)()", "Multi: expected ',', got ')'");
+     CheckUnparsable("", "multi(123)", "Cannot have 0 keys in multisig; must have between 1 and 20 keys, inclusive");
+     CheckUnparsable("", "tr(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd,multi_a(1))", "Cannot have 0 keys in multi_a; must have between 1 and 999 keys, inclusive");
++    // A tmr() leaf at depth 0 has an m = 0 control block, which BIP360 accepts without executing
++    // the leaf script, so such a tree is anyone-can-spend and is refused at parse time.
++    CheckUnparsable("", "tmr(pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd))", "tmr(): a single-leaf tree is anyone-can-spend, because its BIP360 control block has m = 0 and the leaf script is then never executed. Use at least two leaves; a bare Merkle root can be expressed with addr() or raw()");
++    CheckUnparsable("", "tmr()", "tmr(): expected a script tree");
++    CheckUnparsable("", "tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)},pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd))", "tmr(): expected ')' after script expression");
++    CheckUnparsable("", "tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5),pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)})", "tmr(): expected '}' after script expression");
++    CheckUnparsable("", "tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd)})", "tmr(): expected ',' after script expression");
++    CheckUnparsable("", "sh(tmr({pk(a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd),pk(03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5)}))", "Can only have tmr at top level");
+     CheckUnparsable("multi(3,KzoAz5CanayRKex3fSLQ2BwJpN7U52gZvxMyk78nDMHuqrUxuSJy,KwGNz6YCCQtYvFzMtrC6D3tKTKdBBboMrLTsjr2NYVBwapCkn7Mr,KxogYhiNfwxuswvXV66eFyKcCpm7dZ7TqHVqujHAVUjJxyivxQ9X,L2BUNduTSyZwZjwNHynQTF14mv2uz2NRq5n5sYWTb4FkkmqgEE9f)", "multi(3,03669b8afcec803a0d323e9a17f3ea8e68e8abe5a278020a929adbec52421adbd0,0260b2003c386519fc9eadf2b5cf124dd8eea4c4e68d5e154050a9346ea98ce600,0362a74e399c39ed5593852a30147f2959b56bb827dfa3e60e464b02ccf87dc5e8,0261345b53de74a4d721ef877c255429961b7e43714171ac06168d7e08c542a8b8)", "Cannot have 4 pubkeys in bare multisig; only at most 3 pubkeys"); // Threshold larger than number of keys
+     CheckUnparsable("sh(multi(16,KzoAz5CanayRKex3fSLQ2BwJpN7U52gZvxMyk78nDMHuqrUxuSJy,KwGNz6YCCQtYvFzMtrC6D3tKTKdBBboMrLTsjr2NYVBwapCkn7Mr,KxogYhiNfwxuswvXV66eFyKcCpm7dZ7TqHVqujHAVUjJxyivxQ9X,L2BUNduTSyZwZjwNHynQTF14mv2uz2NRq5n5sYWTb4FkkmqgEE9f,L1okJGHGn1kFjdXHKxXjwVVtmCMR2JA5QsbKCSpSb7ReQjezKeoD,KxDCNSST75HFPaW5QKpzHtAyaCQC7p9Vo3FYfi2u4dXD1vgMiboK,L5edQjFtnkcf5UWURn6UuuoFrabgDQUHdheKCziwN42aLwS3KizU,KzF8UWFcEC7BYTq8Go1xVimMkDmyNYVmXV5PV7RuDicvAocoPB8i,L3nHUboKG2w4VSJ5jYZ5CBM97oeK6YuKvfZxrefdShECcjEYKMWZ,KyjHo36dWkYhimKmVVmQTq3gERv3pnqA4xFCpvUgbGDJad7eS8WE,KwsfyHKRUTZPQtysN7M3tZ4GXTnuov5XRgjdF2XCG8faAPmFruRF,KzCUbGhN9LJhdeFfL9zQgTJMjqxdBKEekRGZX24hXdgCNCijkkap,KzgpMBwwsDLwkaC5UrmBgCYaBD2WgZ7PBoGYXR8KT7gCA9UTN5a3,KyBXTPy4T7YG4q9tcAM3LkvfRpD1ybHMvcJ2ehaWXaSqeGUxEdkP,KzJDe9iwJRPtKP2F2AoN6zBgzS7uiuAwhWCfGdNeYJ3PC1HNJ8M8,L1xbHrxynrqLKkoYc4qtoQPx6uy5qYXR5ZDYVYBSRmCV5piU3JG9,L4rK1yDtCWekvXuE6oXD9jCYfFNV2cWRpVuPLBcCU2z8TrisoyY1))","sh(multi(16,03669b8afcec803a0d323e9a17f3ea8e68e8abe5a278020a929adbec52421adbd0,0260b2003c386519fc9eadf2b5cf124dd8eea4c4e68d5e154050a9346ea98ce600,0362a74e399c39ed5593852a30147f2959b56bb827dfa3e60e464b02ccf87dc5e8,0261345b53de74a4d721ef877c255429961b7e43714171ac06168d7e08c542a8b8,02da72e8b46901a65d4374fe6315538d8f368557dda3a1dcf9ea903f3afe7314c8,0318c82dd0b53fd3a932d16e0ba9e278fcc937c582d5781be626ff16e201f72286,0297ccef1ef99f9d73dec9ad37476ddb232f1238aff877af19e72ba04493361009,02e502cfd5c3f972fe9a3e2a18827820638f96b6f347e54d63deb839011fd5765d,03e687710f0e3ebe81c1037074da939d409c0025f17eb86adb9427d28f0f7ae0e9,02c04d3a5274952acdbc76987f3184b346a483d43be40874624b29e3692c1df5af,02ed06e0f418b5b43a7ec01d1d7d27290fa15f75771cb69b642a51471c29c84acd,036d46073cbb9ffee90473f3da429abc8de7f8751199da44485682a989a4bebb24,02f5d1ff7c9029a80a4e36b9a5497027ef7f3e73384a4a94fbfe7c4e9164eec8bc,02e41deffd1b7cce11cde209a781adcffdabd1b91c0ba0375857a2bfd9302419f3,02d76625f7956a7fc505ab02556c23ee72d832f1bac391bcd2d3abce5710a13d06,0399eb0a5487515802dc14544cf10b3666623762fbed2ec38a3975716e2c29c232,03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd))", "P2SH script is too large, 581 bytes is larger than 520 bytes"); // Cannot have more than 15 keys in a P2SH multisig, or we exceed maximum push size
+     Check("wsh(multi(20,KzoAz5CanayRKex3fSLQ2BwJpN7U52gZvxMyk78nDMHuqrUxuSJy,KwGNz6YCCQtYvFzMtrC6D3tKTKdBBboMrLTsjr2NYVBwapCkn7Mr,KxogYhiNfwxuswvXV66eFyKcCpm7dZ7TqHVqujHAVUjJxyivxQ9X,L2BUNduTSyZwZjwNHynQTF14mv2uz2NRq5n5sYWTb4FkkmqgEE9f,L1okJGHGn1kFjdXHKxXjwVVtmCMR2JA5QsbKCSpSb7ReQjezKeoD,KxDCNSST75HFPaW5QKpzHtAyaCQC7p9Vo3FYfi2u4dXD1vgMiboK,L5edQjFtnkcf5UWURn6UuuoFrabgDQUHdheKCziwN42aLwS3KizU,KzF8UWFcEC7BYTq8Go1xVimMkDmyNYVmXV5PV7RuDicvAocoPB8i,L3nHUboKG2w4VSJ5jYZ5CBM97oeK6YuKvfZxrefdShECcjEYKMWZ,KyjHo36dWkYhimKmVVmQTq3gERv3pnqA4xFCpvUgbGDJad7eS8WE,KwsfyHKRUTZPQtysN7M3tZ4GXTnuov5XRgjdF2XCG8faAPmFruRF,KzCUbGhN9LJhdeFfL9zQgTJMjqxdBKEekRGZX24hXdgCNCijkkap,KzgpMBwwsDLwkaC5UrmBgCYaBD2WgZ7PBoGYXR8KT7gCA9UTN5a3,KyBXTPy4T7YG4q9tcAM3LkvfRpD1ybHMvcJ2ehaWXaSqeGUxEdkP,KzJDe9iwJRPtKP2F2AoN6zBgzS7uiuAwhWCfGdNeYJ3PC1HNJ8M8,L1xbHrxynrqLKkoYc4qtoQPx6uy5qYXR5ZDYVYBSRmCV5piU3JG9,KzRedjSwMggebB3VufhbzpYJnvHfHe9kPJSjCU5QpJdAW3NSZxYS,Kyjtp5858xL7JfeV4PNRCKy2t6XvgqNNepArGY9F9F1SSPqNEMs3,L2D4RLHPiHBidkHS8ftx11jJk1hGFELvxh8LoxNQheaGT58dKenW,KyLPZdwY4td98bKkXqEXTEBX3vwEYTQo1yyLjX2jKXA63GBpmSjv))","wsh(multi(20,03669b8afcec803a0d323e9a17f3ea8e68e8abe5a278020a929adbec52421adbd0,0260b2003c386519fc9eadf2b5cf124dd8eea4c4e68d5e154050a9346ea98ce600,0362a74e399c39ed5593852a30147f2959b56bb827dfa3e60e464b02ccf87dc5e8,0261345b53de74a4d721ef877c255429961b7e43714171ac06168d7e08c542a8b8,02da72e8b46901a65d4374fe6315538d8f368557dda3a1dcf9ea903f3afe7314c8,0318c82dd0b53fd3a932d16e0ba9e278fcc937c582d5781be626ff16e201f72286,0297ccef1ef99f9d73dec9ad37476ddb232f1238aff877af19e72ba04493361009,02e502cfd5c3f972fe9a3e2a18827820638f96b6f347e54d63deb839011fd5765d,03e687710f0e3ebe81c1037074da939d409c0025f17eb86adb9427d28f0f7ae0e9,02c04d3a5274952acdbc76987f3184b346a483d43be40874624b29e3692c1df5af,02ed06e0f418b5b43a7ec01d1d7d27290fa15f75771cb69b642a51471c29c84acd,036d46073cbb9ffee90473f3da429abc8de7f8751199da44485682a989a4bebb24,02f5d1ff7c9029a80a4e36b9a5497027ef7f3e73384a4a94fbfe7c4e9164eec8bc,02e41deffd1b7cce11cde209a781adcffdabd1b91c0ba0375857a2bfd9302419f3,02d76625f7956a7fc505ab02556c23ee72d832f1bac391bcd2d3abce5710a13d06,0399eb0a5487515802dc14544cf10b3666623762fbed2ec38a3975716e2c29c232,02bc2feaa536991d269aae46abb8f3772a5b3ad592314945e51543e7da84c4af6e,0318bf32e5217c1eb771a6d5ce1cd39395dff7ff665704f175c9a5451d95a2f2ca,02c681a6243f16208c2004bb81f5a8a67edfdd3e3711534eadeec3dcf0b010c759,0249fdd6b69768b8d84b4893f8ff84b36835c50183de20fcae8f366a45290d01fd))", "wsh(multi(20,03669b8afcec803a0d323e9a17f3ea8e68e8abe5a278020a929adbec52421adbd0,0260b2003c386519fc9eadf2b5cf124dd8eea4c4e68d5e154050a9346ea98ce600,0362a74e399c39ed5593852a30147f2959b56bb827dfa3e60e464b02ccf87dc5e8,0261345b53de74a4d721ef877c255429961b7e43714171ac06168d7e08c542a8b8,02da72e8b46901a65d4374fe6315538d8f368557dda3a1dcf9ea903f3afe7314c8,0318c82dd0b53fd3a932d16e0ba9e278fcc937c582d5781be626ff16e201f72286,0297ccef1ef99f9d73dec9ad37476ddb232f1238aff877af19e72ba04493361009,02e502cfd5c3f972fe9a3e2a18827820638f96b6f347e54d63deb839011fd5765d,03e687710f0e3ebe81c1037074da939d409c0025f17eb86adb9427d28f0f7ae0e9,02c04d3a5274952acdbc76987f3184b346a483d43be40874624b29e3692c1df5af,02ed06e0f418b5b43a7ec01d1d7d27290fa15f75771cb69b642a51471c29c84acd,036d46073cbb9ffee90473f3da429abc8de7f8751199da44485682a989a4bebb24,02f5d1ff7c9029a80a4e36b9a5497027ef7f3e73384a4a94fbfe7c4e9164eec8bc,02e41deffd1b7cce11cde209a781adcffdabd1b91c0ba0375857a2bfd9302419f3,02d76625f7956a7fc505ab02556c23ee72d832f1bac391bcd2d3abce5710a13d06,0399eb0a5487515802dc14544cf10b3666623762fbed2ec38a3975716e2c29c232,02bc2feaa536991d269aae46abb8f3772a5b3ad592314945e51543e7da84c4af6e,0318bf32e5217c1eb771a6d5ce1cd39395dff7ff665704f175c9a5451d95a2f2ca,02c681a6243f16208c2004bb81f5a8a67edfdd3e3711534eadeec3dcf0b010c759,0249fdd6b69768b8d84b4893f8ff84b36835c50183de20fcae8f366a45290d01fd))", SIGNABLE, {{"0020376bd8344b8b6ebe504ff85ef743eaa1aa9272178223bcb6887e9378efb341ac"}}, OutputType::BECH32, /*op_desc_id=*/uint256{"2bb9d418ebdc3a75c465383985881527f3e5d6e520fb3efb152d4191b80e8412"}); // In P2WSH we can have up to 20 keys
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index b391ac9..f67acee 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -287,6 +287,7 @@ BASE_SCRIPTS = [
+     'feature_nulldummy.py',
+     'feature_p2mr.py',
+     'feature_p2mr_signet.py',
++    'wallet_p2mr.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+     'mempool_expiry.py',
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+new file mode 100644
+index 0000000..3b64cdd
+--- /dev/null
++++ b/test/functional/wallet_p2mr.py
+@@ -0,0 +1,274 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Wallet support for BIP360 P2MR outputs through the provisional tmr() descriptor.
++
++Covers importing a tmr() descriptor, receiving to the resulting bcrt1z address,
++spending it automatically with send() and through the PSBT flow, the descriptor
++inferred for a P2MR output, and the refusal to express an anyone-can-spend
++single-leaf tree.
++"""
++
++from decimal import Decimal
++
++from test_framework.descriptors import descsum_create
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import (
++    assert_equal,
++    assert_greater_than,
++    assert_raises_rpc_error,
++)
++from test_framework.wallet_util import generate_keypair
++
++# BIP360 control block: one leaf version byte plus 32 bytes per Merkle path element.
++P2MR_CONTROL_BASE_SIZE = 1
++P2MR_CONTROL_NODE_SIZE = 32
++# BIP341 tapscript leaf version, the only one tmr() builds.
++TAPROOT_LEAF_TAPSCRIPT = 0xC0
++# Test-only extended private key, reused from wallet_taproot.py.
++XPRV = "tprv8ZgxMBicQKsPeNLUGrbv3b7qhUk1LQJZAGMuk9gVuKh9sd4BWGp1eMsehUni6qGb8bjkdwBxCbgNGdh2bYGACK5C5dRTaif9KBKGVnSezxV"
++
++
++class WalletP2MRTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++        self.extra_args = [["-txindex"]]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++
++    def init_wallet(self, *, node):
++        pass
++
++    # -- helpers -------------------------------------------------------------
++
++    def make_leaf_keys(self, count):
++        """Return (wif, xonly_hex) pairs for `count` freshly generated keys."""
++        keys = []
++        for _ in range(count):
++            wif, pubkey = generate_keypair(wif=True)
++            keys.append((wif, pubkey[1:].hex()))
++        return keys
++
++    def import_tmr(self, wallet, inner, **kwargs):
++        """Import tmr(<inner>) into `wallet`; return (import result, descriptor)."""
++        desc = descsum_create(f"tmr({inner})")
++        request = {"desc": desc, "timestamp": "now"}
++        request.update(kwargs)
++        return wallet.importdescriptors([request])[0], desc
++
++    def derive_address(self, desc, desc_range=None):
++        args = [desc] if desc_range is None else [desc, desc_range]
++        addresses = self.nodes[0].deriveaddresses(*args)
++        if desc_range is None:
++            assert_equal(len(addresses), 1)
++            return addresses[0]
++        return addresses
++
++    def assert_p2mr_address(self, wallet, address):
++        info = wallet.getaddressinfo(address)
++        assert address.startswith("bcrt1z"), address
++        assert_equal(info["iswitness"], True)
++        assert_equal(info["witness_version"], 2)
++        assert_equal(len(info["witness_program"]), 64)
++        assert_equal(info["ismine"], True)
++        assert_equal(info["solvable"], True)
++        # getaddressinfo reports the witness version and program; the script type
++        # itself is spelled out by decodescript.
++        assert_equal(self.nodes[0].decodescript(info["scriptPubKey"])["type"], "witness_v2_p2mr")
++        # The wallet knows the whole tree, so it infers a tmr() descriptor back.
++        assert info["desc"].startswith("tmr("), info["desc"]
++        return info
++
++    def assert_p2mr_spend(self, txid, expected_control_len=None):
++        """Check that every P2MR input of `txid` is a BIP360 script path spend."""
++        tx = self.nodes[0].getrawtransaction(txid, True)
++        p2mr_inputs = 0
++        for txin in tx["vin"]:
++            prev = self.nodes[0].getrawtransaction(txin["txid"], True)
++            if prev["vout"][txin["vout"]]["scriptPubKey"]["type"] != "witness_v2_p2mr":
++                continue
++            p2mr_inputs += 1
++            witness = txin["txinwitness"]
++            # [leaf satisfaction..., leaf script, control block]; there is no key path.
++            assert_greater_than(len(witness), 2)
++            control = bytes.fromhex(witness[-1])
++            depth, remainder = divmod(len(control) - P2MR_CONTROL_BASE_SIZE, P2MR_CONTROL_NODE_SIZE)
++            assert_equal(remainder, 0)
++            # A depth-zero leaf would be anyone-can-spend, and tmr() never builds one.
++            assert_greater_than(depth, 0)
++            # BIP360 leaves the last bit of c[0] unused and requires it to be 1.
++            assert_equal(control[0] & 1, 1)
++            assert_equal(control[0] & 0xFE, TAPROOT_LEAF_TAPSCRIPT)
++            if expected_control_len is not None:
++                assert_equal(len(control), expected_control_len)
++        assert_greater_than(p2mr_inputs, 0)
++        return tx
++
++    # -- test cases ----------------------------------------------------------
++
++    def run_test(self):
++        node = self.nodes[0]
++
++        node.createwallet(wallet_name="funder")
++        self.funder = node.get_wallet_rpc("funder")
++        self.generatetoaddress(node, 101, self.funder.getnewaddress())
++
++        self.test_import_and_receive()
++        self.test_send()
++        self.test_psbt()
++        self.test_single_leaf_refused()
++        self.test_ranged_and_no_output_type()
++        self.test_nested_tree()
++
++    def test_import_and_receive(self):
++        self.log.info("Import a two leaf tmr() descriptor and receive to it")
++        node = self.nodes[0]
++        node.createwallet(wallet_name="p2mr")
++        self.wallet = node.get_wallet_rpc("p2mr")
++
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        result, desc = self.import_tmr(self.wallet, inner)
++        assert_equal(result["success"], True)
++
++        self.address = self.derive_address(desc)
++        info = self.assert_p2mr_address(self.wallet, self.address)
++        for _, xonly in keys:
++            assert xonly in info["desc"], info["desc"]
++
++        self.funder.sendtoaddress(self.address, 5)
++        self.generate(node, 1)
++
++        utxos = self.wallet.listunspent()
++        assert_equal(len(utxos), 1)
++        assert_equal(utxos[0]["address"], self.address)
++        assert_equal(utxos[0]["amount"], Decimal("5"))
++        assert_equal(utxos[0]["solvable"], True)
++        assert utxos[0]["desc"].startswith("tmr("), utxos[0]["desc"]
++        assert_equal(self.wallet.getbalance(), Decimal("5"))
++
++    def test_send(self):
++        self.log.info("Spend a P2MR output automatically with send()")
++        destination = self.funder.getnewaddress()
++        result = self.wallet.send({destination: 1}, fee_rate=10)
++        assert_equal(result["complete"], True)
++        txid = result["txid"]
++
++        tx = self.assert_p2mr_spend(txid, expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE)
++        assert_equal(len(tx["vin"]), 1)
++
++        # The change must not be P2MR: the wallet cannot generate P2MR addresses.
++        change_types = {
++            vout["scriptPubKey"]["type"]
++            for vout in tx["vout"]
++            if vout["scriptPubKey"]["address"] != destination
++        }
++        assert_equal(len(change_types), 1)
++        assert "witness_v2_p2mr" not in change_types, change_types
++
++        self.generate(self.nodes[0], 1)
++        wtx = self.wallet.gettransaction(txid)
++        assert_equal(wtx["confirmations"], 1)
++        # The spent P2MR output is gone; the change came back to the wallet.
++        assert self.address not in {u["address"] for u in self.wallet.listunspent()}
++        assert_greater_than(self.wallet.getbalance(), Decimal("3"))
++
++    def test_psbt(self):
++        self.log.info("Spend a P2MR output through the PSBT flow")
++        node = self.nodes[0]
++        self.funder.sendtoaddress(self.address, 2)
++        self.generate(node, 1)
++
++        utxo = next(u for u in self.wallet.listunspent() if u["address"] == self.address)
++        destination = self.funder.getnewaddress()
++        funded = self.wallet.walletcreatefundedpsbt(
++            inputs=[{"txid": utxo["txid"], "vout": utxo["vout"]}],
++            outputs=[{destination: 1}],
++            options={"fee_rate": 10, "add_inputs": False},
++        )
++        processed = self.wallet.walletprocesspsbt(funded["psbt"])
++        assert_equal(processed["complete"], True)
++        finalized = node.finalizepsbt(processed["psbt"])
++        assert_equal(finalized["complete"], True)
++
++        txid = node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE)
++        assert_equal(self.wallet.gettransaction(txid)["confirmations"], 1)
++
++    def test_single_leaf_refused(self):
++        self.log.info("A single leaf tmr() tree is refused because it is anyone-can-spend")
++        keys = self.make_leaf_keys(1)
++        assert_raises_rpc_error(
++            -5,
++            "tmr(): a single-leaf tree is anyone-can-spend",
++            self.nodes[0].getdescriptorinfo,
++            "tmr(pk({}))".format(keys[0][1]),
++        )
++
++    def test_ranged_and_no_output_type(self):
++        self.log.info("A ranged tmr() descriptor derives addresses but cannot become active")
++        node = self.nodes[0]
++        node.createwallet(wallet_name="p2mr_ranged")
++        wallet = node.get_wallet_rpc("p2mr_ranged")
++        inner = "{{pk({x}/0/*),pk({x}/1/*)}}".format(x=XPRV)
++        # Only ranged descriptors may be requested as active, so this is also the
++        # case that reaches the output type check.
++        result, desc = self.import_tmr(wallet, inner, active=True, range=[0, 4])
++        assert_equal(result["success"], True)
++        assert_equal(result["warnings"], ["Unknown output type, cannot set descriptor to active."])
++
++        addresses = self.derive_address(desc, [0, 4])
++        assert_equal(len(addresses), 5)
++        assert_equal(len(set(addresses)), 5)
++        for address in addresses:
++            self.assert_p2mr_address(wallet, address)
++
++        # Address generation keeps using the wallet's own descriptors.
++        assert not wallet.getnewaddress().startswith("bcrt1z")
++        assert not wallet.getrawchangeaddress().startswith("bcrt1z")
++
++        # The derived P2MR outputs are still spendable.
++        self.funder.sendtoaddress(addresses[3], 1)
++        self.generate(node, 1)
++        assert_equal(wallet.getbalance(), Decimal("1"))
++        result = wallet.sendall([self.funder.getnewaddress()])
++        assert_equal(result["complete"], True)
++        self.assert_p2mr_spend(result["txid"])
++        self.generate(node, 1)
++        assert_equal(wallet.getbalance(), Decimal("0"))
++
++    def test_nested_tree(self):
++        self.log.info("Receive and spend a nested three leaf tmr() tree")
++        node = self.nodes[0]
++        node.createwallet(wallet_name="p2mr_nested")
++        wallet = node.get_wallet_rpc("p2mr_nested")
++        keys = self.make_leaf_keys(3)
++        inner = "{{{{pk({}),pk({})}},pk({})}}".format(keys[0][0], keys[1][0], keys[2][0])
++        result, desc = self.import_tmr(wallet, inner)
++        assert_equal(result["success"], True)
++
++        address = self.derive_address(desc)
++        self.assert_p2mr_address(wallet, address)
++
++        self.funder.sendtoaddress(address, 3)
++        self.generate(node, 1)
++        assert_equal(wallet.getbalance(), Decimal("3"))
++
++        result = wallet.sendall([self.funder.getnewaddress()])
++        assert_equal(result["complete"], True)
++        # Two leaves sit at depth 2 and one at depth 1; signing picks the cheapest
++        # control block, which is the single Merkle node of the shallow leaf.
++        self.assert_p2mr_spend(
++            result["txid"], expected_control_len=P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE
++        )
++
++        self.generate(node, 1)
++        assert_equal(wallet.getbalance(), Decimal("0"))
++
++
++if __name__ == "__main__":
++    WalletP2MRTest(__file__).main()
+-- 
+2.49.0.windows.1
+

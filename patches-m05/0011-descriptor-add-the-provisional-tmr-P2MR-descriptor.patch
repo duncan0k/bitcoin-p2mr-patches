@@ -1,0 +1,627 @@
+From 7fa5ab61f04b0cfce2cbae54e12ebe2b733b768f Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 04:19:17 -0600
+Subject: [PATCH 11/23] descriptor: add the provisional tmr() P2MR descriptor
+
+BIP 360 defines the P2MR output format but no descriptor language. Spell a
+P2MR script tree as tmr(TREE), the name used by the cryptoquick/bitcoin
+prototype, and mark it provisional in the documentation: it is not specified
+by any BIP and may change.
+
+TREE reuses the tr() tree syntax and its leaves are parsed in the P2TR
+context, since BIP 360 executes them under the BIP 342 tapscript rules with
+leaf version 0xc0. There is no internal key argument because there is no key
+path: the witness program is the script tree Merkle root itself.
+
+A tree with a single leaf is refused. Such a leaf sits at depth zero, so its
+control block has m = 0, and BIP 360 then succeeds without executing the leaf
+script, which would make the output anyone-can-spend. The error message points
+at addr() and raw() for expressing that output deliberately.
+
+BIP 360 reuses the BIP 341 TapLeaf/TapBranch tree verbatim, so TaprootBuilder
+computes both output types; it gains GetP2MROutput() and GetP2MRSpendData(),
+which differ from the taproot versions only in the control block prefix (one
+leaf version byte instead of leaf version plus internal key) and in committing
+to the root directly rather than to a tweaked key. For the same reason the
+tree reconstruction in InferTaprootTree() is factored into a helper shared
+with the new InferP2MRTree(), parameterised by the control block prefix size.
+
+SigningProvider, HidingSigningProvider, FlatSigningProvider and
+MultiSigningProvider learn GetP2MRSpendData()/GetP2MRBuilder(), and
+InferScript() reconstructs a tmr() descriptor for a P2MR output whose tree is
+known, falling back to addr() otherwise.
+---
+ src/script/descriptor.cpp      | 223 +++++++++++++++++++++++++++++++++
+ src/script/signingprovider.cpp | 134 +++++++++++++++++---
+ src/script/signingprovider.h   |  55 ++++++--
+ 3 files changed, 390 insertions(+), 22 deletions(-)
+
+diff --git a/src/script/descriptor.cpp b/src/script/descriptor.cpp
+index 19315dd..9dc3890 100644
+--- a/src/script/descriptor.cpp
++++ b/src/script/descriptor.cpp
+@@ -1538,6 +1538,107 @@ public:
+     }
+ };
+ 
++/** A parsed tmr(...) descriptor.
++ *
++ * BIP360 does not define a descriptor language; tmr() is a provisional Bitcoin Core spelling (see
++ * doc/descriptors.md). It reuses the tr() tree syntax, but has no internal key and therefore no
++ * key path: the output commits directly to the script tree Merkle root. */
++class TMRDescriptor final : public DescriptorImpl
++{
++    std::vector<int> m_depths;
++protected:
++    std::vector<CScript> MakeScripts(const std::vector<CPubKey>&, std::span<const CScript> scripts, FlatSigningProvider& out) const override
++    {
++        TaprootBuilder builder;
++        assert(m_depths.size() == scripts.size());
++        for (size_t pos = 0; pos < m_depths.size(); ++pos) {
++            builder.Add(m_depths[pos], scripts[pos], TAPROOT_LEAF_TAPSCRIPT);
++        }
++        if (!builder.IsComplete()) return {};
++        WitnessV2P2MR output = builder.GetP2MROutput();
++        out.p2mr_trees[output] = builder;
++        return Vector(GetScriptForDestination(output));
++    }
++    bool ToStringSubScriptHelper(const SigningProvider* arg, std::string& ret, const StringType type, const DescriptorCache* cache = nullptr) const override
++    {
++        // Identical to the tr() tree serialization; tmr() always has at least two leaves, so the
++        // outermost pair of braces is always emitted.
++        std::vector<bool> path;
++        bool is_private{type == StringType::PRIVATE};
++        bool any_success{!is_private};
++
++        for (size_t pos = 0; pos < m_depths.size(); ++pos) {
++            if (pos) ret += ',';
++            while ((int)path.size() <= m_depths[pos]) {
++                if (path.size()) ret += '{';
++                path.push_back(false);
++            }
++            std::string tmp;
++            bool subscript_res{m_subdescriptor_args[pos]->ToStringHelper(arg, tmp, type, cache)};
++            if (!is_private && !subscript_res) return false;
++            any_success = any_success || subscript_res;
++            ret += tmp;
++            while (!path.empty() && path.back()) {
++                if (path.size() > 1) ret += '}';
++                path.pop_back();
++            }
++            if (!path.empty()) path.back() = true;
++        }
++        return any_success;
++    }
++public:
++    TMRDescriptor(std::vector<std::unique_ptr<DescriptorImpl>> descs, std::vector<int> depths) :
++        DescriptorImpl({}, std::move(descs), "tmr"), m_depths(std::move(depths))
++    {
++        assert(m_subdescriptor_args.size() == m_depths.size());
++        // A single leaf would sit at depth 0, making the spend anyone-can-spend (BIP360 succeeds
++        // without executing a leaf whose control block has m = 0). The parser and the inference
++        // code refuse to build such a descriptor.
++        assert(m_depths.size() > 1);
++    }
++    /** P2MR deliberately has no OutputType: adding one would make it selectable by -addresstype
++     *  and -changetype and let the wallet mint P2MR change, which M0.5 does not support. */
++    std::optional<OutputType> GetOutputType() const override { return std::nullopt; }
++    bool IsSingleType() const final { return true; }
++
++    std::optional<int64_t> ScriptSize() const override { return 1 + 1 + 32; }
++
++    std::optional<int64_t> MaxSatisfactionWeight(bool use_max_sig) const override {
++        // Every spend is a script path spend of exactly one leaf: its satisfaction, the leaf
++        // script, and a 1 + 32*depth byte control block. Assume the most expensive leaf.
++        int64_t max_sat{0};
++        for (size_t pos = 0; pos < m_depths.size(); ++pos) {
++            const auto sat_size = m_subdescriptor_args[pos]->MaxSatSize(use_max_sig);
++            const auto script_size = m_subdescriptor_args[pos]->ScriptSize();
++            if (!sat_size || !script_size) return {};
++            const int64_t control_size{static_cast<int64_t>(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * static_cast<size_t>(m_depths[pos]))};
++            max_sat = std::max<int64_t>(max_sat, *sat_size
++                                                 + GetSizeOfCompactSize(*script_size) + *script_size
++                                                 + GetSizeOfCompactSize(control_size) + control_size);
++        }
++        return max_sat;
++    }
++
++    std::optional<int64_t> MaxSatisfactionElems() const override {
++        // The leaf satisfaction, plus the leaf script and the control block.
++        int64_t max_elems{0};
++        for (const auto& sub : m_subdescriptor_args) {
++            const auto sub_elems = sub->MaxSatisfactionElems();
++            if (!sub_elems) return {};
++            max_elems = std::max<int64_t>(max_elems, *sub_elems + 2);
++        }
++        return max_elems;
++    }
++
++    std::unique_ptr<DescriptorImpl> Clone() const override
++    {
++        std::vector<std::unique_ptr<DescriptorImpl>> subdescs;
++        subdescs.reserve(m_subdescriptor_args.size());
++        std::transform(m_subdescriptor_args.begin(), m_subdescriptor_args.end(), std::back_inserter(subdescs), [](const std::unique_ptr<DescriptorImpl>& d) { return d->Clone(); });
++        return std::make_unique<TMRDescriptor>(std::move(subdescs), m_depths);
++    }
++};
++
+ /* We instantiate Miniscript here with a simple integer as key type.
+  * The value of these key integers are an index in the
+  * DescriptorImpl::m_pubkey_args vector.
+@@ -2556,6 +2657,91 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
+         error = "Can only have tr at top level";
+         return {};
+     }
++    if (ctx == ParseScriptContext::TOP && Func("tmr", expr)) {
++        // BIP360 P2MR. Same tree syntax as tr(), but without an internal key: the whole expression
++        // is the script tree. Leaves are parsed in the P2TR context because BIP360 executes them
++        // under the BIP342 Tapscript rules with leaf version 0xc0.
++        std::vector<std::vector<std::unique_ptr<DescriptorImpl>>> subscripts; //!< list of multipath expanded script subexpressions
++        std::vector<int> depths; //!< depth in the tree of each subexpression (same length subscripts)
++        size_t max_providers_len = 1;
++        if (expr.empty()) {
++            error = "tmr(): expected a script tree";
++            return {};
++        }
++        /** The path from the top of the tree to what we're currently processing.
++         * branches[i] == false: left branch in the i'th step from the top; true: right branch.
++         */
++        std::vector<bool> branches;
++        do {
++            // First process all open braces.
++            while (Const("{", expr)) {
++                branches.push_back(false); // new left branch
++                if (branches.size() > P2MR_CONTROL_MAX_NODE_COUNT) {
++                    error = strprintf("tmr() supports at most %i nesting levels", P2MR_CONTROL_MAX_NODE_COUNT);
++                    return {};
++                }
++            }
++            // Process the actual script expression.
++            auto sarg = Expr(expr);
++            subscripts.emplace_back(ParseScript(key_exp_index, sarg, ParseScriptContext::P2TR, out, error));
++            if (subscripts.back().empty()) return {};
++            max_providers_len = std::max(max_providers_len, subscripts.back().size());
++            depths.push_back(branches.size());
++            // Process closing braces; one is expected for every right branch we were in.
++            while (branches.size() && branches.back()) {
++                if (!Const("}", expr)) {
++                    error = strprintf("tmr(): expected '}' after script expression");
++                    return {};
++                }
++                branches.pop_back(); // move up one level after encountering '}'
++            }
++            // If after that, we're at the end of a left branch, expect a comma.
++            if (branches.size() && !branches.back()) {
++                if (!Const(",", expr)) {
++                    error = strprintf("tmr(): expected ',' after script expression");
++                    return {};
++                }
++                branches.back() = true; // And now we're in a right branch.
++            }
++        } while (branches.size());
++        // After we've explored a whole tree, we must be at the end of the expression.
++        if (expr.size()) {
++            error = strprintf("tmr(): expected ')' after script expression");
++            return {};
++        }
++        if (depths.size() < 2) {
++            error = "tmr(): a single-leaf tree is anyone-can-spend, because its BIP360 control block has m = 0 and the leaf script is then never executed. Use at least two leaves; a bare Merkle root can be expressed with addr() or raw()";
++            return {};
++        }
++        assert(TaprootBuilder::ValidDepths(depths));
++
++        // Make sure all vecs are of the same length, or exactly length 1
++        // For length 1 vectors, clone subdescs until vector is the same length
++        for (auto& vec : subscripts) {
++            if (vec.size() == 1) {
++                for (size_t i = 1; i < max_providers_len; ++i) {
++                    vec.emplace_back(vec.at(0)->Clone());
++                }
++            } else if (vec.size() != max_providers_len) {
++                error = strprintf("tmr(): Multipath subscripts have mismatched lengths");
++                return {};
++            }
++        }
++
++        // Build the final descriptors vector
++        for (size_t i = 0; i < max_providers_len; ++i) {
++            std::vector<std::unique_ptr<DescriptorImpl>> this_subs;
++            this_subs.reserve(subscripts.size());
++            for (auto& subs : subscripts) {
++                this_subs.emplace_back(std::move(subs.at(i)));
++            }
++            ret.emplace_back(std::make_unique<TMRDescriptor>(std::move(this_subs), depths));
++        }
++        return ret;
++    } else if (Func("tmr", expr)) {
++        error = "Can only have tmr at top level";
++        return {};
++    }
+     if (ctx == ParseScriptContext::TOP && Func("rawtr", expr)) {
+         auto arg = Expr(expr);
+         if (expr.size()) {
+@@ -2802,6 +2988,43 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
+         }
+     }
+ 
++    if (txntype == TxoutType::WITNESS_V2_P2MR && ctx == ParseScriptContext::TOP) {
++        // The witness program is the script tree Merkle root itself.
++        WitnessV2P2MR output;
++        std::copy(data[0].begin(), data[0].end(), output.begin());
++        // Request spending data.
++        P2MRSpendData spenddata;
++        if (provider.GetP2MRSpendData(output, spenddata)) {
++            // If found, convert it back to tree form.
++            auto tree = InferP2MRTree(spenddata, output);
++            if (tree) {
++                // If that works, try to infer subdescriptors for all leaves.
++                bool ok = true;
++                std::vector<std::unique_ptr<DescriptorImpl>> subscripts; //!< list of script subexpressions
++                std::vector<int> depths; //!< depth in the tree of each subexpression (same length subscripts)
++                for (const auto& [depth, script, leaf_ver] : *tree) {
++                    std::unique_ptr<DescriptorImpl> subdesc;
++                    if (leaf_ver == TAPROOT_LEAF_TAPSCRIPT) {
++                        subdesc = InferScript(CScript(script.begin(), script.end()), ParseScriptContext::P2TR, provider);
++                    }
++                    if (!subdesc) {
++                        ok = false;
++                        break;
++                    } else {
++                        subscripts.push_back(std::move(subdesc));
++                        depths.push_back(depth);
++                    }
++                }
++                // tmr() cannot express a single-leaf tree, which is anyone-can-spend.
++                if (ok && depths.size() > 1) {
++                    return std::make_unique<TMRDescriptor>(std::move(subscripts), std::move(depths));
++                }
++            }
++        }
++        // If the above doesn't work, fall through to the addr() representation of the raw
++        // Merkle root at the end of this function.
++    }
++
+     if (ctx == ParseScriptContext::P2WSH || ctx == ParseScriptContext::P2TR) {
+         const auto script_ctx{ctx == ParseScriptContext::P2WSH ? miniscript::MiniscriptContext::P2WSH : miniscript::MiniscriptContext::TAPSCRIPT};
+         uint32_t key_exp_index = 0;
+diff --git a/src/script/signingprovider.cpp b/src/script/signingprovider.cpp
+index 1959654..1e6c380 100644
+--- a/src/script/signingprovider.cpp
++++ b/src/script/signingprovider.cpp
+@@ -52,6 +52,14 @@ bool HidingSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tap
+ {
+     return m_provider->GetTaprootBuilder(output_key, builder);
+ }
++bool HidingSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
++{
++    return m_provider->GetP2MRSpendData(output, spenddata);
++}
++bool HidingSigningProvider::GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const
++{
++    return m_provider->GetP2MRBuilder(output, builder);
++}
+ std::vector<CPubKey> HidingSigningProvider::GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const
+ {
+     if (m_hide_origin) return {};
+@@ -106,6 +114,19 @@ bool FlatSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tapro
+ {
+     return LookupHelper(tr_trees, output_key, builder);
+ }
++bool FlatSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
++{
++    TaprootBuilder builder;
++    if (LookupHelper(p2mr_trees, output, builder)) {
++        spenddata = builder.GetP2MRSpendData();
++        return true;
++    }
++    return false;
++}
++bool FlatSigningProvider::GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const
++{
++    return LookupHelper(p2mr_trees, output, builder);
++}
+ 
+ std::vector<CPubKey> FlatSigningProvider::GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const
+ {
+@@ -148,6 +169,7 @@ FlatSigningProvider& FlatSigningProvider::Merge(FlatSigningProvider&& b)
+     keys.merge(b.keys);
+     origins.merge(b.origins);
+     tr_trees.merge(b.tr_trees);
++    p2mr_trees.merge(b.p2mr_trees);
+     aggregate_pubkeys.merge(b.aggregate_pubkeys);
+     // We shouldn't be merging 2 different sessions, just overwrite with b's sessions.
+     if (!musig2_secnonces) musig2_secnonces = b.musig2_secnonces;
+@@ -349,6 +371,22 @@ bool MultiSigningProvider::GetTaprootBuilder(const XOnlyPubKey& output_key, Tapr
+     return false;
+ }
+ 
++bool MultiSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
++{
++    for (const auto& provider: m_providers) {
++        if (provider->GetP2MRSpendData(output, spenddata)) return true;
++    }
++    return false;
++}
++
++bool MultiSigningProvider::GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const
++{
++    for (const auto& provider: m_providers) {
++        if (provider->GetP2MRBuilder(output, builder)) return true;
++    }
++    return false;
++}
++
+ /*static*/ TaprootBuilder::NodeInfo TaprootBuilder::Combine(NodeInfo&& a, NodeInfo&& b)
+ {
+     NodeInfo ret;
+@@ -381,6 +419,16 @@ void TaprootSpendData::Merge(TaprootSpendData other)
+     }
+ }
+ 
++void P2MRSpendData::Merge(P2MRSpendData other)
++{
++    if (merkle_root.IsNull() && !other.merkle_root.IsNull()) {
++        merkle_root = other.merkle_root;
++    }
++    for (auto& [key, control_blocks] : other.scripts) {
++        scripts[key].merge(std::move(control_blocks));
++    }
++}
++
+ void TaprootBuilder::Insert(TaprootBuilder::NodeInfo&& node, int depth)
+ {
+     assert(depth >= 0 && (size_t)depth <= TAPROOT_CONTROL_MAX_NODE_COUNT);
+@@ -493,14 +541,55 @@ TaprootSpendData TaprootBuilder::GetSpendData() const
+     return spd;
+ }
+ 
+-std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferTaprootTree(const TaprootSpendData& spenddata, const XOnlyPubKey& output)
++WitnessV2P2MR TaprootBuilder::GetP2MROutput() const
+ {
+-    // Verify that the output matches the assumed Merkle root and internal key.
+-    auto tweak = spenddata.internal_key.CreateTapTweak(spenddata.merkle_root.IsNull() ? nullptr : &spenddata.merkle_root);
+-    if (!tweak || tweak->first != output) return std::nullopt;
+-    // If the Merkle root is 0, the tree is empty, and we're done.
++    assert(IsComplete());
++    assert(m_branch.size());
++    return WitnessV2P2MR{m_branch[0]->hash};
++}
++
++P2MRSpendData TaprootBuilder::GetP2MRSpendData() const
++{
++    assert(IsComplete());
++    assert(m_branch.size());
++    P2MRSpendData spd;
++    spd.merkle_root = m_branch[0]->hash;
++    // All script paths have been combined into the root m_branch[0] by now. Compute the control
++    // block for each of its tracked leaves, and put them in spd.scripts.
++    for (const auto& leaf : m_branch[0]->leaves) {
++        std::vector<unsigned char> control_block;
++        control_block.resize(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * leaf.merkle_branch.size());
++        // BIP360 has no internal key, so there is no parity to encode. The last bit of c[0] is
++        // unused and consensus requires it to be 1 for every leaf version.
++        control_block[0] = leaf.leaf_version | 1;
++        if (leaf.merkle_branch.size()) {
++            std::copy(leaf.merkle_branch[0].begin(),
++                      leaf.merkle_branch[0].begin() + P2MR_CONTROL_NODE_SIZE * leaf.merkle_branch.size(),
++                      control_block.begin() + P2MR_CONTROL_BASE_SIZE);
++        }
++        spd.scripts[{leaf.script, leaf.leaf_version}].insert(std::move(control_block));
++    }
++    return spd;
++}
++
++namespace {
++/** Reconstruct a BIP341 or BIP360 script tree from its (script, leaf_version) -> control blocks map.
++ *
++ * Both output types use the same TapLeaf/TapBranch tree and the same Merkle path encoding; they
++ * differ only in the fixed prefix that precedes the path in a control block (33 bytes for BIP341,
++ * which embeds the internal key, versus 1 byte for BIP360) and hence in the way the Merkle root is
++ * recomputed from a control block. The caller is responsible for verifying that merkle_root really
++ * belongs to the output being inferred. */
++std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferScriptTree(
++    const ScriptControlBlocks& scripts,
++    const uint256& merkle_root,
++    size_t control_base_size,
++    uint256 (*compute_merkle_root)(std::span<const unsigned char>, const uint256&))
++{
++    const size_t control_max_size{control_base_size + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT};
++    // If the Merkle root is 0, the tree is empty, and we are done.
+     std::vector<std::tuple<int, std::vector<unsigned char>, int>> ret;
+-    if (spenddata.merkle_root.IsNull()) return ret;
++    if (merkle_root.IsNull()) return ret;
+ 
+     /** Data structure to represent the nodes of the tree we're going to build. */
+     struct TreeNode {
+@@ -521,32 +610,31 @@ std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> Inf
+ 
+     // Build tree from the provided branches.
+     TreeNode root;
+-    root.hash = spenddata.merkle_root;
+-    for (const auto& [key, control_blocks] : spenddata.scripts) {
++    root.hash = merkle_root;
++    for (const auto& [key, control_blocks] : scripts) {
+         const auto& [script, leaf_ver] = key;
+         for (const auto& control : control_blocks) {
+             // Skip script records with nonsensical leaf version.
+             if (leaf_ver < 0 || leaf_ver >= 0x100 || leaf_ver & 1) continue;
+             // Skip script records with invalid control block sizes.
+-            if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > TAPROOT_CONTROL_MAX_SIZE ||
+-                ((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) continue;
++            if (control.size() < control_base_size || control.size() > control_max_size ||
++                ((control.size() - control_base_size) % TAPROOT_CONTROL_NODE_SIZE) != 0) continue;
+             // Skip script records that don't match the control block.
+             if ((control[0] & TAPROOT_LEAF_MASK) != leaf_ver) continue;
+             // Skip script records that don't match the provided Merkle root.
+             const uint256 leaf_hash = ComputeTapleafHash(leaf_ver, script);
+-            const uint256 merkle_root = ComputeTaprootMerkleRoot(control, leaf_hash);
+-            if (merkle_root != spenddata.merkle_root) continue;
++            if (compute_merkle_root(control, leaf_hash) != merkle_root) continue;
+ 
+             TreeNode* node = &root;
+-            size_t levels = (control.size() - TAPROOT_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;
++            size_t levels = (control.size() - control_base_size) / TAPROOT_CONTROL_NODE_SIZE;
+             for (size_t depth = 0; depth < levels; ++depth) {
+                 // Can't descend into a node which we already know is a leaf.
+                 if (node->explored && !node->inner) return std::nullopt;
+ 
+                 // Extract partner hash from Merkle branch in control block.
+                 uint256 hash;
+-                std::copy(control.begin() + TAPROOT_CONTROL_BASE_SIZE + (levels - 1 - depth) * TAPROOT_CONTROL_NODE_SIZE,
+-                          control.begin() + TAPROOT_CONTROL_BASE_SIZE + (levels - depth) * TAPROOT_CONTROL_NODE_SIZE,
++                std::copy(control.begin() + control_base_size + (levels - 1 - depth) * TAPROOT_CONTROL_NODE_SIZE,
++                          control.begin() + control_base_size + (levels - depth) * TAPROOT_CONTROL_NODE_SIZE,
+                           hash.begin());
+ 
+                 if (node->sub[0]) {
+@@ -627,6 +715,22 @@ std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> Inf
+ 
+     return ret;
+ }
++} // namespace
++
++std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferTaprootTree(const TaprootSpendData& spenddata, const XOnlyPubKey& output)
++{
++    // Verify that the output matches the assumed Merkle root and internal key.
++    auto tweak = spenddata.internal_key.CreateTapTweak(spenddata.merkle_root.IsNull() ? nullptr : &spenddata.merkle_root);
++    if (!tweak || tweak->first != output) return std::nullopt;
++    return InferScriptTree(spenddata.scripts, spenddata.merkle_root, TAPROOT_CONTROL_BASE_SIZE, ComputeTaprootMerkleRoot);
++}
++
++std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferP2MRTree(const P2MRSpendData& spenddata, const WitnessV2P2MR& output)
++{
++    // For BIP360 the witness program is the Merkle root itself, so there is nothing to untweak.
++    if (spenddata.merkle_root != uint256{output}) return std::nullopt;
++    return InferScriptTree(spenddata.scripts, spenddata.merkle_root, P2MR_CONTROL_BASE_SIZE, ComputeP2MRMerkleRoot);
++}
+ 
+ std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> TaprootBuilder::GetTreeTuples() const
+ {
+diff --git a/src/script/signingprovider.h b/src/script/signingprovider.h
+index 31422bb..e3153af 100644
+--- a/src/script/signingprovider.h
++++ b/src/script/signingprovider.h
+@@ -28,23 +28,40 @@ struct ShortestVectorFirstComparator
+     }
+ };
+ 
++/** Map from (script, leaf_version) to (sets of) control blocks.
++ *  More than one control block for a given script is only possible if it
++ *  appears in multiple branches of the tree. We keep them all so that
++ *  inference can reconstruct the full tree. Within each set, the control
++ *  blocks are sorted by size, so that the signing logic can easily
++ *  prefer the cheapest one. */
++using ScriptControlBlocks = std::map<std::pair<std::vector<unsigned char>, int>, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>>;
++
+ struct TaprootSpendData
+ {
+     /** The BIP341 internal key. */
+     XOnlyPubKey internal_key;
+     /** The Merkle root of the script tree (0 if no scripts). */
+     uint256 merkle_root;
+-    /** Map from (script, leaf_version) to (sets of) control blocks.
+-     *  More than one control block for a given script is only possible if it
+-     *  appears in multiple branches of the tree. We keep them all so that
+-     *  inference can reconstruct the full tree. Within each set, the control
+-     *  blocks are sorted by size, so that the signing logic can easily
+-     *  prefer the cheapest one. */
+-    std::map<std::pair<std::vector<unsigned char>, int>, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>> scripts;
++    /** Map from (script, leaf_version) to (sets of) control blocks. */
++    ScriptControlBlocks scripts;
+     /** Merge other TaprootSpendData (for the same scriptPubKey) into this. */
+     void Merge(TaprootSpendData other);
+ };
+ 
++/** Spending data for a BIP360 P2MR output.
++ *
++ * P2MR has no internal key and no key path: the witness program is the script tree Merkle root
++ * itself, and every spend is a BIP341 script path spend with a 1 + 32*m byte control block. */
++struct P2MRSpendData
++{
++    /** The Merkle root of the script tree, which is also the witness program. */
++    uint256 merkle_root;
++    /** Map from (script, leaf_version) to (sets of) control blocks. */
++    ScriptControlBlocks scripts;
++    /** Merge other P2MRSpendData (for the same scriptPubKey) into this. */
++    void Merge(P2MRSpendData other);
++};
++
+ /** Utility class to construct Taproot outputs from internal key and script tree. */
+ class TaprootBuilder
+ {
+@@ -136,6 +153,15 @@ public:
+     static bool ValidDepths(const std::vector<int>& depths);
+     /** Compute spending data (after Finalize()). */
+     TaprootSpendData GetSpendData() const;
++    /** Compute the BIP360 P2MR scriptPubKey destination.
++     *
++     * BIP360 reuses the BIP341 TapLeaf/TapBranch tree hashing verbatim, so the same builder
++     * produces both output types. It commits to the Merkle root directly instead of to a tweaked
++     * internal key, so Finalize() is neither needed nor meaningful here; only IsComplete() is
++     * required, and the tree must not be empty. */
++    WitnessV2P2MR GetP2MROutput() const;
++    /** Compute BIP360 P2MR spending data. See GetP2MROutput() for the preconditions. */
++    P2MRSpendData GetP2MRSpendData() const;
+     /** Returns a vector of tuples representing the depth, leaf version, and script */
+     std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> GetTreeTuples() const;
+     /** Returns true if there are any tapscripts */
+@@ -152,6 +178,12 @@ public:
+  */
+ std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferTaprootTree(const TaprootSpendData& spenddata, const XOnlyPubKey& output);
+ 
++/** Given a P2MRSpendData and the witness program, reconstruct its script tree.
++ *
++ * Behaves like InferTaprootTree(), but for BIP360 outputs: the output is the Merkle root itself,
++ * and control blocks carry no internal key. */
++std::optional<std::vector<std::tuple<int, std::vector<unsigned char>, int>>> InferP2MRTree(const P2MRSpendData& spenddata, const WitnessV2P2MR& output);
++
+ /** An interface to be implemented by keystores that support signing. */
+ class SigningProvider
+ {
+@@ -165,6 +197,8 @@ public:
+     virtual bool GetKeyOrigin(const CKeyID& keyid, KeyOriginInfo& info) const { return false; }
+     virtual bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const { return false; }
+     virtual bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const { return false; }
++    virtual bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const { return false; }
++    virtual bool GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const { return false; }
+     virtual std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const { return {}; }
+     virtual std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const {return {}; }
+     virtual void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const {}
+@@ -213,6 +247,8 @@ public:
+     bool GetKeyOrigin(const CKeyID& keyid, KeyOriginInfo& info) const override;
+     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
+     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
++    bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
++    bool GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const override;
+     std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const override;
+     std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const override;
+     void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const override;
+@@ -227,6 +263,7 @@ struct FlatSigningProvider final : public SigningProvider
+     std::map<CKeyID, std::pair<CPubKey, KeyOriginInfo>> origins;
+     std::map<CKeyID, CKey> keys;
+     std::map<XOnlyPubKey, TaprootBuilder> tr_trees; /** Map from output key to Taproot tree (which can then make the TaprootSpendData */
++    std::map<WitnessV2P2MR, TaprootBuilder> p2mr_trees; /** Map from Merkle root to P2MR script tree (which can then make the P2MRSpendData) */
+     std::map<CPubKey, std::vector<CPubKey>> aggregate_pubkeys; /** MuSig2 aggregate pubkeys */
+     std::map<uint256, MuSig2SecNonce>* musig2_secnonces{nullptr};
+ 
+@@ -237,6 +274,8 @@ struct FlatSigningProvider final : public SigningProvider
+     bool GetKey(const CKeyID& keyid, CKey& key) const override;
+     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
+     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
++    bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
++    bool GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const override;
+     std::vector<CPubKey> GetMuSig2ParticipantPubkeys(const CPubKey& pubkey) const override;
+     std::map<CPubKey, std::vector<CPubKey>> GetAllMuSig2ParticipantPubkeys() const override;
+     void SetMuSig2SecNonce(const uint256& id, MuSig2SecNonce&& nonce) const override;
+@@ -335,6 +374,8 @@ public:
+     bool GetKey(const CKeyID& keyid, CKey& key) const override;
+     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
+     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
++    bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
++    bool GetP2MRBuilder(const WitnessV2P2MR& output, TaprootBuilder& builder) const override;
+ };
+ 
+ #endif // BITCOIN_SCRIPT_SIGNINGPROVIDER_H
+-- 
+2.49.0.windows.1
+

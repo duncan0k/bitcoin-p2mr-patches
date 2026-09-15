@@ -1,0 +1,13 @@
+82bc174d28befc764d348e42bf8fc5edb767ce4723783ff2e50e24f9cf1d48bc *0011-descriptor-add-the-provisional-tmr-P2MR-descriptor.patch
+19a2aeaff933d609c8982f3d594b80bd2e7b92e847ead7d3cb9d085195ab80d7 *0012-wallet-sign-BIP360-P2MR-script-path-spends.patch
+e28900be9381f32f26f8d3c4370b69afc99ccc5658a68579a359e76d1053e95c *0013-test-cover-the-tmr-descriptor-and-P2MR-wallet-spends.patch
+9f685e07d53eddcab6c433d3e178207826984e5a7a7b0aa06b09304b35764866 *0014-test-add-a-P2MR-fuzz-target.patch
+b87fa97e50291d69e2657eedc7ead428166b697bd59002a372241825aebd15a2 *0015-doc-describe-the-provisional-tmr-descriptor-and-P2MR.patch
+383120c4739016aaeabb1628c3a5a84ec8215fa0051381ed18a90af324f3515d *0016-wallet-refuse-P2MR-receiving-addresses-where-BIP360-.patch
+046fb26f06468e97db09b5aeda28c1cc457509f636aff1ede169f07a2e56979f *0017-script-default-initialize-the-Taproot-builder-tweak-.patch
+79f0b7c16fc83db8fe3da39cdcfeeae98c8a3cd2fefbf2da79de19aabeaf4e84 *0018-psbt-treat-P2MR-inputs-as-Schnorr-inputs-for-sighash.patch
+06a0df551cbcbf60f17b65345482976bfad99fe5df4e9109ef3fad2103a43a7a *0019-wallet-count-a-P2MR-input-as-the-witness-input-it-is.patch
+a8bfbe9ecedf309cc1fd87284b482cb973f2f069c3358c1ec5dd8c2571bfb440 *0020-wallet-only-use-control-blocks-that-match-the-output.patch
+fa8b57b2b6428e9c2fe786213d713a8d303329cdacdb717209b7477efccecb9e *0021-test-cover-the-P2MR-wallet-fixes-and-the-shared-tree.patch
+ff0599b7afd07b03e9db88b390b79bc12b664c91694273f5e17a1fc97d79b07f *0022-test-broaden-the-P2MR-fuzz-target-and-correct-its-cl.patch
+9480b7defe37c9b0a17e7d584e8fbd0811da4187075e2bd0df979ba19b95d06f *0023-doc-record-the-P2MR-deployment-gate-and-the-Schnorr-.patch

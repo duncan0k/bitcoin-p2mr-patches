@@ -1,0 +1,57 @@
+From 6257d252d77944a3ffd525c9f21bfbe902d16d66 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:30:34 -0600
+Subject: [PATCH 20/23] wallet: only use control blocks that match the output
+ being spent
+
+SignP2MR() took the first control block offered for a leaf without checking it.
+Spending data can come from a PSBT written by someone else, so a malformed
+candidate that sorts ahead of a usable one, for instance the same control block
+with the mandatory last bit of c[0] cleared, would be chosen and the resulting
+witness rejected by the final verification. Nothing invalid could be spent, but
+a usable path was shadowed.
+
+Check each candidate against the prevout before choosing: the size must be
+1 + 32*m, the last bit of c[0] must be set, the leaf version must agree with
+the leaf, and the Merkle path must reconstruct the witness program. The set is
+ordered by size, so the first candidate that passes is also the cheapest.
+---
+ src/script/sign.cpp | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/script/sign.cpp b/src/script/sign.cpp
+index fe97a52..82de42f 100644
+--- a/src/script/sign.cpp
++++ b/src/script/sign.cpp
+@@ -635,10 +635,27 @@ static bool SignP2MR(const SigningProvider& provider, const BaseSignatureCreator
+     std::vector<std::vector<unsigned char>> smallest_result_stack;
+     for (const auto& [key, control_blocks] : sigdata.p2mr_spenddata.scripts) {
+         const auto& [script, leaf_ver] = key;
++        // Spending data can come from a PSBT written by someone else, so only consider control
++        // blocks that actually reconstruct the Merkle root of the output being spent. Without this
++        // a malformed candidate that sorts first would shadow a usable one.
++        const uint256 leaf_hash{ComputeTapleafHash(leaf_ver, script)};
++        const std::vector<unsigned char>* best_control{nullptr};
++        for (const auto& control : control_blocks) {
++            if (control.size() < P2MR_CONTROL_BASE_SIZE || control.size() > P2MR_CONTROL_MAX_SIZE) continue;
++            if ((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE != 0) continue;
++            // The last bit of c[0] is unused and consensus requires it to be 1 for every leaf version.
++            if ((control[0] & 1) != 1) continue;
++            if ((control[0] & TAPROOT_LEAF_MASK) != leaf_ver) continue;
++            if (ComputeP2MRMerkleRoot(control, leaf_hash) != uint256{output}) continue;
++            // The set is ordered by size, so the first valid candidate is the cheapest one.
++            best_control = &control;
++            break;
++        }
++        if (!best_control) continue;
+         std::vector<std::vector<unsigned char>> result_stack;
+         if (SignTaprootScript(provider, creator, sigdata, leaf_ver, script, result_stack)) {
+             result_stack.emplace_back(std::begin(script), std::end(script)); // Push the script
+-            result_stack.push_back(*control_blocks.begin()); // Push the smallest control block
++            result_stack.push_back(*best_control); // Push the cheapest valid control block
+             if (smallest_result_stack.size() == 0 ||
+                 GetSerializeSize(result_stack) < GetSerializeSize(smallest_result_stack)) {
+                 smallest_result_stack = std::move(result_stack);
+-- 
+2.49.0.windows.1
+
