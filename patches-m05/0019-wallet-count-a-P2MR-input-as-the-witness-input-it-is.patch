@@ -1,7 +1,7 @@
 From 74c01c65e29f4ad5aebbbdf12cfc1ab04dc6e9c1 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:30:33 -0600
-Subject: [PATCH 19/23] wallet: count a P2MR input as the witness input it is
+Subject: [PATCH 19/25] wallet: count a P2MR input as the witness input it is
  when estimating size
 
 Size estimation asked GetOutputType() whether an input is segwit, so the

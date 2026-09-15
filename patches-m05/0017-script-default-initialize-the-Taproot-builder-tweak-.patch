@@ -1,7 +1,7 @@
 From 59af19a526df293281fbb5a442e497f10f0f74e6 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:30:11 -0600
-Subject: [PATCH 17/23] script: default initialize the Taproot builder tweak
+Subject: [PATCH 17/25] script: default initialize the Taproot builder tweak
  parity
 
 TaprootBuilder::m_parity is only assigned by Finalize(). A BIP360 tree has no
