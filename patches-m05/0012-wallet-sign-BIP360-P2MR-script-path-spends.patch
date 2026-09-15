@@ -1,7 +1,7 @@
 From 4fd75b3eb2d2c304f75298fbe5b6277fedb4c241 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 04:19:29 -0600
-Subject: [PATCH 12/25] wallet: sign BIP360 P2MR script path spends
+Subject: [PATCH 12/28] wallet: sign BIP360 P2MR script path spends
 
 Every P2MR spend is a BIP 341 script path spend of a BIP 342 tapscript leaf,
 so SignP2MR() reuses the tapscript signing of SignTaproot() unchanged and only

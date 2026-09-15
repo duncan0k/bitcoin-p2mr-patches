@@ -91,10 +91,13 @@ validation only after activation.
   P2MR deployment is disabled (mainnet, testnets, the default signet), since such outputs would be
   anyone-can-spend there;
 - fee estimation that treats P2MR inputs as witness inputs, control-block validation before signing,
-  a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`.
+  a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`;
+- functional coverage of cross-wallet 2-of-2 multisig leaves signed through PSBT (`wallet_p2mr_multisig.py`),
+  CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), and the edits that invalidate a signed
+  P2MR spend (amount, input order, control block, `witness_utxo`).
 
 Review status: two rounds of independent review; the second round found the earlier high and medium
-findings fixed. Published separately once it has been exercised on the experimental signet.
+findings fixed. Later commits only add tests (18 patches in total). Published separately once it has been exercised on the experimental signet.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch

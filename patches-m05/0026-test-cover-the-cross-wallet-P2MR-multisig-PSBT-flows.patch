@@ -1,0 +1,292 @@
+From e108eecfe4b93e8a686b400bd843821ede9ffcc2 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 10:17:39 -0600
+Subject: [PATCH 26/28] test: cover the cross-wallet P2MR multisig PSBT flows
+
+A tmr() leaf is an ordinary BIP342 tapscript, so it can hold a multi_a()
+multisig that no single wallet can satisfy. Two wallets, each holding one
+private key and the other participant's public key, import the same tree in
+two spellings, derive the same bcrt1z address, and co-sign a spend of it
+both serially, by passing the serialized PSBT along, and in parallel, by
+signing independent copies and merging them with combinepsbt.
+
+A second tree puts the multisig leaf beside a single key leaf that one of
+the wallets alone can satisfy, which pins the leaf selection: both leaves
+are satisfiable at finalization time and the smaller witness wins.
+---
+ test/functional/test_runner.py          |   1 +
+ test/functional/wallet_p2mr_multisig.py | 250 ++++++++++++++++++++++++
+ 2 files changed, 251 insertions(+)
+ create mode 100644 test/functional/wallet_p2mr_multisig.py
+
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index fccf81f..0c92ff0 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -288,6 +288,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr.py',
+     'feature_p2mr_signet.py',
+     'wallet_p2mr.py',
++    'wallet_p2mr_multisig.py',
+     'wallet_p2mr_signet.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+diff --git a/test/functional/wallet_p2mr_multisig.py b/test/functional/wallet_p2mr_multisig.py
+new file mode 100644
+index 0000000..454fbfb
+--- /dev/null
++++ b/test/functional/wallet_p2mr_multisig.py
+@@ -0,0 +1,250 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Two wallets co-signing a P2MR multisig leaf through PSBT.
++
++A tmr() leaf is an ordinary BIP342 tapscript, so it may hold a multi_a()
++multisig that no single wallet can satisfy on its own. Each wallet here keeps
++one of the two private keys and the other participant's public key, which makes
++them import the same tree in two different spellings and derive the same bcrt1z
++address.
++
++Covers the serial flow, where wallet one signs and hands the serialized PSBT to
++wallet two, the parallel flow, where both wallets sign the same unsigned PSBT
++and the copies are merged with combinepsbt, and leaf selection when the
++multisig leaf sits beside a single key leaf that one wallet alone can satisfy.
++"""
++
++from decimal import Decimal
++
++from test_framework.descriptors import descsum_create
++from test_framework.psbt import PSBT
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++from test_framework.wallet_util import generate_keypair
++
++# BIP360 control block for a leaf one Merkle node below the root.
++CONTROL_DEPTH_1 = 1 + 32
++# BIP341 tapscript leaf version, the only one tmr() builds.
++TAPROOT_LEAF_TAPSCRIPT = 0xC0
++# <key> OP_CHECKSIG <key> OP_CHECKSIGADD OP_2 OP_NUMEQUAL
++MULTI_A_2OF2_SIZE = 70
++# <key> OP_CHECKSIG
++PK_LEAF_SIZE = 34
++# Amount funded into the shared address, and the amount each spend forwards.
++FUND_AMOUNT = Decimal("1")
++SPEND_AMOUNT = Decimal("0.5")
++
++
++class WalletP2MRMultisigTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++        self.extra_args = [["-txindex"]]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++
++    def init_wallet(self, *, node):
++        pass
++
++    # -- helpers -------------------------------------------------------------
++
++    def make_participants(self, count):
++        """Return (wif, x-only pubkey hex) pairs for `count` freshly generated keys."""
++        participants = []
++        for _ in range(count):
++            wif, pubkey = generate_keypair(wif=True)
++            participants.append((wif, pubkey[1:].hex()))
++        return participants
++
++    def open_wallet(self, name, inner):
++        """Create a wallet holding only tmr(<inner>), and return it with its address."""
++        node = self.nodes[0]
++        node.createwallet(wallet_name=name)
++        wallet = node.get_wallet_rpc(name)
++        desc = descsum_create(f"tmr({inner})")
++        assert_equal(wallet.importdescriptors([{"desc": desc, "timestamp": "now"}])[0]["success"], True)
++        addresses = node.deriveaddresses(desc)
++        assert_equal(len(addresses), 1)
++        address = addresses[0]
++        assert address.startswith("bcrt1z"), address
++        info = wallet.getaddressinfo(address)
++        assert_equal(info["ismine"], True)
++        assert_equal(info["solvable"], True)
++        return wallet, address
++
++    def fund(self, address):
++        self.funder.sendtoaddress(address, FUND_AMOUNT)
++        self.generate(self.nodes[0], 1)
++
++    def unsigned_psbt(self, wallet, address):
++        """Fund a PSBT spending exactly the wallet's unspent output at `address`."""
++        utxo = next(u for u in wallet.listunspent() if u["address"] == address)
++        funded = wallet.walletcreatefundedpsbt(
++            inputs=[{"txid": utxo["txid"], "vout": utxo["vout"]}],
++            outputs=[{self.funder.getnewaddress(): SPEND_AMOUNT}],
++            options={"fee_rate": 10, "add_inputs": False,
++                     "changeAddress": wallet.getnewaddress(address_type="bech32")},
++        )
++        return funded["psbt"]
++
++    def sign(self, wallet, psbt):
++        """Add every signature the wallet can without finalizing, and return the PSBT."""
++        result = wallet.walletprocesspsbt(psbt, True, "DEFAULT", True, False)
++        # A partially signed multisig leaf is never complete, and the signer does not finalize.
++        assert_equal(result["complete"], False)
++        signed = result["psbt"]
++        # The PSBT has to survive the trip between the two wallets as bytes.
++        assert_equal(PSBT.from_base64(signed).to_base64(), signed)
++        return signed
++
++    def script_path_sigs(self, psbt):
++        decoded = self.nodes[0].decodepsbt(psbt)["inputs"][0]
++        assert "final_scriptwitness" not in decoded, decoded
++        return decoded.get("taproot_script_path_sigs", [])
++
++    def leaf_scripts(self, psbt):
++        """Return the leaf scripts the PSBT records for its only input."""
++        decoded = self.nodes[0].decodepsbt(psbt)["inputs"][0]
++        return [entry["script"] for entry in decoded["taproot_scripts"]]
++
++    def finalize_and_send(self, psbt):
++        node = self.nodes[0]
++        final = node.finalizepsbt(psbt)
++        assert_equal(final["complete"], True)
++        txid = node.sendrawtransaction(final["hex"])
++        self.generate(node, 1)
++        return txid
++
++    def spend_witness(self, txid):
++        """Check that `txid` is a confirmed BIP360 script path spend, and return its witness."""
++        tx = self.nodes[0].getrawtransaction(txid, True)
++        assert_equal(tx["confirmations"], 1)
++        assert_equal(len(tx["vin"]), 1)
++        witness = tx["vin"][0]["txinwitness"]
++        control = bytes.fromhex(witness[-1])
++        assert_equal(len(control), CONTROL_DEPTH_1)
++        # BIP360 leaves the last bit of c[0] unused and requires it to be 1.
++        assert_equal(control[0] & 1, 1)
++        assert_equal(control[0] & 0xFE, TAPROOT_LEAF_TAPSCRIPT)
++        return witness
++
++    # -- test cases ----------------------------------------------------------
++
++    def run_test(self):
++        node = self.nodes[0]
++        node.createwallet(wallet_name="funder")
++        self.funder = node.get_wallet_rpc("funder")
++        self.generatetoaddress(node, 101, self.funder.getnewaddress())
++
++        alice, bob = self.make_participants(2)
++        # A key neither wallet holds, so the multisig leaf is the only way out.
++        stranger = self.make_participants(1)[0]
++        self.alice_pubkey, self.bob_pubkey = alice[1], bob[1]
++        # multi_a() keeps the key order it is given, so the two spellings below build the same leaf
++        # script: each wallet writes its own key as a WIF and the other participant's as an x-only
++        # public key.
++        alice_tree = "{{multi_a(2,{},{}),pk({})}}".format(alice[0], bob[1], stranger[1])
++        bob_tree = "{{multi_a(2,{},{}),pk({})}}".format(alice[1], bob[0], stranger[1])
++        self.alice_wallet, self.address = self.open_wallet("p2mr_alice", alice_tree)
++        self.bob_wallet, bob_address = self.open_wallet("p2mr_bob", bob_tree)
++        # Same tree, same Merkle root, same address.
++        assert_equal(bob_address, self.address)
++
++        self.test_serial_cosigning()
++        self.test_parallel_cosigning()
++        self.test_leaf_selection_beside_single_key()
++
++    def test_serial_cosigning(self):
++        self.log.info("Two wallets sign a multisig leaf one after the other")
++        self.fund(self.address)
++        psbt = self.unsigned_psbt(self.alice_wallet, self.address)
++        # The multisig leaf and the stranger's leaf, each one Merkle node below the root.
++        assert_equal(len(self.leaf_scripts(psbt)), 2)
++
++        # Alice holds one of the two keys, so she cannot finish the leaf on her own.
++        half = self.sign(self.alice_wallet, psbt)
++        sigs = self.script_path_sigs(half)
++        assert_equal(len(sigs), 1)
++        assert_equal(sigs[0]["pubkey"], self.alice_pubkey)
++
++        # Bob adds the second signature to the very bytes Alice handed over.
++        full = self.sign(self.bob_wallet, half)
++        sigs = self.script_path_sigs(full)
++        assert_equal(len(sigs), 2)
++        assert_equal({s["pubkey"] for s in sigs}, {self.alice_pubkey, self.bob_pubkey})
++        # Both signatures belong to the same leaf.
++        assert_equal(len({s["leaf_hash"] for s in sigs}), 1)
++
++        witness = self.spend_witness(self.finalize_and_send(full))
++        # [signature, signature, leaf script, control block]; P2MR has no key path to fall back on.
++        assert_equal(len(witness), 4)
++        assert_equal(set(witness[:2]), {s["sig"] for s in sigs})
++        assert_equal(len(bytes.fromhex(witness[2])), MULTI_A_2OF2_SIZE)
++
++    def test_parallel_cosigning(self):
++        self.log.info("Two independently signed copies of one PSBT are merged with combinepsbt")
++        node = self.nodes[0]
++        self.fund(self.address)
++        psbt = self.unsigned_psbt(self.alice_wallet, self.address)
++
++        # Neither wallet sees the other's copy; both sign the same unsigned PSBT.
++        from_alice = self.sign(self.alice_wallet, psbt)
++        from_bob = self.sign(self.bob_wallet, psbt)
++        assert from_alice != from_bob
++        assert_equal(len(self.script_path_sigs(from_alice)), 1)
++        assert_equal(len(self.script_path_sigs(from_bob)), 1)
++        # Neither copy can be finalized by itself.
++        assert_equal(node.finalizepsbt(from_alice)["complete"], False)
++        assert_equal(node.finalizepsbt(from_bob)["complete"], False)
++
++        combined = node.combinepsbt([from_alice, from_bob])
++        sigs = self.script_path_sigs(combined)
++        assert_equal(len(sigs), 2)
++        assert_equal({s["pubkey"] for s in sigs}, {self.alice_pubkey, self.bob_pubkey})
++        # Merging the copies the other way round has to produce the same PSBT.
++        assert_equal(node.combinepsbt([from_bob, from_alice]), combined)
++
++        witness = self.spend_witness(self.finalize_and_send(combined))
++        assert_equal(len(witness), 4)
++        assert_equal(set(witness[:2]), {s["sig"] for s in sigs})
++        assert_equal(len(bytes.fromhex(witness[2])), MULTI_A_2OF2_SIZE)
++
++    def test_leaf_selection_beside_single_key(self):
++        self.log.info("A single key leaf beside the multisig leaf wins the leaf selection")
++        alice, bob = self.make_participants(2)
++        # The same multisig leaf, but its sibling is now a key Bob alone holds.
++        alice_tree = "{{multi_a(2,{},{}),pk({})}}".format(alice[0], bob[1], bob[1])
++        bob_tree = "{{multi_a(2,{},{}),pk({})}}".format(alice[1], bob[0], bob[0])
++        alice_wallet, address = self.open_wallet("p2mr_leaf_alice", alice_tree)
++        bob_wallet, bob_address = self.open_wallet("p2mr_leaf_bob", bob_tree)
++        assert_equal(bob_address, address)
++
++        self.fund(address)
++        psbt = self.unsigned_psbt(alice_wallet, address)
++        scripts = self.leaf_scripts(psbt)
++        assert_equal(len(scripts), 2)
++        multi_leaf = next(s for s in scripts if len(bytes.fromhex(s)) == MULTI_A_2OF2_SIZE)
++        pk_leaf = next(s for s in scripts if len(bytes.fromhex(s)) == PK_LEAF_SIZE)
++
++        # Alice can still only half satisfy the multisig leaf.
++        half = self.sign(alice_wallet, psbt)
++        assert_equal(len(self.script_path_sigs(half)), 1)
++
++        full = self.sign(bob_wallet, half)
++        sigs = self.script_path_sigs(full)
++        # Bob signs his half of the multisig leaf and the whole of the single key leaf.
++        assert_equal(len(sigs), 3)
++        assert_equal(len({s["leaf_hash"] for s in sigs}), 2)
++
++        witness = self.spend_witness(self.finalize_and_send(full))
++        # Both leaves are satisfiable now, and the smaller witness decides which one is used.
++        assert_equal(len(witness), 3)
++        assert_equal(witness[1], pk_leaf)
++        assert witness[1] != multi_leaf
++
++
++if __name__ == "__main__":
++    WalletP2MRMultisigTest(__file__).main()
+-- 
+2.49.0.windows.1
+

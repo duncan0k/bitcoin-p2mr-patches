@@ -1,7 +1,7 @@
 From 28cb5957ab0cdc48ac1cf0f5814275d8cf940802 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:30:12 -0600
-Subject: [PATCH 18/25] psbt: treat P2MR inputs as Schnorr inputs for sighash
+Subject: [PATCH 18/28] psbt: treat P2MR inputs as Schnorr inputs for sighash
  selection
 
 A P2MR spend is a BIP341 script path spend, so it carries Schnorr signatures

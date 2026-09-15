@@ -1,7 +1,7 @@
 From 81d40b1df4991b20d3d0ea26aced08f14a6f0dc6 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 04:19:45 -0600
-Subject: [PATCH 13/25] test: cover the tmr() descriptor and P2MR wallet spends
+Subject: [PATCH 13/28] test: cover the tmr() descriptor and P2MR wallet spends
 
 descriptor_tests gains two tmr() vectors, a flat two leaf tree and a nested
 three leaf tree whose Merkle root matches the internal tree of the tr() vector

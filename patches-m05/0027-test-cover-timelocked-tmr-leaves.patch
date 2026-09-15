@@ -1,0 +1,273 @@
+From 878be660a406a6df4e6c6690b073bb823dcabc2a Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 10:17:54 -0600
+Subject: [PATCH 27/28] test: cover timelocked tmr() leaves
+
+tmr() parses its leaves in the context tr() uses for its own, so a leaf may
+be any sane tapscript miniscript. A tree with an after() leaf and an older()
+leaf exercises both kinds of timelock: which one the wallet can satisfy
+follows from the nLockTime and the nSequence of the transaction being
+signed, not from the tip, and with a final nSequence and no locktime neither
+leaf can be satisfied at all.
+
+The node then has the last word. The absolute spend is non-final until the
+height its leaf names has been mined, and the relative one is
+non-BIP68-final until its own input has the confirmations its leaf asks for,
+each checked on the block before as well as on the block that lets it
+through.
+---
+ test/functional/test_runner.py          |   1 +
+ test/functional/wallet_p2mr_timelock.py | 229 ++++++++++++++++++++++++
+ 2 files changed, 230 insertions(+)
+ create mode 100644 test/functional/wallet_p2mr_timelock.py
+
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 0c92ff0..6242037 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -289,6 +289,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr_signet.py',
+     'wallet_p2mr.py',
+     'wallet_p2mr_multisig.py',
++    'wallet_p2mr_timelock.py',
+     'wallet_p2mr_signet.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+diff --git a/test/functional/wallet_p2mr_timelock.py b/test/functional/wallet_p2mr_timelock.py
+new file mode 100644
+index 0000000..c2fd21d
+--- /dev/null
++++ b/test/functional/wallet_p2mr_timelock.py
+@@ -0,0 +1,229 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Timelocked tmr() leaves: after() and older() inside a P2MR script tree.
++
++tmr() parses its leaves in the same context tr() uses for its own, so a leaf may
++be any sane tapscript miniscript, including one guarded by an absolute
++(CHECKLOCKTIMEVERIFY) or a relative (CHECKSEQUENCEVERIFY) timelock. The tree
++here holds one of each.
++
++Which leaf the wallet can satisfy is decided entirely by the nLockTime and the
++nSequence of the transaction being signed, and the node refuses the spend until
++the height or the age the leaf asks for has actually been reached. With neither
++field set, the wallet cannot satisfy either leaf at all.
++"""
++
++from decimal import Decimal
++
++from test_framework.descriptors import descsum_create
++from test_framework.messages import SEQUENCE_FINAL
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++from test_framework.wallet_util import generate_keypair
++
++# BIP360 control block for a leaf one Merkle node below the root.
++CONTROL_DEPTH_1 = 1 + 32
++# BIP341 tapscript leaf version, the only one tmr() builds.
++TAPROOT_LEAF_TAPSCRIPT = 0xC0
++# How far above the funding height the after() leaf places its absolute locktime.
++CLTV_DELAY = 20
++# How many confirmations the older() leaf demands of its own input.
++CSV_BLOCKS = 6
++# An nSequence below the final value, which is what makes consensus enforce nLockTime, but with
++# bit 31 set, which is what disables relative locktimes. It selects the after() leaf and rules the
++# older() leaf out.
++SEQUENCE_NO_CSV = 0xFFFFFFFD
++FUND_AMOUNT = Decimal("1")
++FEE = Decimal("0.0001")
++
++
++class WalletP2MRTimelockTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++
++    def init_wallet(self, *, node):
++        pass
++
++    # -- helpers -------------------------------------------------------------
++
++    def fund(self, address):
++        """Confirm a payment to `address` and return the wallet's view of the new output."""
++        txid = self.funder.sendtoaddress(address, FUND_AMOUNT)
++        self.generate(self.nodes[0], 1)
++        return next(u for u in self.wallet.listunspent()
++                    if u["txid"] == txid and u["address"] == address)
++
++    def spend_psbt(self, utxo, sequence, locktime):
++        """Create an unsigned PSBT spending `utxo` with the given nSequence and nLockTime."""
++        psbt = self.nodes[0].createpsbt(
++            [{"txid": utxo["txid"], "vout": utxo["vout"], "sequence": sequence}],
++            [{self.funder.getnewaddress(): utxo["amount"] - FEE}],
++            locktime,
++        )
++        unsigned = self.nodes[0].decodepsbt(psbt)["tx"]
++        # A relative locktime is only enforced from version 2 onwards, so record what createpsbt
++        # produced rather than assuming it.
++        assert_equal(unsigned["version"], 2)
++        assert_equal(unsigned["locktime"], locktime)
++        assert_equal(unsigned["vin"][0]["sequence"], sequence)
++        return psbt
++
++    def leaf_for(self, psbt, xonly):
++        """Return the one leaf script of the PSBT's only input that commits to `xonly`.
++
++        Only a wallet that knows the tree can record the leaves, so this reads a PSBT that has
++        already been through walletprocesspsbt.
++        """
++        entries = self.nodes[0].decodepsbt(psbt)["inputs"][0]["taproot_scripts"]
++        assert_equal(len(entries), 2)
++        matching = [e["script"] for e in entries if xonly in e["script"]]
++        assert_equal(len(matching), 1)
++        return matching[0]
++
++    def sign(self, psbt):
++        """Sign without finalizing, the way a coordinator would, and return the PSBT."""
++        result = self.wallet.walletprocesspsbt(psbt, True, "DEFAULT", True, False)
++        # Nothing is finalized here, so the PSBT is never reported complete.
++        assert_equal(result["complete"], False)
++        assert "final_scriptwitness" not in self.nodes[0].decodepsbt(result["psbt"])["inputs"][0]
++        return result["psbt"]
++
++    def finalized_witness(self, psbt, expected_leaf):
++        """Finalize `psbt`, check it spends `expected_leaf`, and return the raw transaction."""
++        final = self.nodes[0].finalizepsbt(psbt)
++        assert_equal(final["complete"], True)
++        tx = self.nodes[0].decoderawtransaction(final["hex"])
++        assert_equal(len(tx["vin"]), 1)
++        witness = tx["vin"][0]["txinwitness"]
++        # [signature, leaf script, control block]: P2MR has no key path to fall back on.
++        assert_equal(len(witness), 3)
++        assert_equal(witness[1], expected_leaf)
++        control = bytes.fromhex(witness[2])
++        assert_equal(len(control), CONTROL_DEPTH_1)
++        # BIP360 leaves the last bit of c[0] unused and requires it to be 1.
++        assert_equal(control[0] & 1, 1)
++        assert_equal(control[0] & 0xFE, TAPROOT_LEAF_TAPSCRIPT)
++        return final["hex"]
++
++    def assert_rejected(self, tx_hex, reason):
++        result = self.nodes[0].testmempoolaccept([tx_hex])[0]
++        assert_equal(result["allowed"], False)
++        assert_equal(result["reject-reason"], reason)
++
++    def assert_accepted(self, tx_hex):
++        result = self.nodes[0].testmempoolaccept([tx_hex])[0]
++        assert_equal(result["allowed"], True)
++
++    # -- test cases ----------------------------------------------------------
++
++    def run_test(self):
++        node = self.nodes[0]
++        node.createwallet(wallet_name="funder")
++        self.funder = node.get_wallet_rpc("funder")
++        self.generatetoaddress(node, 101, self.funder.getnewaddress())
++
++        keys = [generate_keypair(wif=True) for _ in range(2)]
++        self.cltv_key, self.csv_key = (pubkey[1:].hex() for _, pubkey in keys)
++        self.locktime_height = node.getblockcount() + CLTV_DELAY
++        inner = "{{and_v(v:after({}),pk({})),and_v(v:older({}),pk({}))}}".format(
++            self.locktime_height, keys[0][0], CSV_BLOCKS, keys[1][0])
++
++        node.createwallet(wallet_name="p2mr_timelock")
++        self.wallet = node.get_wallet_rpc("p2mr_timelock")
++        desc = descsum_create(f"tmr({inner})")
++        assert_equal(self.wallet.importdescriptors([{"desc": desc, "timestamp": "now"}])[0]["success"], True)
++        addresses = node.deriveaddresses(desc)
++        assert_equal(len(addresses), 1)
++        self.address = addresses[0]
++        assert self.address.startswith("bcrt1z"), self.address
++
++        self.test_miniscript_leaves()
++        self.test_absolute_timelock()
++        self.test_relative_timelock()
++        self.test_no_timelock_expressed()
++
++    def test_miniscript_leaves(self):
++        self.log.info("tmr() accepts miniscript leaves and infers them back")
++        info = self.wallet.getaddressinfo(self.address)
++        assert_equal(info["ismine"], True)
++        assert_equal(info["solvable"], True)
++        # The wallet knows the whole tree, so it reads the two timelocked leaves back out of the
++        # scripts themselves rather than out of the descriptor it was given.
++        inferred = info["desc"]
++        assert inferred.startswith("tmr("), inferred
++        assert f"after({self.locktime_height})" in inferred, inferred
++        assert f"older({CSV_BLOCKS})" in inferred, inferred
++        assert self.cltv_key in inferred, inferred
++        assert self.csv_key in inferred, inferred
++
++    def test_absolute_timelock(self):
++        self.log.info("The after() leaf spends only once its block height is reached")
++        node = self.nodes[0]
++        utxo = self.fund(self.address)
++
++        psbt = self.spend_psbt(utxo, sequence=SEQUENCE_NO_CSV, locktime=self.locktime_height)
++        signed = self.sign(psbt)
++        tx_hex = self.finalized_witness(signed, self.leaf_for(signed, self.cltv_key))
++
++        # The transaction is signed and well formed, but it is not final until the height its leaf
++        # names has been mined: IsFinalTx compares nLockTime against the height of the next block.
++        assert node.getblockcount() < self.locktime_height, node.getblockcount()
++        self.assert_rejected(tx_hex, "non-final")
++        self.generate(node, self.locktime_height - node.getblockcount() - 1)
++        assert_equal(node.getblockcount(), self.locktime_height - 1)
++        self.assert_rejected(tx_hex, "non-final")
++
++        self.generate(node, 1)
++        assert_equal(node.getblockcount(), self.locktime_height)
++        self.assert_accepted(tx_hex)
++        txid = node.sendrawtransaction(tx_hex)
++        self.generate(node, 1)
++        assert_equal(self.wallet.gettransaction(txid)["confirmations"], 1)
++
++    def test_relative_timelock(self):
++        self.log.info("The older() leaf spends only once its input is old enough")
++        node = self.nodes[0]
++        utxo = self.fund(self.address)
++        funded_height = node.getblockcount()
++
++        psbt = self.spend_psbt(utxo, sequence=CSV_BLOCKS, locktime=0)
++        signed = self.sign(psbt)
++        tx_hex = self.finalized_witness(signed, self.leaf_for(signed, self.csv_key))
++
++        # BIP68 counts the input's own confirmations, and the spend may only enter the chain from
++        # the block that gives it the CSV_BLOCKS-th one.
++        self.assert_rejected(tx_hex, "non-BIP68-final")
++        self.generate(node, CSV_BLOCKS - 2)
++        assert_equal(node.getblockcount(), funded_height + CSV_BLOCKS - 2)
++        self.assert_rejected(tx_hex, "non-BIP68-final")
++
++        self.generate(node, 1)
++        assert_equal(node.getblockcount(), funded_height + CSV_BLOCKS - 1)
++        self.assert_accepted(tx_hex)
++        txid = node.sendrawtransaction(tx_hex)
++        self.generate(node, 1)
++        assert_equal(self.wallet.gettransaction(txid)["confirmations"], 1)
++
++    def test_no_timelock_expressed(self):
++        self.log.info("Without a timelock in the transaction neither leaf can be satisfied")
++        node = self.nodes[0]
++        utxo = self.fund(self.address)
++
++        # A final nSequence disables relative locktimes and stops nLockTime being enforced, so
++        # neither CHECKLOCKTIMEVERIFY nor CHECKSEQUENCEVERIFY can be made to pass. The chain is
++        # well past the after() height by now, which is exactly what makes the point: the leaf
++        # follows the transaction, not the tip.
++        assert node.getblockcount() > self.locktime_height, node.getblockcount()
++        psbt = self.spend_psbt(utxo, sequence=SEQUENCE_FINAL, locktime=0)
++        signed = self.sign(psbt)
++        assert_equal(node.finalizepsbt(signed)["complete"], False)
++
++
++if __name__ == "__main__":
++    WalletP2MRTimelockTest(__file__).main()
+-- 
+2.49.0.windows.1
+

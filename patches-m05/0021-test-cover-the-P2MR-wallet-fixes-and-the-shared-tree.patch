@@ -1,7 +1,7 @@
 From e9e8d0b877cf46f1b5725cc434e4e76a839b1f27 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:46:07 -0600
-Subject: [PATCH 21/25] test: cover the P2MR wallet fixes and the shared tree
+Subject: [PATCH 21/28] test: cover the P2MR wallet fixes and the shared tree
  reconstruction
 
 Unit tests: infer_script_tree_test pins InferTaprootTree() and InferP2MRTree()
