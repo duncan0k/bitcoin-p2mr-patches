@@ -55,7 +55,7 @@ build/test/functional/test_runner.py -j8 feature_p2mr feature_p2mr_signet p2p_se
 ## 验证记录（2026-09-15，Ubuntu 24.04 / g++ 13.3 / 64 核）
 
 - 全量 `test_bitcoin` 通过；`script_tests.json` 含 33 条 P2MR 向量（m=0/1/2/128 成功、m=129 与长度错误、奇偶位、非 0xC0 与 DISCOURAGE 标志、栈形状与 annex、根不匹配、`OP_SUCCESSx`、三种 sighash 类型、`OP_CODESEPARATOR`、错签名）。
-- `feature_p2mr.py`、`feature_p2mr_signet.py`、`p2p_segwit.py`、`feature_taproot.py` 等通过；默认功能测试全集 268 项通过（`feature_dbcrash` 等扩展项未跑）。
+- 默认功能测试全集 **270/270 通过**（含新增的 `feature_p2mr.py`、`feature_p2mr_signet.py`；`--extended` 扩展项未跑）。
 - Codex（gpt-6-astra，xhigh）红队结论：SHIP（以此起一条 custom signet 做实验），High 0；留到 M0.5 的项：descriptor 推断、钱包输出类型/找零、P2MR 专用 fuzz target、资源计量压力测试。
 
 ## 不做 / 不能说
