@@ -79,3 +79,11 @@ validation only after activation.
   "the only", "the real bc1z", "mainnet-ready", or "a quantum-resistant network".
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
+
+## Ark-0 evidence pack (`ark0/`)
+
+`ark0/` holds what an outside reader needs to check the custom-signet claims offline: the network
+parameters (`NETWORK.md`); the confirmed P2MR spend and the three rejected blocks as raw hex, with the
+node responses they produced (`evidence/`); a block file covering genesis to height 1264 that a fresh
+patched node replays with `-loadblock` (`snapshot/`); and the step-by-step `REPRODUCE.md`. The network
+itself has no public endpoint; the pack is the way to verify it.

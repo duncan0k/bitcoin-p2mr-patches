@@ -25,7 +25,7 @@ below without contacting the network.
   to `INT_MAX` on mainnet, testnet3, testnet4 and the default signet, so the
   deployment never activates there and `getdeploymentinfo` does not list it.
 - **Not a public network.** There is no published endpoint, seed node, faucet
-  or explorer, and none is planned. The snapshot in `snapshot/` is the only
+  or explorer at this stage. The snapshot in `snapshot/` is the only
   distribution channel for its blocks.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
