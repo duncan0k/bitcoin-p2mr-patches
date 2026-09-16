@@ -1,0 +1,235 @@
+From e57ce08fcb60d4c6361b515fac204b39fb55bcee Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:30:11 -0600
+Subject: [PATCH 16/34] wallet: refuse P2MR receiving addresses where BIP360 is
+ not deployed
+
+Where the P2MR deployment never activates, a 32 byte witness v2 program is an
+unknown witness program. Consensus accepts any witness for it, so coins paid to
+such an address can be taken by the first miner that notices; the existing
+functional tests spend exactly that way before activation. Offering a P2MR
+receiving address on mainnet, testnet3, testnet4 or the default signet
+therefore hands out an address that cannot hold money.
+
+CheckP2MRReceiveAllowed() refuses when DeploymentEnabled() is false for
+DEPLOYMENT_P2MR, and guards the two entry points that produce addresses meant
+for receiving: importdescriptors, after which the wallet would treat the
+scripts as its own, and deriveaddresses, which is the documented way to get an
+address for a tmr() descriptor.
+
+Parsing stays available everywhere, so getdescriptorinfo still parses and
+checksums a tmr() descriptor off-chain. Loading a wallet that already holds one
+is untouched as well, so funds stay recoverable if a chain gains the deployment
+later. Signet is the one chain whose activation depends on configuration, so
+wallet_p2mr_signet.py exercises both sides of the gate there.
+---
+ src/rpc/output_script.cpp             |  3 +
+ src/rpc/util.cpp                      | 15 +++++
+ src/rpc/util.h                        | 14 +++++
+ src/wallet/rpc/backup.cpp             |  4 ++
+ test/functional/test_runner.py        |  1 +
+ test/functional/wallet_p2mr_signet.py | 85 +++++++++++++++++++++++++++
+ 6 files changed, 122 insertions(+)
+ create mode 100644 test/functional/wallet_p2mr_signet.py
+
+diff --git a/src/rpc/output_script.cpp b/src/rpc/output_script.cpp
+index 2d65b98..3a14f61 100644
+--- a/src/rpc/output_script.cpp
++++ b/src/rpc/output_script.cpp
+@@ -231,6 +231,9 @@ static UniValue DeriveAddresses(const Descriptor* desc, int64_t range_begin, int
+         if (!desc->Expand(i, key_provider, scripts, provider)) {
+             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Cannot derive script without private keys");
+         }
++        // deriveaddresses is how an address is obtained for a tmr() descriptor, so it counts as a
++        // receiving entry point. getdescriptorinfo remains available for parsing and checksums.
++        CheckP2MRReceiveAllowed(scripts);
+ 
+         for (const CScript& script : scripts) {
+             CTxDestination dest;
+diff --git a/src/rpc/util.cpp b/src/rpc/util.cpp
+index b50b826..b193360 100644
+--- a/src/rpc/util.cpp
++++ b/src/rpc/util.cpp
+@@ -3,7 +3,9 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <chain.h>
++#include <chainparams.h>
+ #include <common/args.h>
++#include <deploymentstatus.h>
+ #include <common/messages.h>
+ #include <common/types.h>
+ #include <consensus/amount.h>
+@@ -1397,6 +1399,19 @@ void PushWarnings(const std::vector<bilingual_str>& warnings, UniValue& obj)
+     obj.pushKV("warnings", BilingualStringsToUniValue(warnings));
+ }
+ 
++void CheckP2MRReceiveAllowed(std::span<const CScript> scripts)
++{
++    if (DeploymentEnabled(Params().GetConsensus(), Consensus::DEPLOYMENT_P2MR)) return;
++    for (const CScript& script : scripts) {
++        if (!script.IsPayToMerkleRoot()) continue;
++        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
++                           "P2MR (BIP 360) is not enabled on this chain. A P2MR output is an unknown "
++                           "witness program here, which consensus lets anyone spend, so any miner can "
++                           "take coins sent to such an address. Refusing to produce a P2MR receiving "
++                           "address on this chain.");
++    }
++}
++
+ std::vector<RPCResult> ScriptPubKeyDoc() {
+     return
+          {
+diff --git a/src/rpc/util.h b/src/rpc/util.h
+index 3753087..e7f30ae 100644
+--- a/src/rpc/util.h
++++ b/src/rpc/util.h
+@@ -20,6 +20,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <span>
+ #include <functional>
+ #include <initializer_list>
+ #include <map>
+@@ -519,6 +520,19 @@ void PushWarnings(const std::vector<bilingual_str>& warnings, UniValue& obj);
+ 
+ std::vector<RPCResult> ScriptPubKeyDoc();
+ 
++/**
++ * Refuse to hand out BIP360 P2MR receiving addresses on a chain where the deployment is disabled.
++ *
++ * Where P2MR never activates, a 32 byte witness v2 program is just an unknown witness program:
++ * consensus accepts any witness for it, so coins paid to such an address can be taken by the first
++ * miner that notices. Entry points that produce addresses meant for receiving must not offer them
++ * there. Parsing and inspection (getdescriptorinfo) stay available.
++ *
++ * @param[in] scripts The scriptPubKeys a descriptor produces.
++ * @throws JSONRPCError if any of them is a P2MR output and P2MR is disabled on this chain.
++ */
++void CheckP2MRReceiveAllowed(std::span<const CScript> scripts);
++
+ /***
+  * Get the target for a given block index.
+  *
+diff --git a/src/wallet/rpc/backup.cpp b/src/wallet/rpc/backup.cpp
+index 9b70f5b..1403d5b 100644
+--- a/src/wallet/rpc/backup.cpp
++++ b/src/wallet/rpc/backup.cpp
+@@ -238,6 +238,10 @@ static UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, c
+             if (!parsed_desc->Expand(0, keys, scripts, expand_keys)) {
+                 throw JSONRPCError(RPC_WALLET_ERROR, "Cannot expand descriptor. Probably because of hardened derivations without private keys provided");
+             }
++            // Importing makes the wallet treat these scripts as its own and hand out their
++            // addresses, which is unsafe for P2MR where the deployment is disabled. Loading a
++            // wallet that already holds such a descriptor is left alone, so funds stay recoverable.
++            CheckP2MRReceiveAllowed(scripts);
+             parsed_desc->ExpandPrivate(0, keys, expand_keys);
+ 
+             for (const auto& w : parsed_desc->Warnings()) {
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index f67acee..fccf81f 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -288,6 +288,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr.py',
+     'feature_p2mr_signet.py',
+     'wallet_p2mr.py',
++    'wallet_p2mr_signet.py',
+     'mempool_accept.py',
+     'p2p_addr_selfannouncement.py',
+     'mempool_expiry.py',
+diff --git a/test/functional/wallet_p2mr_signet.py b/test/functional/wallet_p2mr_signet.py
+new file mode 100644
+index 0000000..d48ba62
+--- /dev/null
++++ b/test/functional/wallet_p2mr_signet.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""The wallet refuses P2MR receiving addresses where BIP360 is not deployed.
++
++Where P2MR never activates, a 32 byte witness v2 program is an unknown witness
++program: consensus accepts any witness for it, so coins paid to such an address
++can be taken by the first miner that notices. The entry points that produce
++addresses for receiving therefore have to refuse on those chains, while parsing
++and inspection stay available.
++
++Signet is the only chain whose P2MR activation depends on configuration: a
++custom -signetchallenge enables it at height 1, the default challenge never
++does. That makes it the one place where both sides can be tested.
++"""
++
++from test_framework.descriptors import descsum_create
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import (
++    assert_equal,
++    assert_raises_rpc_error,
++)
++from test_framework.wallet_util import generate_keypair
++
++NOT_ENABLED = "P2MR (BIP 360) is not enabled on this chain"
++
++
++class WalletP2MRSignetTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        # node0: custom signet, where P2MR activates at height 1.
++        # node1: default signet parameters, where it never activates.
++        self.extra_args = [["-signetchallenge=51"], []]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++
++    def setup_network(self):
++        # The two nodes are on different signets; never connect them.
++        self.setup_nodes()
++
++    def init_wallet(self, *, node):
++        pass
++
++    def run_test(self):
++        enabled, disabled = self.nodes
++        assert "p2mr" in enabled.getdeploymentinfo()["deployments"]
++        assert "p2mr" not in disabled.getdeploymentinfo()["deployments"]
++
++        wifs = [generate_keypair(wif=True)[0] for _ in range(2)]
++        tmr = descsum_create("tmr({{pk({}),pk({})}})".format(*wifs))
++        wpkh = descsum_create("wpkh({})".format(wifs[0]))
++
++        self.log.info("custom signet: the descriptor imports and derives normally")
++        enabled.createwallet(wallet_name="p2mr")
++        wallet = enabled.get_wallet_rpc("p2mr")
++        assert_equal(wallet.importdescriptors([{"desc": tmr, "timestamp": "now"}])[0]["success"], True)
++        address = enabled.deriveaddresses(tmr)[0]
++        assert address.startswith("tb1z"), address
++        assert_equal(wallet.getaddressinfo(address)["ismine"], True)
++
++        self.log.info("default signet: importing and deriving are both refused")
++        disabled.createwallet(wallet_name="p2mr")
++        blocked = disabled.get_wallet_rpc("p2mr")
++        result = blocked.importdescriptors([{"desc": tmr, "timestamp": "now"}])[0]
++        assert_equal(result["success"], False)
++        assert NOT_ENABLED in result["error"]["message"], result
++        assert_raises_rpc_error(-5, NOT_ENABLED, disabled.deriveaddresses, tmr)
++        # Nothing was added to the wallet, so the address is not watched either.
++        assert_equal(blocked.getaddressinfo(address)["ismine"], False)
++
++        self.log.info("default signet: parsing and other descriptors are unaffected")
++        info = disabled.getdescriptorinfo(tmr)
++        assert info["descriptor"].startswith("tmr("), info
++        assert_equal(info["isrange"], False)
++        assert_equal(info["hasprivatekeys"], True)
++        assert disabled.deriveaddresses(wpkh)[0].startswith("tb1q")
++        assert_equal(blocked.importdescriptors([{"desc": wpkh, "timestamp": "now"}])[0]["success"], True)
++
++
++if __name__ == "__main__":
++    WalletP2MRSignetTest(__file__).main()
+-- 
+2.49.0.windows.1
+

@@ -1,0 +1,58 @@
+From f4a680f789cb797b969aa30e05f11d5f3c2d200b Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 06:27:45 -0600
+Subject: [PATCH 29/34] psbt: keep every control block a P2MR leaf is given
+
+A PSBT can name a leaf with control blocks that do not rebuild the output's
+Merkle root. SignP2MR skips those and recovers usable ones from the script tree
+the wallet knows, so a wallet can sign an input no one else can finalize.
+
+Storing that back with emplace kept whatever set the leaf already had, which for
+an input whose every signable leaf carried only malformed blocks meant the
+recovered ones were dropped on export. A finalizer without the wallet has no way
+to work them out again and the input stalls. Merging two PSBTs had the same
+map-level problem: each control block is a key of its own on the wire, so a
+combiner has to keep the union rather than whichever set it saw first.
+
+Take the union in both places.
+---
+ src/psbt.cpp | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index c46f749..390149a 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -211,8 +211,13 @@ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
+     if (m_tap_merkle_root.IsNull() && !sigdata.p2mr_spenddata.merkle_root.IsNull()) {
+         m_tap_merkle_root = sigdata.p2mr_spenddata.merkle_root;
+     }
+-    for (const auto& [leaf_script, control_block] : sigdata.p2mr_spenddata.scripts) {
+-        m_tap_scripts.emplace(leaf_script, control_block);
++    for (const auto& [leaf_script, control_blocks] : sigdata.p2mr_spenddata.scripts) {
++        // A PSBT can name a leaf with control blocks that do not rebuild the output's Merkle root,
++        // in which case signing worked from the ones recovered from the script tree this wallet
++        // knows (see SignP2MR). Those have to join the leaf's set instead of being dropped because
++        // the leaf is already present, or a finalizer without the wallet would have nothing usable
++        // left to build the witness from.
++        m_tap_scripts[leaf_script].insert(control_blocks.begin(), control_blocks.end());
+     }
+     for (const auto& [pubkey, leaf_origin] : sigdata.taproot_misc_pubkeys) {
+         m_tap_bip32_paths.emplace(pubkey, leaf_origin);
+@@ -241,7 +246,12 @@ void PSBTInput::Merge(const PSBTInput& input)
+     hd_keypaths.insert(input.hd_keypaths.begin(), input.hd_keypaths.end());
+     unknown.insert(input.unknown.begin(), input.unknown.end());
+     m_tap_script_sigs.insert(input.m_tap_script_sigs.begin(), input.m_tap_script_sigs.end());
+-    m_tap_scripts.insert(input.m_tap_scripts.begin(), input.m_tap_scripts.end());
++    // Each control block is a key of its own on the wire, so combining has to take the union of
++    // both sides. A map insertion would keep whichever set arrived first and silently discard the
++    // other one's control blocks for that leaf.
++    for (const auto& [leaf_script, control_blocks] : input.m_tap_scripts) {
++        m_tap_scripts[leaf_script].insert(control_blocks.begin(), control_blocks.end());
++    }
+     m_tap_bip32_paths.insert(input.m_tap_bip32_paths.begin(), input.m_tap_bip32_paths.end());
+ 
+     if (redeem_script.empty() && !input.redeem_script.empty()) redeem_script = input.redeem_script;
+-- 
+2.49.0.windows.1
+

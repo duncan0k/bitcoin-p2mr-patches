@@ -1,0 +1,256 @@
+From ce5fc3c4f09f3452be6b37e07ff0eee95e0b0372 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 10:18:04 -0600
+Subject: [PATCH 28/34] test: pin what invalidates a signed P2MR spend
+
+Four edits, each made to an otherwise valid script path spend that the node
+accepts untouched, so the rejection is attributable to the edit alone:
+
+  * an output amount changed after signing;
+  * the two inputs of an all-P2MR transaction reordered, with each witness
+    still travelling with the input it was made for;
+  * the sibling leaf's control block substituted, which passes every
+    structural check the real one passes and still rebuilds a Merkle root
+    that is not the witness program;
+  * a witness_utxo that misdescribes the output being spent. The funding
+    transaction is held back so that the wallet has nothing but the PSBT to
+    go on: a wrong amount is signed over and refused by the node, and a
+    wrong scriptPubKey leaves the wallet with no tree to sign with.
+
+The reject reasons are asserted in full. A P2MR spend is checked under the
+standard flags, so these report as mempool-script-verify-flag-failed; the
+same failures reach a block as block-script-verify-flag-failed, which
+feature_p2mr.py already covers.
+---
+ test/functional/wallet_p2mr.py | 179 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 176 insertions(+), 3 deletions(-)
+
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+index d6846e0..e03c20d 100644
+--- a/test/functional/wallet_p2mr.py
++++ b/test/functional/wallet_p2mr.py
+@@ -6,17 +6,23 @@
+ 
+ Covers importing a tmr() descriptor, receiving to the resulting bcrt1z address,
+ spending it automatically and through the full PSBT flow, which control block
+-signing picks, size estimation, mixed input transactions, and the refusal to
+-express an anyone-can-spend single-leaf tree.
++signing picks, size estimation, mixed input transactions, the refusal to express
++an anyone-can-spend single-leaf tree, and the edits to a signed script path spend
++that the node has to reject.
+ """
+ 
+ from decimal import Decimal
+-from io import BytesIO
+ 
+ from test_framework.descriptors import descsum_create
++from test_framework.messages import (
++    COIN,
++    CTxOut,
++    tx_from_hex,
++)
+ from test_framework.psbt import (
+     PSBT,
+     PSBT_IN_TAP_LEAF_SCRIPT,
++    PSBT_IN_WITNESS_UTXO,
+ )
+ from test_framework.test_framework import BitcoinTestFramework
+ from test_framework.util import (
+@@ -52,6 +58,12 @@ EXPECTED_VSIZE = 148
+ # load-bearing one: an estimate below the real size is what underpays the fee.
+ MAX_ESTIMATE_SLACK_PER_INPUT = 2
+ 
++# testmempoolaccept reject reasons. A P2MR spend is checked under the standard flags, so a script
++# failure is reported as a policy one and carries the script interpreter's own message. The same
++# failures reach a block as block-script-verify-flag-failed, which feature_p2mr.py covers.
++MEMPOOL_SIG_FAILURE = "mempool-script-verify-flag-failed (Invalid Schnorr signature)"
++MEMPOOL_ROOT_MISMATCH = "mempool-script-verify-flag-failed (Witness program hash mismatch)"
++
+ 
+ class WalletP2MRTest(BitcoinTestFramework):
+     def set_test_params(self):
+@@ -218,6 +230,34 @@ class WalletP2MRTest(BitcoinTestFramework):
+             assert_equal(decoded["sighash"], sighash)
+         return signed["psbt"]
+ 
++    def signed_spend(self, wallet, utxos, amount):
++        """Fund, sign and finalize a transaction spending exactly `utxos`.
++
++        Returns the funded PSBT, which still carries the whole script tree, and the raw
++        transaction, which carries only the leaf the wallet chose.
++        """
++        node = self.nodes[0]
++        funded = wallet.walletcreatefundedpsbt(
++            inputs=[{"txid": u["txid"], "vout": u["vout"]} for u in utxos],
++            outputs=[{self.funder.getnewaddress(): amount}],
++            options={"fee_rate": 10, "add_inputs": False,
++                     "changeAddress": wallet.getnewaddress(address_type="bech32")},
++        )
++        processed = wallet.walletprocesspsbt(funded["psbt"])
++        assert_equal(processed["complete"], True)
++        final = node.finalizepsbt(processed["psbt"])
++        assert_equal(final["complete"], True)
++        return funded["psbt"], final["hex"]
++
++    def assert_rejected(self, tx_hex, reason):
++        result = self.nodes[0].testmempoolaccept([tx_hex])[0]
++        assert_equal(result["allowed"], False)
++        assert_equal(result["reject-reason"], reason)
++
++    def assert_accepted(self, tx_hex):
++        result = self.nodes[0].testmempoolaccept([tx_hex])[0]
++        assert result["allowed"], result
++
+     # -- test cases ----------------------------------------------------------
+ 
+     def run_test(self):
+@@ -235,6 +275,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.test_bogus_control_block()
+         self.test_missing_spent_output()
+         self.test_leaf_selection()
++        self.test_signature_invalidation()
+         self.test_mixed_inputs()
+         self.test_no_p2mr_address_generation()
+         self.test_single_leaf_refused()
+@@ -455,6 +496,138 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.generate(node, 1)
+         self.assert_p2mr_spend(result["txid"], expected_control_len=CONTROL_DEPTH_1)
+ 
++    def test_signature_invalidation(self):
++        self.log.info("Every edit to a signed P2MR spend invalidates it")
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_tamper", inner)
++
++        self.check_amount_change(wallet, address)
++        self.check_input_swap(wallet, address)
++        self.check_control_block_substitution(wallet, address)
++        self.check_witness_utxo_mismatch(wallet, address)
++
++    def check_amount_change(self, wallet, address):
++        """Moving a satoshi after signing breaks the signature."""
++        node = self.nodes[0]
++        _, tx_hex = self.signed_spend(wallet, [self.fund_utxo(wallet, address)], Decimal("0.5"))
++        # Every case below differs from this one by a single edit, so it is the control.
++        self.assert_accepted(tx_hex)
++
++        tx = tx_from_hex(tx_hex)
++        assert_greater_than(len(tx.vout), 0)
++        # The BIP341 message commits to every output of the transaction.
++        tx.vout[0].nValue -= 1000
++        self.assert_rejected(tx.serialize().hex(), MEMPOOL_SIG_FAILURE)
++
++        node.sendrawtransaction(tx_hex)
++        self.generate(node, 1)
++        self.log.info("  changing an output amount: rejected")
++
++    def check_input_swap(self, wallet, address):
++        """Reordering the inputs breaks both signatures, even though each keeps its own input."""
++        node = self.nodes[0]
++        utxos = [self.fund_utxo(wallet, address), self.fund_utxo(wallet, address)]
++        _, tx_hex = self.signed_spend(wallet, utxos, Decimal("1.5"))
++        self.assert_accepted(tx_hex)
++
++        tx = tx_from_hex(tx_hex)
++        assert_equal(len(tx.vin), 2)
++        # Each witness travels with the input it was made for, so both stay well formed script path
++        # spends. What breaks is the message: BIP341 commits to the input index and to the order of
++        # the spent outputs, amounts and scriptPubKeys.
++        tx.vin.reverse()
++        tx.wit.vtxinwit.reverse()
++        self.assert_rejected(tx.serialize().hex(), MEMPOOL_SIG_FAILURE)
++
++        txid = node.sendrawtransaction(tx_hex)
++        self.generate(node, 1)
++        # Both inputs really were P2MR, which is what makes the swap above a like for like one.
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1, expected_inputs=2)
++        self.log.info("  swapping two P2MR inputs: rejected")
++
++    def check_control_block_substitution(self, wallet, address):
++        """A control block from the sibling leaf is well formed and still rebuilds a wrong root."""
++        node = self.nodes[0]
++        psbt, tx_hex = self.signed_spend(wallet, [self.fund_utxo(wallet, address)], Decimal("0.5"))
++        self.assert_accepted(tx_hex)
++
++        tx = tx_from_hex(tx_hex)
++        stack = tx.wit.vtxinwit[0].scriptWitness.stack
++        leaf_script, control = stack[-2].hex(), stack[-1]
++        # The sibling leaf's control block passes every structural check the real one passes: same
++        # length, same leaf version, same mandatory low bit. It just folds this leaf script into a
++        # Merkle root that is not the witness program.
++        entries = node.decodepsbt(psbt)["inputs"][0]["taproot_scripts"]
++        assert_equal(len(entries), 2)
++        sibling = next(entry for entry in entries if entry["script"] != leaf_script)
++        assert_equal(len(sibling["control_blocks"]), 1)
++        forged = bytes.fromhex(sibling["control_blocks"][0])
++        assert_equal(len(forged), len(control))
++        assert_equal(forged[0], control[0])
++        assert forged != control, forged.hex()
++        stack[-1] = forged
++        self.assert_rejected(tx.serialize().hex(), MEMPOOL_ROOT_MISMATCH)
++
++        node.sendrawtransaction(tx_hex)
++        self.generate(node, 1)
++        self.log.info("  substituting the sibling leaf's control block: rejected")
++
++    def check_witness_utxo_mismatch(self, wallet, address):
++        """A signer that has only the PSBT's witness_utxo cannot tell that it lies."""
++        node = self.nodes[0]
++        script_pubkey = bytes.fromhex(wallet.getaddressinfo(address)["scriptPubKey"])
++
++        # Build the funding transaction but keep it to ourselves. Nothing on the node knows the
++        # output yet, so the wallet has to believe what the PSBT says about it, which is exactly
++        # the case witness_utxo exists for and the only one where a lie in it goes unnoticed.
++        funding = self.funder.walletcreatefundedpsbt(
++            inputs=[], outputs=[{address: 1}], options={"fee_rate": 10})
++        processed = self.funder.walletprocesspsbt(funding["psbt"])
++        assert_equal(processed["complete"], True)
++        funding_hex = node.finalizepsbt(processed["psbt"])["hex"]
++        funding_tx = tx_from_hex(funding_hex)
++        vout = next(n for n, out in enumerate(funding_tx.vout) if out.scriptPubKey == script_pubkey)
++        prevout = funding_tx.vout[vout]
++        assert_equal(node.getrawmempool(), [])
++
++        def sign_claiming(spent, finalize=True):
++            """Sign a spend of the unbroadcast output, told that it looks like `spent`."""
++            psbt = PSBT.from_base64(node.createpsbt(
++                [{"txid": funding_tx.txid_hex, "vout": vout}],
++                [{self.funder.getnewaddress(): Decimal("0.9999")}]))
++            # A PSBT key that is a bare type byte is held as an int, not as a one byte string.
++            psbt.i[0].map[PSBT_IN_WITNESS_UTXO] = spent.serialize()
++            return wallet.walletprocesspsbt(psbt.to_base64(), True, "DEFAULT", True, finalize)
++
++        truthful = sign_claiming(prevout)
++        assert_equal(truthful["complete"], True)
++
++        # A wrong amount leaves the scriptPubKey the wallet recognises, so it signs, over a BIP341
++        # message that commits to an amount the output does not carry.
++        wrong_amount = sign_claiming(CTxOut(prevout.nValue + COIN, prevout.scriptPubKey))
++        assert_equal(wrong_amount["complete"], True)
++
++        # A wrong scriptPubKey is a P2MR output whose Merkle root the wallet has no tree for, so
++        # there is nothing to sign with and the input stays empty.
++        program = bytearray(prevout.scriptPubKey)
++        program[-1] ^= 0xFF
++        refused = sign_claiming(CTxOut(prevout.nValue, bytes(program)), finalize=False)
++        assert_equal(refused["complete"], False)
++        decoded = node.decodepsbt(refused["psbt"])["inputs"][0]
++        assert "taproot_script_path_sigs" not in decoded, decoded
++        assert_equal(node.finalizepsbt(refused["psbt"])["complete"], False)
++        self.log.info("  signing against a wrong witness_utxo scriptPubKey: refused")
++
++        # Only now does the output exist, and only the signature made over its real amount stands.
++        node.sendrawtransaction(funding_hex)
++        self.generate(node, 1)
++        self.assert_rejected(wrong_amount["hex"], MEMPOOL_SIG_FAILURE)
++        self.log.info("  signing against a wrong witness_utxo amount: rejected")
++        self.assert_accepted(truthful["hex"])
++        node.sendrawtransaction(truthful["hex"])
++        self.generate(node, 1)
++
+     def test_mixed_inputs(self):
+         self.log.info("Estimate and spend P2MR alongside legacy and segwit inputs")
+         node = self.nodes[0]
+-- 
+2.49.0.windows.1
+

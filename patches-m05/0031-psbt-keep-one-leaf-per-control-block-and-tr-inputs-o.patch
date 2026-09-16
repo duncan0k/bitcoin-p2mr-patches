@@ -1,0 +1,151 @@
+From 9b3c54682fc403b84b3330f03dd10095dc4ebdbc Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 08:35:06 -0600
+Subject: [PATCH 31/34] psbt: keep one leaf per control block, and tr() inputs
+ out of it
+
+BIP 371 keys a leaf script by its control block, so a control block names exactly
+one leaf across the whole input. Unioning per leaf broke that: an input that
+arrives naming each of two leaves with the other one's control block is well
+formed, but once signing adds the associations the output proves, all four are
+kept and serialization writes each key twice, which no parser accepts.
+
+Add a control block through a step that keeps the invariant instead. The block
+that rebuilds the spent output's Merkle root from this leaf is the association
+the output itself settles, so it displaces any other; one that does not is left
+where it was rather than written under a second leaf. Merging resolves a
+disagreement between two PSBTs the same way, in either order.
+
+The merge union also has to stop at P2MR inputs. A P2MR signer checks every
+candidate control block against the output root before it picks one, but a
+Taproot signer takes the shortest block a leaf has and never tries another, so
+a second one admitted there turns a PSBT that finalized into one that does not.
+Merging a tr() input therefore keeps the control blocks it already had. The
+spent output says which of the two an input is; an input that does not carry its
+witness_utxo is treated as the Taproot case, as it was before.
+---
+ src/psbt.cpp | 85 +++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 74 insertions(+), 11 deletions(-)
+
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index 390149a..d968cce 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -7,7 +7,9 @@
+ #include <common/types.h>
+ #include <node/types.h>
+ #include <policy/policy.h>
++#include <script/interpreter.h>
+ #include <script/signingprovider.h>
++#include <script/solver.h>
+ #include <util/check.h>
+ #include <util/strencodings.h>
+ 
+@@ -166,6 +168,56 @@ void PSBTInput::FillSignatureData(SignatureData& sigdata) const
+     }
+ }
+ 
++namespace {
++using TapLeafKey = std::pair<std::vector<unsigned char>, int>;
++using TapLeafScripts = std::map<TapLeafKey, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>>;
++
++//! The BIP360 Merkle root an input spends, when the spent output is known to be a P2MR one.
++//! A PSBTInput does not know its own prevout, so only witness_utxo can answer this; an input that
++//! carries nothing but a non_witness_utxo is treated as unknown.
++std::optional<uint256> SpentP2MRRoot(const CTxOut& witness_utxo)
++{
++    if (witness_utxo.IsNull()) return std::nullopt;
++    std::vector<std::vector<unsigned char>> solutions;
++    if (Solver(witness_utxo.scriptPubKey, solutions) != TxoutType::WITNESS_V2_P2MR) return std::nullopt;
++    return uint256{solutions[0]};
++}
++
++//! Whether `control` is the control block that proves `leaf` sits in the tree `root` commits to.
++bool IsP2MRControlFor(const std::vector<unsigned char>& control, const TapLeafKey& leaf, const uint256& root)
++{
++    const auto& [script, leaf_ver] = leaf;
++    if (control.size() < P2MR_CONTROL_BASE_SIZE || control.size() > P2MR_CONTROL_MAX_SIZE) return false;
++    if ((control.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE != 0) return false;
++    // The last bit of c[0] is unused and consensus requires it to be 1 for every leaf version.
++    if ((control[0] & 1) != 1) return false;
++    if ((control[0] & TAPROOT_LEAF_MASK) != leaf_ver) return false;
++    return ComputeP2MRMerkleRoot(control, ComputeTapleafHash(leaf_ver, script)) == root;
++}
++
++//! Record that `control` proves `leaf`, keeping one leaf per control block.
++//!
++//! BIP 371 keys a leaf script by its control block, so an input holding the same control block
++//! under two leaves serializes to a repeated key and no longer parses. A block that rebuilds
++//! `root` from this leaf is the association the output itself proves and displaces any other; one
++//! that does not is dropped rather than left beside the leaf it is already recorded under. Without
++//! a root to judge by, whatever was recorded first stands.
++void AddTapLeafControl(TapLeafScripts& scripts, const TapLeafKey& leaf, const std::vector<unsigned char>& control, const std::optional<uint256>& root)
++{
++    for (auto it = scripts.begin(); it != scripts.end();) {
++        const auto recorded{it->first == leaf ? it->second.end() : it->second.find(control)};
++        if (recorded == it->second.end()) {
++            ++it;
++            continue;
++        }
++        if (!root || !IsP2MRControlFor(control, leaf, *root)) return;
++        it->second.erase(recorded);
++        it = it->second.empty() ? scripts.erase(it) : std::next(it);
++    }
++    scripts[leaf].insert(control);
++}
++} // namespace
++
+ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
+ {
+     if (sigdata.complete) {
+@@ -211,13 +263,17 @@ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
+     if (m_tap_merkle_root.IsNull() && !sigdata.p2mr_spenddata.merkle_root.IsNull()) {
+         m_tap_merkle_root = sigdata.p2mr_spenddata.merkle_root;
+     }
++    // A PSBT can name a leaf with control blocks that do not rebuild the output's Merkle root, in
++    // which case signing worked from the ones recovered from the script tree this wallet knows
++    // (see SignP2MR). Those have to join the leaf instead of being dropped because the leaf is
++    // already present, or a finalizer without the wallet would have nothing usable left to build
++    // the witness from. They also have to displace any stale association for the same control
++    // block, which the output itself settles.
++    const std::optional<uint256> p2mr_root{SpentP2MRRoot(witness_utxo)};
+     for (const auto& [leaf_script, control_blocks] : sigdata.p2mr_spenddata.scripts) {
+-        // A PSBT can name a leaf with control blocks that do not rebuild the output's Merkle root,
+-        // in which case signing worked from the ones recovered from the script tree this wallet
+-        // knows (see SignP2MR). Those have to join the leaf's set instead of being dropped because
+-        // the leaf is already present, or a finalizer without the wallet would have nothing usable
+-        // left to build the witness from.
+-        m_tap_scripts[leaf_script].insert(control_blocks.begin(), control_blocks.end());
++        for (const auto& control : control_blocks) {
++            AddTapLeafControl(m_tap_scripts, leaf_script, control, p2mr_root);
++        }
+     }
+     for (const auto& [pubkey, leaf_origin] : sigdata.taproot_misc_pubkeys) {
+         m_tap_bip32_paths.emplace(pubkey, leaf_origin);
+@@ -246,11 +302,18 @@ void PSBTInput::Merge(const PSBTInput& input)
+     hd_keypaths.insert(input.hd_keypaths.begin(), input.hd_keypaths.end());
+     unknown.insert(input.unknown.begin(), input.unknown.end());
+     m_tap_script_sigs.insert(input.m_tap_script_sigs.begin(), input.m_tap_script_sigs.end());
+-    // Each control block is a key of its own on the wire, so combining has to take the union of
+-    // both sides. A map insertion would keep whichever set arrived first and silently discard the
+-    // other one's control blocks for that leaf.
+-    for (const auto& [leaf_script, control_blocks] : input.m_tap_scripts) {
+-        m_tap_scripts[leaf_script].insert(control_blocks.begin(), control_blocks.end());
++    // Each control block is a key of its own on the wire, so combining a P2MR input has to take
++    // the union of both sides rather than keep whichever set arrived first. Only P2MR inputs take
++    // that route: a Taproot signer picks the shortest control block a leaf has and never tries
++    // another, so a second one admitted there turns a PSBT that finalized into one that does not.
++    if (const std::optional<uint256> p2mr_root{SpentP2MRRoot(witness_utxo)}) {
++        for (const auto& [leaf_script, control_blocks] : input.m_tap_scripts) {
++            for (const auto& control : control_blocks) {
++                AddTapLeafControl(m_tap_scripts, leaf_script, control, p2mr_root);
++            }
++        }
++    } else {
++        m_tap_scripts.insert(input.m_tap_scripts.begin(), input.m_tap_scripts.end());
+     }
+     m_tap_bip32_paths.insert(input.m_tap_bip32_paths.begin(), input.m_tap_bip32_paths.end());
+ 
+-- 
+2.49.0.windows.1
+

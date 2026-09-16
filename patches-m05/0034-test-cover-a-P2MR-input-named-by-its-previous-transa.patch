@@ -1,0 +1,202 @@
+From 58fb1e7876536fc63b9a98934cdb2c46b3c1e4b0 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 12:27:41 -0600
+Subject: [PATCH 34/34] test: cover a P2MR input named by its previous
+ transaction
+
+Repeat the swapped control block case with the input saying what it spends
+through the whole previous transaction instead of the output alone, and hand it
+to a blank wallet holding nothing but the tree. Signing has to put each block
+back under the leaf the output proves, and a finalizer with no wallet at all has
+to complete it, which is what makes the recovered associations load bearing.
+
+Combining is checked the same way round, since a spent output read out of a
+previous transaction settles a disagreement just as well as one named directly.
+
+Finally, two PSBTs that say nothing at all about what they spend: neither
+reading of a shared control block can be checked, so the side merged into keeps
+its own, and above all the block may not end up under both leaves, which would
+write one key twice.
+---
+ test/functional/wallet_p2mr.py | 119 ++++++++++++++++++++++++++++-----
+ 1 file changed, 103 insertions(+), 16 deletions(-)
+
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+index e42c82f..eb2b4a2 100644
+--- a/test/functional/wallet_p2mr.py
++++ b/test/functional/wallet_p2mr.py
+@@ -22,6 +22,7 @@ from test_framework.messages import (
+ )
+ from test_framework.psbt import (
+     PSBT,
++    PSBT_IN_NON_WITNESS_UTXO,
+     PSBT_IN_TAP_LEAF_SCRIPT,
+     PSBT_IN_WITNESS_UTXO,
+ )
+@@ -202,6 +203,14 @@ class WalletP2MRTest(BitcoinTestFramework):
+         return {key: value for key, value in psbt.i[0].map.items()
+                 if isinstance(key, bytes) and key[0] == PSBT_IN_TAP_LEAF_SCRIPT}
+ 
++    def swap_leaf_entries(self, psbt):
++        """Give each of a two leaf input's leaves the other leaf's control block."""
++        (key_a, value_a), (key_b, value_b) = self.leaf_entries(psbt).items()
++        for key in (key_a, key_b):
++            del psbt.i[0].map[key]
++        psbt.i[0].map[key_a] = value_b
++        psbt.i[0].map[key_b] = value_a
++
+     def roundtrip_and_broadcast(self, wallet, psbt, sighash="DEFAULT"):
+         """Sign, serialize, combine, finalize and broadcast; return the txid.
+ 
+@@ -521,7 +530,9 @@ class WalletP2MRTest(BitcoinTestFramework):
+         wallet, address = self.new_p2mr_wallet("p2mr_assoc", inner)
+ 
+         self.check_swapped_associations(wallet, address)
++        self.check_swapped_associations_from_previous_tx(wallet, address, inner)
+         self.check_conflicting_merge(wallet, address)
++        self.check_merge_without_a_spent_output(wallet, address)
+ 
+     def check_swapped_associations(self, wallet, address):
+         """Signing puts each control block back under the leaf the output proves it belongs to."""
+@@ -536,11 +547,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         # malformed one it may reject. Signing adds the associations the output does prove, and
+         # keeping those beside the swapped ones would write each key twice.
+         psbt = PSBT.from_base64(funded["psbt"])
+-        (key_a, value_a), (key_b, value_b) = self.leaf_entries(psbt).items()
+-        for key in (key_a, key_b):
+-            del psbt.i[0].map[key]
+-        psbt.i[0].map[key_a] = value_b
+-        psbt.i[0].map[key_b] = value_a
++        self.swap_leaf_entries(psbt)
+         swapped = psbt.to_base64()
+         assert_equal(self.leaf_controls(swapped), set(truthful))
+         assert self.leaf_associations(swapped) != truthful
+@@ -554,13 +561,56 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+         self.log.info("  a PSBT that swapped the two leaves' control blocks: repaired")
+ 
++    def check_swapped_associations_from_previous_tx(self, wallet, address, inner):
++        """The same repair when the input names what it spends by the whole previous transaction."""
++        node = self.nodes[0]
++        utxo = self.fund_utxo(wallet, address)
++        funded = self.pinned_psbt(wallet, utxo, self.funder.getnewaddress(), amount=Decimal("0.5"))
++        truthful = self.leaf_associations(funded["psbt"])
++
++        psbt = PSBT.from_base64(funded["psbt"])
++        self.swap_leaf_entries(psbt)
++        # Name the spent output by the transaction that created it, which is the other way a PSBT
++        # is allowed to say what an input spends. The output is then something a signer has to
++        # look up rather than read, and until it does it cannot tell which leaf a block proves.
++        del psbt.i[0].map[PSBT_IN_WITNESS_UTXO]
++        psbt.i[0].map[PSBT_IN_NON_WITNESS_UTXO] = tx_from_hex(
++            node.getrawtransaction(utxo["txid"])).serialize()
++        swapped = psbt.to_base64()
++        decoded = node.decodepsbt(swapped)["inputs"][0]
++        assert "witness_utxo" not in decoded, decoded
++        assert "non_witness_utxo" in decoded, decoded
++
++        # A wallet with nothing in it but this tree, so the tree and the output being spent are
++        # the only things that can put a control block back under its own leaf.
++        node.createwallet(wallet_name="p2mr_assoc_blank", blank=True)
++        blank = node.get_wallet_rpc("p2mr_assoc_blank")
++        assert_equal(self.import_tmr(blank, inner)[0]["success"], True)
++
++        signed = self.sign_without_finalizing(blank, swapped)
++        assert_equal(self.leaf_associations(signed), truthful)
++        finalized = node.finalizepsbt(signed)
++        assert_equal(finalized["complete"], True)
++        txid = node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++        self.log.info("  the same, with only the previous transaction to go on: repaired")
++
+     def check_conflicting_merge(self, wallet, address):
+         """Combining two PSBTs that disagree about a control block keeps the provable reading."""
+         node = self.nodes[0]
+-        funded = self.pinned_psbt(
+-            wallet, self.fund_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        utxo = self.fund_utxo(wallet, address)
++        funded = self.pinned_psbt(wallet, utxo, self.funder.getnewaddress(), amount=Decimal("0.5"))
+         truthful = self.leaf_associations(funded["psbt"])
+         signed = self.sign_without_finalizing(wallet, funded["psbt"])
++        previous_tx = tx_from_hex(node.getrawtransaction(utxo["txid"])).serialize()
++
++        def named_by_previous_tx(psbt_b64):
++            """The same PSBT, saying what it spends with the whole previous transaction."""
++            psbt = PSBT.from_base64(psbt_b64)
++            del psbt.i[0].map[PSBT_IN_WITNESS_UTXO]
++            psbt.i[0].map[PSBT_IN_NON_WITNESS_UTXO] = previous_tx
++            return psbt.to_base64()
+ 
+         # One leaf, named by the control block that belongs to the other one. Merged either way
+         # round, that control block would otherwise end up under two leaves at once.
+@@ -572,20 +622,57 @@ class WalletP2MRTest(BitcoinTestFramework):
+         conflicting = psbt.to_base64()
+         assert_equal(len(self.leaf_associations(conflicting)), 1)
+ 
+-        spends = []
++        # Either way round, and whichever way the two sides say what they spend, since a spent
++        # output read out of the previous transaction settles the disagreement just as well.
++        spends = set()
+         for order in ([signed, conflicting], [conflicting, signed]):
+-            combined = node.combinepsbt(order)
+-            assert_equal(self.leaf_associations(combined), truthful)
+-            merged = node.finalizepsbt(combined)
+-            assert_equal(merged["complete"], True)
+-            spends.append(merged["hex"])
+-        assert_equal(spends[0], spends[1])
+-
+-        txid = node.sendrawtransaction(spends[0])
++            for sides in (order, [named_by_previous_tx(side) for side in order]):
++                combined = node.combinepsbt(sides)
++                assert_equal(self.leaf_associations(combined), truthful)
++                merged = node.finalizepsbt(combined)
++                assert_equal(merged["complete"], True)
++                spends.add(merged["hex"])
++        assert_equal(len(spends), 1)
++
++        txid = node.sendrawtransaction(spends.pop())
+         self.generate(node, 1)
+         self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+         self.log.info("  combining a PSBT that names a leaf with the wrong control block: resolved")
+ 
++    def check_merge_without_a_spent_output(self, wallet, address):
++        """Combining PSBTs that do not say what they spend still names one leaf per block."""
++        node = self.nodes[0]
++        funded = self.pinned_psbt(
++            wallet, self.fund_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        (key_a, value_a), (_, value_b) = self.leaf_entries(PSBT.from_base64(funded["psbt"])).items()
++
++        def naming(entry):
++            """The funded PSBT cut down to one leaf entry, saying nothing about what it spends."""
++            psbt = PSBT.from_base64(funded["psbt"])
++            for key in self.leaf_entries(psbt):
++                del psbt.i[0].map[key]
++            del psbt.i[0].map[PSBT_IN_WITNESS_UTXO]
++            psbt.i[0].map.update(entry)
++            return psbt.to_base64()
++
++        # Two readings of the same control block, neither of which can be checked, because with no
++        # spent output there is no Merkle root to check against and no way to tell a P2MR input
++        # from a tr() one. Combining then leaves the side merged into as it was, and above all it
++        # may not record the block under both leaves, which would write one key twice.
++        mine = naming({key_a: value_a})
++        theirs = naming({key_a: value_b})
++        for side in (mine, theirs):
++            decoded = node.decodepsbt(side)["inputs"][0]
++            assert "witness_utxo" not in decoded, decoded
++            assert "non_witness_utxo" not in decoded, decoded
++            assert_equal(len(self.leaf_associations(side)), 1)
++        assert self.leaf_associations(mine) != self.leaf_associations(theirs)
++
++        for base, other in ([mine, theirs], [theirs, mine]):
++            combined = node.combinepsbt([base, other])
++            assert_equal(self.leaf_associations(combined), self.leaf_associations(base))
++        self.log.info("  combining two PSBTs that say nothing about the spent output: one leaf each")
++
+     def test_taproot_merge_unchanged(self):
+         self.log.info("Combining a tr() input keeps the control blocks of the side merged into")
+         node = self.nodes[0]
+-- 
+2.49.0.windows.1
+

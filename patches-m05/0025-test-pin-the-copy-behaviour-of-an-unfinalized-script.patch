@@ -1,0 +1,98 @@
+From e504ce388ccfa7ce1a902a6122d41baf8cf0dfd3 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 06:05:01 -0600
+Subject: [PATCH 25/34] test: pin the copy behaviour of an unfinalized script
+ tree builder
+
+A BIP360 tree is never finalized, but it is copied into and out of signing
+providers on every expansion and every signature. Pin that those copies agree
+with the original through copy construction, copy assignment, vector
+reallocation and a FlatSigningProvider round trip, and that the first byte of a
+control block is the leaf version with the low bit set and nothing else, so the
+spend data cannot come to depend on the parity that only Finalize() sets.
+Finalizing a copy is also checked to give the same Taproot output and spend
+data as finalizing a freshly built tree.
+
+The uninitialized read this guards against is only observable under a memory
+sanitizer, which is not available in this build environment; these assertions
+pin the contract that made the fix correct rather than reproducing the fault.
+---
+ src/test/descriptor_tests.cpp | 62 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/src/test/descriptor_tests.cpp b/src/test/descriptor_tests.cpp
+index 7d49eca..fd88198 100644
+--- a/src/test/descriptor_tests.cpp
++++ b/src/test/descriptor_tests.cpp
+@@ -1374,6 +1374,68 @@ BOOST_AUTO_TEST_CASE(infer_script_tree_test)
+     }
+ }
+ 
++/** A BIP360 tree is never finalized: it has no internal key and no tweak, so Finalize() is neither
++ *  called nor meaningful. It is still copied into and out of signing providers on every expansion
++ *  and every signature, so those copies have to be well defined and must not depend on the parity
++ *  that only Finalize() would otherwise set. */
++BOOST_AUTO_TEST_CASE(unfinalized_builder_copy_test)
++{
++    const std::vector<std::pair<int, CScript>> leaves{{1, TestLeaf(6)}, {2, TestLeaf(7)}, {2, TestLeaf(8)}};
++    const TaprootBuilder original{BuildTree(leaves)}; // Finalize() is deliberately never called.
++    const WitnessV2P2MR output{original.GetP2MROutput()};
++    const P2MRSpendData expected{original.GetP2MRSpendData()};
++    BOOST_REQUIRE_EQUAL(expected.scripts.size(), leaves.size());
++
++    // The first control block byte is the leaf version with the low bit set, and nothing else.
++    // BIP360 has no parity to carry, so this byte cannot depend on an unfinalized builder's state.
++    for (const auto& [leaf, control_blocks] : expected.scripts) {
++        for (const auto& control : control_blocks) {
++            BOOST_CHECK_EQUAL(int{control[0]}, leaf.second | 1);
++        }
++    }
++
++    const auto matches_original{[&](const TaprootBuilder& builder) {
++        BOOST_CHECK(builder.GetP2MROutput() == output);
++        const P2MRSpendData copied{builder.GetP2MRSpendData()};
++        BOOST_CHECK(copied.merkle_root == expected.merkle_root);
++        BOOST_CHECK(copied.scripts == expected.scripts);
++    }};
++
++    // Copy construction, copy assignment, and the reallocation a growing vector performs.
++    const TaprootBuilder copied{original};
++    matches_original(copied);
++    TaprootBuilder assigned;
++    assigned = copied;
++    matches_original(assigned);
++    std::vector<TaprootBuilder> grown;
++    for (int i = 0; i < 8; ++i) grown.push_back(original);
++    for (const auto& builder : grown) matches_original(builder);
++
++    // The path the descriptor and signing code actually take: into a provider and back out.
++    FlatSigningProvider provider;
++    provider.p2mr_trees[output] = original;
++    TaprootBuilder fetched_builder;
++    BOOST_CHECK(provider.GetP2MRBuilder(output, fetched_builder));
++    matches_original(fetched_builder);
++    P2MRSpendData fetched_spend;
++    BOOST_CHECK(provider.GetP2MRSpendData(output, fetched_spend));
++    BOOST_CHECK(fetched_spend.merkle_root == expected.merkle_root);
++    BOOST_CHECK(fetched_spend.scripts == expected.scripts);
++
++    // Finalizing a copy of the unfinalized tree gives the same Taproot output and spend data as
++    // finalizing a freshly built one, so a copy carries no stale state into the tweak either.
++    const XOnlyPubKey internal_key{"a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd"_hex_u8};
++    TaprootBuilder from_copy{original};
++    TaprootBuilder from_scratch{BuildTree(leaves)};
++    from_copy.Finalize(internal_key);
++    from_scratch.Finalize(internal_key);
++    BOOST_CHECK(from_copy.GetOutput() == from_scratch.GetOutput());
++    const TaprootSpendData copy_spend{from_copy.GetSpendData()};
++    const TaprootSpendData scratch_spend{from_scratch.GetSpendData()};
++    BOOST_CHECK(copy_spend.merkle_root == scratch_spend.merkle_root);
++    BOOST_CHECK(copy_spend.scripts == scratch_spend.scripts);
++}
++
+ /** BIP360 allows a Merkle path of at most 128 nodes, so tmr() accepts 128 nesting levels and
+  *  refuses 129. */
+ BOOST_AUTO_TEST_CASE(tmr_max_depth_test)
+-- 
+2.49.0.windows.1
+

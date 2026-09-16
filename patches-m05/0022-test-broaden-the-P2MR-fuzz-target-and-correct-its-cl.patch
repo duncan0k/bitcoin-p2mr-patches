@@ -1,0 +1,341 @@
+From fe9d5b248562e3ff247279723ef4941752419cf1 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:46:07 -0600
+Subject: [PATCH 22/34] test: broaden the P2MR fuzz target and correct its
+ claims
+
+The comment promised arbitrary program lengths and that both sides of every
+rule were reachable, neither of which the generator delivered: the program was
+always 32 bytes, the witness always had at least two items, and a legal tree was
+at most four levels deep.
+
+Generate the missing shapes instead. The leaf can be a pk() tapscript for a key
+the target holds, and is then satisfied with a real BIP340 signature over the
+BIP342 message, including the annex commitment when an annex is present, so
+accepting paths are reached and not only rejecting ones. The tree can be the
+deepest legal one, a single leaf under 128 omitted Merkle nodes, which is the
+only shape with a full size 4097 byte control block. The program can be a length
+other than 32, and the witness can be truncated to zero or one item.
+
+A spend left well formed end to end is asserted to verify, which required the
+BIP341 precomputation to be forced on: the witness is assembled after the
+signature that goes into it, so Init() cannot detect the spend type from it.
+The unknown witness program property is now checked only when the scriptPubKey
+really is a witness program, since the generated ones need not be.
+---
+ src/test/fuzz/p2mr.cpp | 227 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 165 insertions(+), 62 deletions(-)
+
+diff --git a/src/test/fuzz/p2mr.cpp b/src/test/fuzz/p2mr.cpp
+index e564458..61b79e4 100644
+--- a/src/test/fuzz/p2mr.cpp
++++ b/src/test/fuzz/p2mr.cpp
+@@ -3,8 +3,11 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <consensus/amount.h>
++#include <hash.h>
++#include <key.h>
+ #include <policy/policy.h>
+ #include <primitives/transaction.h>
++#include <pubkey.h>
+ #include <script/interpreter.h>
+ #include <script/script.h>
+ #include <script/signingprovider.h>
+@@ -18,10 +21,10 @@
+ #include <vector>
+ 
+ namespace {
+-//! Leaves in a generated script tree.
++//! Leaves in a generated shallow script tree.
+ constexpr int MAX_TREE_LEAVES{5};
+-//! Cap on the generated Merkle path so that the target stays fast.
+-constexpr int MAX_TREE_DEPTH{4};
++//! Cap on the depth of a generated shallow tree.
++constexpr int MAX_SHALLOW_DEPTH{4};
+ 
+ //! Assign depths for a balanced tree over [lo, hi), which ValidDepths() always accepts.
+ void BalancedDepths(int lo, int hi, int depth, std::vector<int>& depths)
+@@ -35,15 +38,19 @@ void BalancedDepths(int lo, int hi, int depth, std::vector<int>& depths)
+     BalancedDepths(mid, hi, depth + 1, depths);
+ }
+ 
+-//! Build a script tree out of fuzz input, falling back to a balanced shape when the fuzzed depths
+-//! do not describe a tree, so that most inputs reach script verification.
+-TaprootBuilder ConsumeScriptTree(FuzzedDataProvider& provider)
++/** Build a shallow script tree out of fuzz input.
++ *
++ * Fuzzed depths that do not describe a tree fall back to a balanced shape rather than ending the
++ * run, so that most inputs reach script verification. Depths stay at or below MAX_SHALLOW_DEPTH;
++ * the maximum legal depth of 128 is reached by the caterpillar tree below instead.
++ */
++TaprootBuilder ConsumeShallowTree(FuzzedDataProvider& provider, const CScript& leaf_script, int leaf_version)
+ {
+     const int leaves{provider.ConsumeIntegralInRange<int>(1, MAX_TREE_LEAVES)};
+     std::vector<int> depths;
+     depths.reserve(leaves);
+     for (int i = 0; i < leaves; ++i) {
+-        depths.push_back(provider.ConsumeIntegralInRange<int>(0, MAX_TREE_DEPTH));
++        depths.push_back(provider.ConsumeIntegralInRange<int>(0, MAX_SHALLOW_DEPTH));
+     }
+     if (!TaprootBuilder::ValidDepths(depths)) {
+         depths.clear();
+@@ -52,90 +59,179 @@ TaprootBuilder ConsumeScriptTree(FuzzedDataProvider& provider)
+     }
+ 
+     TaprootBuilder builder;
+-    for (int i = 0; i < leaves; ++i) {
++    // The first leaf is the one the spend will use; the rest are filler.
++    builder.Add(depths[0], leaf_script, leaf_version);
++    for (int i = 1; i < leaves; ++i) {
+         // Leaf versions always have their last bit clear; the control block sets it.
+-        const int leaf_version{provider.ConsumeBool() ? TAPROOT_LEAF_TAPSCRIPT
+-                                                      : (provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK)};
+-        builder.Add(depths[i], ConsumeScript(provider), leaf_version);
++        const int filler_version{provider.ConsumeBool() ? TAPROOT_LEAF_TAPSCRIPT
++                                                        : (provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK)};
++        builder.Add(depths[i], ConsumeScript(provider), filler_version);
++    }
++    assert(builder.IsComplete());
++    return builder;
++}
++
++/** Build the deepest legal tree: one tracked leaf under 128 omitted Merkle nodes.
++ *
++ * This is the only shape that produces a full size 4097 byte control block.
++ */
++TaprootBuilder DeepTree(const CScript& leaf_script, int leaf_version)
++{
++    TaprootBuilder builder;
++    builder.Add(P2MR_CONTROL_MAX_NODE_COUNT, leaf_script, leaf_version);
++    for (int depth = P2MR_CONTROL_MAX_NODE_COUNT; depth >= 1; --depth) {
++        builder.AddOmitted(depth, uint256{static_cast<uint8_t>(depth)});
+     }
+     assert(builder.IsComplete());
+     return builder;
+ }
+ } // namespace
+ 
++void initialize_p2mr()
++{
++    static ECC_Context ecc_context{};
++}
++
+ /** Feed structured and corrupted BIP360 P2MR spends to VerifyScript.
+  *
+- * The witness program, the control block, the leaf script, the leaf satisfaction and the annex are
+- * each either taken from a well-formed spend of a generated script tree or replaced with fuzz data,
+- * so that both the accepting and the rejecting side of every consensus rule is reachable.
++ * The tree shape, the witness program, the witness stack, the leaf script, the control block and
++ * the annex are each either left well formed or replaced with fuzz data, independently of one
++ * another. Inputs therefore reach the accepting side of the consensus rules as well as their
++ * rejecting side: a well formed spend carries a real BIP340 signature over the BIP342 message,
++ * including the annex when one is present, and is asserted to verify.
+  */
+-FUZZ_TARGET(p2mr)
++FUZZ_TARGET(p2mr, .init = initialize_p2mr)
+ {
+     FuzzedDataProvider provider{buffer.data(), buffer.size()};
+ 
+-    const P2MRSpendData spenddata{ConsumeScriptTree(provider).GetP2MRSpendData()};
+-    assert(!spenddata.scripts.empty());
++    // Tracks whether every piece of the spend was left well formed. Only then must it verify.
++    bool intact{true};
++
++    // The leaf to spend: either a pk() tapscript for a key we hold, or fuzz data.
++    const CKey key{ConsumePrivateKey(provider, /*compressed=*/true)};
++    if (!key.IsValid()) return;
++    const XOnlyPubKey xonly{key.GetPubKey()};
++    const bool signable_leaf{provider.ConsumeBool()};
++    CScript leaf_script;
++    if (signable_leaf) {
++        leaf_script = CScript() << ToByteVector(xonly) << OP_CHECKSIG;
++    } else {
++        leaf_script = ConsumeScript(provider);
++        intact = false;
++    }
++    const int leaf_version{provider.ConsumeBool() ? TAPROOT_LEAF_TAPSCRIPT
++                                                  : (provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK)};
++    if (leaf_version != TAPROOT_LEAF_TAPSCRIPT) intact = false;
+ 
+-    // Pick one of the tracked leaves to spend.
+-    auto leaf_it{spenddata.scripts.begin()};
+-    std::advance(leaf_it, provider.ConsumeIntegralInRange<size_t>(0, spenddata.scripts.size() - 1));
+-    const auto& [leaf_script, leaf_version]{leaf_it->first};
+-    const std::vector<unsigned char>& control_block{*leaf_it->second.begin()};
++    const bool deep{provider.ConsumeBool()};
++    const TaprootBuilder builder{deep ? DeepTree(leaf_script, leaf_version)
++                                      : ConsumeShallowTree(provider, leaf_script, leaf_version)};
++    const P2MRSpendData spenddata{builder.GetP2MRSpendData()};
++    const auto leaf_it{spenddata.scripts.find({std::vector<unsigned char>{leaf_script.begin(), leaf_script.end()}, leaf_version})};
++    assert(leaf_it != spenddata.scripts.end());
++    const std::vector<unsigned char> control_block{*leaf_it->second.begin()};
++    // A leaf at depth zero is spendable without executing the script, which makes the "must
++    // verify" assertion trivially true; keep it, but do not treat it as a signed spend.
++    if (control_block.size() == P2MR_CONTROL_BASE_SIZE) intact = false;
+ 
+-    // The witness program: the real Merkle root, or fuzz data of an arbitrary length.
+-    uint256 program{spenddata.merkle_root};
+-    if (provider.ConsumeBool()) {
+-        const auto fuzzed{provider.ConsumeBytes<unsigned char>(32)};
++    // The witness program: the real Merkle root, fuzzed 32 bytes, or another length entirely, which
++    // takes the spend out of the P2MR branch and back to unknown witness program handling.
++    std::vector<unsigned char> program{spenddata.merkle_root.begin(), spenddata.merkle_root.end()};
++    switch (provider.ConsumeIntegralInRange<int>(0, 5)) {
++    case 0:
++    case 1:
++    case 2:
++        break; // keep the real root
++    case 3: {
++        const auto fuzzed{provider.ConsumeBytes<unsigned char>(WITNESS_V2_P2MR_SIZE)};
+         std::copy(fuzzed.begin(), fuzzed.end(), program.begin());
++        intact = false;
++        break;
+     }
+-    const CScript script_pubkey{CScript() << OP_2 << ToByteVector(program)};
+-
+-    CScriptWitness witness;
+-    // Leaf satisfaction.
+-    const int stack_items{provider.ConsumeIntegralInRange<int>(0, 4)};
+-    for (int i = 0; i < stack_items; ++i) {
+-        witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/80));
++    default:
++        // Any length, including lengths that are not witness programs at all. The replacement is
++        // never the real Merkle root, whatever its length.
++        program = ConsumeRandomLengthByteVector(provider, /*max_length=*/40);
++        intact = false;
++        break;
+     }
+-    // Leaf script: the real one, or fuzz data.
++    const CScript script_pubkey{CScript() << OP_2 << program};
++
++    // The annex, which the signature must commit to when present.
++    std::optional<std::vector<unsigned char>> annex;
+     if (provider.ConsumeBool()) {
+-        witness.stack.push_back(leaf_script);
++        annex = ConsumeRandomLengthByteVector(provider, /*max_length=*/64);
++        annex->insert(annex->begin(), ANNEX_TAG);
++    }
++
++    // A minimal transaction spending the generated output.
++    const CAmount amount{provider.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY)};
++    CMutableTransaction tx;
++    tx.vin.resize(1);
++    tx.vout.resize(1);
++    tx.vout[0].nValue = 1;
++    const CTransaction tx_const{tx};
++    PrecomputedTransactionData txdata;
++    // The witness is assembled below, after the signature that goes into it, so force the BIP341
++    // precomputation on instead of letting Init() detect it from a witness that is not there yet.
++    // The BIP342 message does not cover the witness; the annex reaches it through execdata.
++    txdata.Init(tx_const, {CTxOut{amount, script_pubkey}}, /*force=*/true);
++
++    // The leaf satisfaction: a real BIP340 signature over the BIP342 message, or fuzz data.
++    std::vector<std::vector<unsigned char>> satisfaction;
++    if (signable_leaf && provider.ConsumeBool()) {
++        ScriptExecutionData execdata;
++        execdata.m_annex_init = true;
++        execdata.m_annex_present = annex.has_value();
++        if (annex) execdata.m_annex_hash = (HashWriter{} << *annex).GetSHA256();
++        execdata.m_codeseparator_pos_init = true;
++        execdata.m_codeseparator_pos = 0xFFFFFFFF;
++        execdata.m_tapleaf_hash_init = true;
++        execdata.m_tapleaf_hash = ComputeTapleafHash(leaf_version, leaf_script);
++        uint256 sighash;
++        if (!SignatureHashSchnorr(sighash, execdata, tx_const, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL)) return;
++        std::vector<unsigned char> sig(64);
++        if (!key.SignSchnorr(sighash, sig, nullptr, {})) return;
++        satisfaction.push_back(std::move(sig));
+     } else {
+-        witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/128));
++        const int stack_items{provider.ConsumeIntegralInRange<int>(0, 4)};
++        for (int i = 0; i < stack_items; ++i) {
++            satisfaction.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/80));
++        }
++        intact = false;
+     }
+-    // Control block: the real one, or the real one with a mutated leaf version byte, or fuzz data.
+-    switch (provider.ConsumeIntegralInRange<int>(0, 2)) {
++
++    CScriptWitness witness;
++    witness.stack = satisfaction;
++    // The leaf script, then the control block: the real ones, the real control block with a mutated
++    // first byte, or fuzz data.
++    witness.stack.push_back(std::vector<unsigned char>{leaf_script.begin(), leaf_script.end()});
++    switch (provider.ConsumeIntegralInRange<int>(0, 3)) {
+     case 0:
++    case 1:
+         witness.stack.push_back(control_block);
+         break;
+-    case 1: {
++    case 2: {
+         std::vector<unsigned char> mutated{control_block};
+         mutated[0] = provider.ConsumeIntegral<uint8_t>();
++        if (mutated[0] != control_block[0]) intact = false;
+         witness.stack.push_back(std::move(mutated));
+         break;
+     }
+     default:
+         witness.stack.push_back(ConsumeRandomLengthByteVector(provider, /*max_length=*/4200));
++        intact = false;
+         break;
+     }
+-    // Annex.
++    if (annex) witness.stack.push_back(*annex);
++    // Truncate the whole witness, which must be rejected before anything is parsed. A P2MR spend
++    // always needs at least a script and a control block.
+     if (provider.ConsumeBool()) {
+-        auto annex{ConsumeRandomLengthByteVector(provider, /*max_length=*/64)};
+-        annex.insert(annex.begin(), ANNEX_TAG);
+-        witness.stack.push_back(std::move(annex));
++        const size_t keep{provider.ConsumeIntegralInRange<size_t>(0, 1)};
++        witness.stack.resize(keep);
++        intact = false;
+     }
+ 
+-    // A minimal transaction spending the generated output.
+-    CMutableTransaction tx;
+-    tx.vin.resize(1);
+-    tx.vin[0].scriptWitness = witness;
+-    tx.vout.resize(1);
+-    tx.vout[0].nValue = 1;
+-    const CAmount amount{provider.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY)};
+-
+-    std::vector<CTxOut> spent_outputs{CTxOut{amount, script_pubkey}};
+-    const CTransaction tx_const{tx};
+-    PrecomputedTransactionData txdata;
+-    txdata.Init(tx_const, std::move(spent_outputs));
+     const TransactionSignatureChecker checker{&tx_const, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL};
+ 
+     script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR};
+@@ -152,13 +248,20 @@ FUZZ_TARGET(p2mr)
+     ScriptError serror{SCRIPT_ERR_OK};
+     const bool ret{VerifyScript(CScript{}, script_pubkey, &witness, flags, checker, &serror)};
+     assert(ret == (serror == SCRIPT_ERR_OK));
++    // A spend left well formed end to end must verify, whichever optional flags are set.
++    assert(!intact || ret);
+ 
+     // Without the flag, a witness v2 program is an unknown witness program: it is accepted unless
+-    // upgradable witness programs are discouraged. This must hold for every input above.
+-    script_verify_flags no_p2mr{flags};
+-    no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_P2MR};
+-    no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM};
+-    ScriptError serror_no_p2mr{SCRIPT_ERR_OK};
+-    assert(VerifyScript(CScript{}, script_pubkey, &witness, no_p2mr, checker, &serror_no_p2mr));
+-    assert(serror_no_p2mr == SCRIPT_ERR_OK);
++    // upgradable witness programs are discouraged. Programs of other lengths are not witness
++    // programs at all, and are then decided by ordinary script evaluation instead.
++    int witness_version;
++    std::vector<unsigned char> witness_program;
++    if (script_pubkey.IsWitnessProgram(witness_version, witness_program)) {
++        script_verify_flags no_p2mr{flags};
++        no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_P2MR};
++        no_p2mr &= ~script_verify_flags{SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM};
++        ScriptError serror_no_p2mr{SCRIPT_ERR_OK};
++        assert(VerifyScript(CScript{}, script_pubkey, &witness, no_p2mr, checker, &serror_no_p2mr));
++        assert(serror_no_p2mr == SCRIPT_ERR_OK);
++    }
+ }
+-- 
+2.49.0.windows.1
+

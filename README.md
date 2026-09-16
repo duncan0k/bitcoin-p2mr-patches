@@ -13,9 +13,12 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 ## Layout
 
 ```
-patches/      10 git format-patch files, apply in order with git am
-SHA256SUMS    checksums of the patches
-apply.sh      clone v31.1, verify, apply, build, run the core tests
+patches/         10 git format-patch files, apply in order with git am
+patches-m05/     24 further patches, the M0.5 wallet series (see below)
+SHA256SUMS       checksums of the patches
+SHA256SUMS-m05   checksums of the M0.5 patches
+apply.sh         clone v31.1, verify, apply, build, run the core tests
+ark0/            evidence pack for the experimental custom signet (see below)
 ```
 
 ## Usage
@@ -72,8 +75,11 @@ validation only after activation.
 
 ## Out of scope / wording
 
-- No post-quantum signatures; no `tmr()` descriptor or automatic wallet signing (follow-up); no
-  activation on mainnet or the public signet.
+- No post-quantum signatures, and no activation on mainnet or the public signet. These two hold for
+  everything in this repository.
+- The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
+  signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
+  is a separate series applying on top.
 - Describe it as: "an experimental signet implementing the BIP-360 v0.12.1 P2MR spending rules on
   Bitcoin Core v31.1, enforced at block validation, independently reproducible". It is not "the first",
   "the only", "the real bc1z", "mainnet-ready", or "a quantum-resistant network".
@@ -87,3 +93,55 @@ parameters (`NETWORK.md`); the confirmed P2MR spend and the three rejected block
 node responses they produced (`evidence/`); a block file covering genesis to height 1264 that a fresh
 patched node replays with `-loadblock` (`snapshot/`); and the step-by-step `REPRODUCE.md`. The network
 itself has no public endpoint; the pack is the way to verify it.
+
+## Follow-up series: M0.5 wallet support (`patches-m05/`)
+
+A second series, shipped in this tree alongside the consensus one and applied on top of it. It is not
+part of M0 and does not change a consensus rule: everything it adds is wallet, descriptor and PSBT
+code, and the `tmr()` descriptor it introduces is explicitly provisional. Apply `patches/` alone for
+the consensus rules; apply both for a wallet that can hold and spend P2MR outputs.
+
+`patches-m05/` (checksums in `SHA256SUMS-m05`) adds:
+
+- a **provisional** `tmr(TREE)` descriptor (same tree grammar as `tr()`, no internal key, single-leaf
+  trees rejected because they are anyone-can-spend, depth limited to 128);
+- P2MR spend data in the signing provider and script-path signing in the wallet (`send`, PSBT);
+- a deployment gate: importing or deriving `tmr()` receiving addresses is refused on chains where the
+  P2MR deployment is disabled (mainnet, testnets, the default signet), since such outputs would be
+  anyone-can-spend there;
+- fee estimation that treats P2MR inputs as witness inputs, control-block validation before signing,
+  a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`;
+- functional coverage of cross-wallet 2-of-2 multisig leaves signed through PSBT (`wallet_p2mr_multisig.py`),
+  CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), the edits that invalidate a signed P2MR
+  spend (amount, input order, control block, `witness_utxo`, another input's scriptPubKey), which
+  leaf a control block names however the input says what it spends, and that merging leaves a
+  `tr()` input's control blocks alone.
+
+Review status: five rounds of independent review; the second round found the earlier high and medium
+findings fixed. The third found that the control blocks a wallet recovers while signing were dropped
+on export and when combining, which left a separate finalizer unable to complete the input. The
+fourth found the repair for it too broad in two ways: a control block names one leaf and not several,
+and the wider merging behaviour had to stop at P2MR inputs rather than reach `tr()` ones. The fifth
+found the remaining half of the first: an input that says what it spends with the whole previous
+transaction rather than the output alone was still exporting without it. Six patches cover those
+three rounds (24 patches in total).
+
+It has been exercised on the experimental signet, which is why it is in this tree rather than waiting
+outside it. Since 2026-09-16 the verifying node of the Ark-0 signet runs a build of this series while
+the block producing node runs the consensus series alone, so the two are continuously checked against
+each other on a live chain; a divergence would be the finding. A job every six hours funds a P2MR
+address from one node and spends it back from the other through the PSBT flow, asserting the witness
+dimensions each time. The operations tooling and the roll records are kept outside this repository
+until they have been through the same review as the patches.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch
+```
+
+`patches-m05/` is regenerated from the `p2mr-m05` branch of the Core tree with the range that
+*includes* its first commit, the one right after the last consensus commit `be23b12`:
+
+```bash
+git format-patch --start-number 11 be23b12..p2mr-m05 -o patches-m05
+(cd patches-m05 && sha256sum -b *.patch) > SHA256SUMS-m05
+```

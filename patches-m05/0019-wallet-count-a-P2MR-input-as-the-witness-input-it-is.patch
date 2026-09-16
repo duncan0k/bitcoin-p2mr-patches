@@ -1,0 +1,150 @@
+From 74c01c65e29f4ad5aebbbdf12cfc1ab04dc6e9c1 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:30:33 -0600
+Subject: [PATCH 19/34] wallet: count a P2MR input as the witness input it is
+ when estimating size
+
+Size estimation asked GetOutputType() whether an input is segwit, so the
+nullopt that keeps P2MR out of -addresstype and -changetype also made the
+estimator treat it as a legacy input. A transaction spending only P2MR inputs
+then lost the segwit marker, the flag and the per input witness stack count:
+one depth-1 pk() input paying two P2WPKH outputs was estimated at 587 weight
+units and 147 virtual bytes instead of 590 and 148. The fee follows that
+estimate, so the shortfall shows up as an underpaid transaction near the
+minimum relay rate.
+
+Separate the two questions. Descriptor::IsSegwit() answers whether satisfying
+the descriptor puts the satisfaction in the witness; the default keeps the old
+output type based answer and tmr() overrides it to true, while GetOutputType()
+still refuses to name an address type so the wallet still cannot mint P2MR
+change. The sh() helper of the same name becomes IsSegwitWrapped(), since it
+asks a third question, namely whether sh() wraps a native segwit script.
+---
+ src/script/descriptor.cpp            | 15 ++++++++++++---
+ src/script/descriptor.h              |  8 ++++++++
+ src/wallet/spend.cpp                 |  9 ++-------
+ src/wallet/test/walletload_tests.cpp |  1 +
+ 4 files changed, 23 insertions(+), 10 deletions(-)
+
+diff --git a/src/script/descriptor.cpp b/src/script/descriptor.cpp
+index 9dc3890..a3d9a70 100644
+--- a/src/script/descriptor.cpp
++++ b/src/script/descriptor.cpp
+@@ -1009,6 +1009,12 @@ public:
+ 
+     std::optional<OutputType> GetOutputType() const override { return std::nullopt; }
+ 
++    bool IsSegwit() const override
++    {
++        const auto output_type = GetOutputType();
++        return output_type && *output_type != OutputType::LEGACY;
++    }
++
+     std::optional<int64_t> ScriptSize() const override { return {}; }
+ 
+     /** A helper for MaxSatisfactionWeight.
+@@ -1372,7 +1378,8 @@ protected:
+         return ret;
+     }
+ 
+-    bool IsSegwit() const { return m_subdescriptor_args[0]->GetOutputType() == OutputType::BECH32; }
++    //! Whether sh() wraps a native segwit script, i.e. whether this is a P2SH-P2WSH/P2WPKH output.
++    bool IsSegwitWrapped() const { return m_subdescriptor_args[0]->GetOutputType() == OutputType::BECH32; }
+ 
+ public:
+     SHDescriptor(std::unique_ptr<DescriptorImpl> desc) : DescriptorImpl({}, std::move(desc), "sh") {}
+@@ -1380,7 +1387,7 @@ public:
+     std::optional<OutputType> GetOutputType() const override
+     {
+         assert(m_subdescriptor_args.size() == 1);
+-        if (IsSegwit()) return OutputType::P2SH_SEGWIT;
++        if (IsSegwitWrapped()) return OutputType::P2SH_SEGWIT;
+         return OutputType::LEGACY;
+     }
+     bool IsSingleType() const final { return true; }
+@@ -1393,7 +1400,7 @@ public:
+                 // The subscript is never witness data.
+                 const auto subscript_weight = (1 + *subscript_size) * WITNESS_SCALE_FACTOR;
+                 // The weight depends on whether the inner descriptor is satisfied using the witness stack.
+-                if (IsSegwit()) return subscript_weight + *sat_size;
++                if (IsSegwitWrapped()) return subscript_weight + *sat_size;
+                 return subscript_weight + *sat_size * WITNESS_SCALE_FACTOR;
+             }
+         }
+@@ -1599,6 +1606,8 @@ public:
+     /** P2MR deliberately has no OutputType: adding one would make it selectable by -addresstype
+      *  and -changetype and let the wallet mint P2MR change, which M0.5 does not support. */
+     std::optional<OutputType> GetOutputType() const override { return std::nullopt; }
++    /** P2MR is a native witness output even though it has no address type of its own. */
++    bool IsSegwit() const override { return true; }
+     bool IsSingleType() const final { return true; }
+ 
+     std::optional<int64_t> ScriptSize() const override { return 1 + 1 + 32; }
+diff --git a/src/script/descriptor.h b/src/script/descriptor.h
+index 3ac748a..ca11e1e 100644
+--- a/src/script/descriptor.h
++++ b/src/script/descriptor.h
+@@ -160,6 +160,14 @@ struct Descriptor {
+     /** @return The OutputType of the scriptPubKey(s) produced by this descriptor. Or nullopt if indeterminate (multiple or none) */
+     virtual std::optional<OutputType> GetOutputType() const = 0;
+ 
++    /** @return Whether satisfying this descriptor puts the satisfaction in the witness.
++     *
++     * This is a different question from GetOutputType(): a descriptor can produce a native witness
++     * output while having no address type that the wallet is allowed to generate, which is the case
++     * for tmr(). Size estimation must ask this one, not the output type.
++     */
++    virtual bool IsSegwit() const = 0;
++
+     /** Get the size of the scriptPubKey for this descriptor. */
+     virtual std::optional<int64_t> ScriptSize() const = 0;
+ 
+diff --git a/src/wallet/spend.cpp b/src/wallet/spend.cpp
+index 1498f89..f769cd4 100644
+--- a/src/wallet/spend.cpp
++++ b/src/wallet/spend.cpp
+@@ -46,11 +46,6 @@ namespace wallet {
+ static constexpr size_t OUTPUT_GROUP_MAX_ENTRIES{100};
+ 
+ /** Whether the descriptor represents, directly or not, a witness program. */
+-static bool IsSegwit(const Descriptor& desc) {
+-    if (const auto typ = desc.GetOutputType()) return *typ != OutputType::LEGACY;
+-    return false;
+-}
+-
+ /** Whether to assume ECDSA signatures' will be high-r. */
+ static bool UseMaxSig(const std::optional<CTxIn>& txin, const CCoinControl* coin_control) {
+     // Use max sig if watch only inputs were used or if this particular input is an external input
+@@ -71,7 +66,7 @@ static std::optional<int64_t> MaxInputWeight(const Descriptor& desc, const std::
+                                              const bool can_grind_r) {
+     if (const auto sat_weight = desc.MaxSatisfactionWeight(!can_grind_r || UseMaxSig(txin, coin_control))) {
+         if (const auto elems_count = desc.MaxSatisfactionElems()) {
+-            const bool is_segwit = IsSegwit(desc);
++            const bool is_segwit = desc.IsSegwit();
+             // Account for the size of the scriptsig and the number of elements on the witness stack. Note
+             // that if any input in the transaction is spending a witness program, we need to specify the
+             // witness stack size for every input regardless of whether it is segwit itself.
+@@ -149,7 +144,7 @@ TxSize CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *walle
+     // inputs in order to accurately compute the compactSize length for the witness data per input.
+     bool is_segwit = std::any_of(txouts.begin(), txouts.end(), [&](const CTxOut& txo) {
+         std::unique_ptr<Descriptor> desc{GetDescriptor(wallet, coin_control, txo.scriptPubKey)};
+-        if (desc) return IsSegwit(*desc);
++        if (desc) return desc->IsSegwit();
+         return false;
+     });
+     // Segwit marker and flag
+diff --git a/src/wallet/test/walletload_tests.cpp b/src/wallet/test/walletload_tests.cpp
+index 46b0ab1..7f9ea07 100644
+--- a/src/wallet/test/walletload_tests.cpp
++++ b/src/wallet/test/walletload_tests.cpp
+@@ -23,6 +23,7 @@ public:
+ 
+     std::string ToString(bool compat_format) const override { return desc; }
+     std::optional<OutputType> GetOutputType() const override { return OutputType::UNKNOWN; }
++    bool IsSegwit() const override { return false; }
+ 
+     bool IsRange() const override { return false; }
+     bool IsSolvable() const override { return false; }
+-- 
+2.49.0.windows.1
+

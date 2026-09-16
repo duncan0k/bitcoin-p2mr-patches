@@ -1,0 +1,63 @@
+From 28cb5957ab0cdc48ac1cf0f5814275d8cf940802 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:30:12 -0600
+Subject: [PATCH 18/34] psbt: treat P2MR inputs as Schnorr inputs for sighash
+ selection
+
+A P2MR spend is a BIP341 script path spend, so it carries Schnorr signatures
+and follows the SIGHASH_DEFAULT convention. SignPSBTInput classified inputs by
+IsPayToTaproot() alone, which put P2MR on the legacy side: an explicit
+SIGHASH_DEFAULT produced a 64 byte signature but was not recorded in
+PSBT_IN_SIGHASH_TYPE, and a later FinalizePSBT then defaulted that input to
+SIGHASH_ALL and demanded 65 bytes. The funds stayed recoverable but a
+sign-then-finalize hand-off, which is the normal collaborative flow, got stuck.
+
+Decide both the default sighash and whether to store the field from whether the
+input is a Schnorr input, which P2MR now is.
+---
+ src/psbt.cpp | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index 22f8954..c46f749 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -451,22 +451,28 @@ PSBTError SignPSBTInput(const SigningProvider& provider, PartiallySignedTransact
+         return PSBTError::MISSING_INPUTS;
+     }
+ 
++    // BIP360 P2MR spends are BIP341 script path spends, so like taproot they carry Schnorr
++    // signatures and follow the SIGHASH_DEFAULT convention. Treating them as legacy inputs here
++    // would drop the sighash field for an explicit SIGHASH_DEFAULT and make a later finalization
++    // demand a 65 byte signature.
++    const bool is_schnorr_input{utxo.scriptPubKey.IsPayToTaproot() || utxo.scriptPubKey.IsPayToMerkleRoot()};
++
+     // Get the sighash type
+     // If both the field and the parameter are provided, they must match
+     // If only the parameter is provided, use it and add it to the PSBT if it is other than SIGHASH_DEFAULT
+-    // for all input types, and not SIGHASH_ALL for non-taproot input types.
+-    // If neither are provided, use SIGHASH_DEFAULT if it is taproot, and SIGHASH_ALL for everything else.
+-    if (!sighash) sighash = utxo.scriptPubKey.IsPayToTaproot() ? SIGHASH_DEFAULT : SIGHASH_ALL;
++    // for all input types, and not SIGHASH_ALL for non-Schnorr input types.
++    // If neither are provided, use SIGHASH_DEFAULT if it is a Schnorr input, and SIGHASH_ALL for everything else.
++    if (!sighash) sighash = is_schnorr_input ? SIGHASH_DEFAULT : SIGHASH_ALL;
+     Assert(sighash.has_value());
+     // For user safety, the desired sighash must be provided if the PSBT wants something other than the default set in the previous line.
+     if (input.sighash_type && input.sighash_type != sighash) {
+         return PSBTError::SIGHASH_MISMATCH;
+     }
+     // Set the PSBT sighash field when sighash is not DEFAULT or ALL
+-    // DEFAULT is allowed for non-taproot inputs since DEFAULT may be passed for them (e.g. the psbt being signed also has taproot inputs)
+-    // Note that signing already aliases DEFAULT to ALL for non-taproot inputs.
+-    if (utxo.scriptPubKey.IsPayToTaproot() ? sighash != SIGHASH_DEFAULT :
+-                                            (sighash != SIGHASH_DEFAULT && sighash != SIGHASH_ALL)) {
++    // DEFAULT is allowed for non-Schnorr inputs since DEFAULT may be passed for them (e.g. the psbt being signed also has Schnorr inputs)
++    // Note that signing already aliases DEFAULT to ALL for non-Schnorr inputs.
++    if (is_schnorr_input ? sighash != SIGHASH_DEFAULT :
++                           (sighash != SIGHASH_DEFAULT && sighash != SIGHASH_ALL)) {
+         input.sighash_type = sighash;
+     }
+ 
+-- 
+2.49.0.windows.1
+

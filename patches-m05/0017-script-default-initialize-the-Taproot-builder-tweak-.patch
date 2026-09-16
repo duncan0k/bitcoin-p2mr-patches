@@ -1,0 +1,33 @@
+From 59af19a526df293281fbb5a442e497f10f0f74e6 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 15 Sep 2026 05:30:11 -0600
+Subject: [PATCH 17/34] script: default initialize the Taproot builder tweak
+ parity
+
+TaprootBuilder::m_parity is only assigned by Finalize(). A BIP360 tree has no
+internal key and is deliberately never finalized, yet it is copied into and out
+of signing providers like any other builder, so the copy reads an
+uninitialized bool. Give it a default value rather than inventing an internal
+key for P2MR or calling the Taproot finalizer.
+---
+ src/script/signingprovider.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/script/signingprovider.h b/src/script/signingprovider.h
+index e3153af..174507f 100644
+--- a/src/script/signingprovider.h
++++ b/src/script/signingprovider.h
+@@ -125,7 +125,9 @@ private:
+ 
+     XOnlyPubKey m_internal_key;  //!< The internal key, set when finalizing.
+     XOnlyPubKey m_output_key;    //!< The output key, computed when finalizing.
+-    bool m_parity;               //!< The tweak parity, computed when finalizing.
++    //! The tweak parity, computed when finalizing. Default initialized because BIP360 trees are
++    //! never finalized (they have no internal key) but are still copied into and out of providers.
++    bool m_parity{false};
+ 
+     /** Combine information about a parent Merkle tree node from its child nodes. */
+     static NodeInfo Combine(NodeInfo&& a, NodeInfo&& b);
+-- 
+2.49.0.windows.1
+
