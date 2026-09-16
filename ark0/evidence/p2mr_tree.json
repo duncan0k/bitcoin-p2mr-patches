@@ -1,0 +1,20 @@
+{
+  "address": "tb1zjqeh0j8a7w8xju2kh4z2h6s6lk36garufwqct0uguq9z3nhtfvqqn7yq64",
+  "merkle_root": "903377c8fdf38e697156bd44abea1afda3a4747c4b8185bf88e00a28ceeb4b00",
+  "scriptPubKey": "5220903377c8fdf38e697156bd44abea1afda3a4747c4b8185bf88e00a28ceeb4b00",
+  "demo_xonly_pubkey": "692d6b7074760066c2ca4f131fc787afb4d5bf368b56298d9a3380b1c3dbb264",
+  "leaf_csig": {
+    "script_asm": "<demo_xonly_pubkey> OP_CHECKSIG",
+    "script_hex": "20692d6b7074760066c2ca4f131fc787afb4d5bf368b56298d9a3380b1c3dbb264ac",
+    "leaf_version": "0xc0",
+    "leaf_hash": "26ee5139bd2d5b7e0c5d15f6f743b3b6ed891227da5f14e08376ff73a7123413",
+    "control_block": "c146c7eccffefd2d573ec014130e508f0c9963ccebd7830409f7b1b1301725e9fa"
+  },
+  "leaf_ret": {
+    "script_asm": "OP_RETURN",
+    "script_hex": "6a",
+    "leaf_version": "0xc0",
+    "leaf_hash": "46c7eccffefd2d573ec014130e508f0c9963ccebd7830409f7b1b1301725e9fa",
+    "control_block": "c126ee5139bd2d5b7e0c5d15f6f743b3b6ed891227da5f14e08376ff73a7123413"
+  }
+}
