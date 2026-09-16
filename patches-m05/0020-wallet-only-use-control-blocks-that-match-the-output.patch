@@ -1,7 +1,7 @@
 From 6257d252d77944a3ffd525c9f21bfbe902d16d66 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:30:34 -0600
-Subject: [PATCH 20/30] wallet: only use control blocks that match the output
+Subject: [PATCH 20/32] wallet: only use control blocks that match the output
  being spent
 
 SignP2MR() took the first control block offered for a leaf without checking it.

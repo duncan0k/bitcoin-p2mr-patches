@@ -1,7 +1,7 @@
 From 878be660a406a6df4e6c6690b073bb823dcabc2a Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 10:17:54 -0600
-Subject: [PATCH 27/30] test: cover timelocked tmr() leaves
+Subject: [PATCH 27/32] test: cover timelocked tmr() leaves
 
 tmr() parses its leaves in the context tr() uses for its own, so a leaf may
 be any sane tapscript miniscript. A tree with an after() leaf and an older()

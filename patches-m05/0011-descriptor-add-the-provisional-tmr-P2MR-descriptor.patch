@@ -1,7 +1,7 @@
 From 7fa5ab61f04b0cfce2cbae54e12ebe2b733b768f Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 04:19:17 -0600
-Subject: [PATCH 11/30] descriptor: add the provisional tmr() P2MR descriptor
+Subject: [PATCH 11/32] descriptor: add the provisional tmr() P2MR descriptor
 
 BIP 360 defines the P2MR output format but no descriptor language. Spell a
 P2MR script tree as tmr(TREE), the name used by the cryptoquick/bitcoin

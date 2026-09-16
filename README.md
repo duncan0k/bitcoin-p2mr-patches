@@ -93,15 +93,26 @@ validation only after activation.
 - fee estimation that treats P2MR inputs as witness inputs, control-block validation before signing,
   a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`;
 - functional coverage of cross-wallet 2-of-2 multisig leaves signed through PSBT (`wallet_p2mr_multisig.py`),
-  CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), and the edits that invalidate a signed
-  P2MR spend (amount, input order, control block, `witness_utxo`, another input's scriptPubKey).
+  CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), the edits that invalidate a signed P2MR
+  spend (amount, input order, control block, `witness_utxo`, another input's scriptPubKey), which
+  leaf a control block names, and that merging leaves a `tr()` input's control blocks alone.
 
-Review status: three rounds of independent review; the second round found the earlier high and medium
-findings fixed. The third found one remaining PSBT defect, where the control blocks a wallet recovers
-while signing were dropped on export and when combining, which left a separate finalizer unable to
-complete the input; the last two patches fix it and cover it (20 patches in total). Published
-separately once it has been exercised on the experimental signet.
+Review status: four rounds of independent review; the second round found the earlier high and medium
+findings fixed. The third found that the control blocks a wallet recovers while signing were dropped
+on export and when combining, which left a separate finalizer unable to complete the input. The
+fourth found the repair for it too broad in two ways: a control block names one leaf and not several,
+and the wider merging behaviour had to stop at P2MR inputs rather than reach `tr()` ones. Four patches
+cover those two rounds (22 patches in total). Published separately once it has been exercised on the
+experimental signet.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch
+```
+
+`patches-m05/` is regenerated from the `p2mr-m05` branch of the Core tree with the range that
+*includes* its first commit, the one right after the last consensus commit `be23b12`:
+
+```bash
+git format-patch --start-number 11 be23b12..p2mr-m05 -o patches-m05
+(cd patches-m05 && sha256sum -b *.patch) > SHA256SUMS-m05
 ```

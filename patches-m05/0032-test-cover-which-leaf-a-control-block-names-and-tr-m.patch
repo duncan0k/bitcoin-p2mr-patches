@@ -1,0 +1,250 @@
+From ce7a4718c2ea02b63713b08e4ca93ef423eab205 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 08:35:16 -0600
+Subject: [PATCH 32/32] test: cover which leaf a control block names, and tr()
+ merging
+
+Three cases the earlier control block coverage could not see.
+
+A PSBT that names each of two leaves with the other's control block is well
+formed and parses, so a wallet is handed it and has to make sense of it. Signing
+must hand on each block under the leaf the output proves it belongs to, because
+recording both readings writes the same key twice and the result no longer
+parses. decodepsbt is that parser, so the test reads the signed PSBT back
+through it.
+
+Combining a PSBT that names a leaf with another leaf's control block must reach
+the same reading whichever side is merged into, and the transaction that comes
+out must be the same one.
+
+Finally, merging a tr() input must leave its control blocks alone. Truncating
+one leaf's control block to its base gives a well formed depth zero block that
+commits to a different output key and sorts ahead of the real one, which is all
+it takes: a tr() signer picks the shortest block a leaf has without trying
+another. Only one leaf gets it, since both leaves of a tree truncate to the same
+bytes. The order that could finalize before still does.
+---
+ test/functional/wallet_p2mr.py | 161 ++++++++++++++++++++++++++++++---
+ 1 file changed, 149 insertions(+), 12 deletions(-)
+
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+index 43651e9..e42c82f 100644
+--- a/test/functional/wallet_p2mr.py
++++ b/test/functional/wallet_p2mr.py
+@@ -6,9 +6,10 @@
+ 
+ Covers importing a tmr() descriptor, receiving to the resulting bcrt1z address,
+ spending it automatically and through the full PSBT flow, which control block
+-signing picks, size estimation, mixed input transactions, the refusal to express
+-an anyone-can-spend single-leaf tree, and the edits to a signed script path spend
+-that the node has to reject.
++signing picks and which leaf it belongs to, size estimation, mixed input
++transactions, the refusal to express an anyone-can-spend single-leaf tree, the
++edits to a signed script path spend that the node has to reject, and that none of
++the P2MR handling of control blocks reaches a tr() input.
+ """
+ 
+ from decimal import Decimal
+@@ -41,6 +42,10 @@ TAPROOT_LEAF_TAPSCRIPT = 0xC0
+ # Control block sizes for a leaf one and two Merkle nodes below the root.
+ CONTROL_DEPTH_1 = P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE
+ CONTROL_DEPTH_2 = P2MR_CONTROL_BASE_SIZE + 2 * P2MR_CONTROL_NODE_SIZE
++# A BIP341 control block carries an internal key as well, which is what makes it longer than a
++# P2MR one of the same depth. tmr() has no internal key and no key path.
++TAPROOT_CONTROL_BASE_SIZE = 33
++TAPROOT_CONTROL_NODE_SIZE = 32
+ # Test-only extended private key, reused from wallet_taproot.py.
+ XPRV = "tprv8ZgxMBicQKsPeNLUGrbv3b7qhUk1LQJZAGMuk9gVuKh9sd4BWGp1eMsehUni6qGb8bjkdwBxCbgNGdh2bYGACK5C5dRTaif9KBKGVnSezxV"
+ 
+@@ -178,14 +183,24 @@ class WalletP2MRTest(BitcoinTestFramework):
+     def only_utxo(self, wallet, address):
+         return next(u for u in wallet.listunspent() if u["address"] == address)
+ 
+-    def leaf_controls(self, psbt_b64, index=0):
+-        """Every control block an input of `psbt_b64` records, as a set of hex strings.
++    def leaf_associations(self, psbt_b64, index=0):
++        """Map every control block an input of `psbt_b64` records to the leaf script it names.
+ 
+         A PSBT keys a leaf script by its control block alone, so one input can never hold the same
+-        block twice and the set loses nothing.
++        block twice and this loses nothing. decodepsbt is also the parser that enforces it: an
++        input that repeats a key does not come back at all.
+         """
+         entries = self.nodes[0].decodepsbt(psbt_b64)["inputs"][index]["taproot_scripts"]
+-        return {control for entry in entries for control in entry["control_blocks"]}
++        return {control: entry["script"] for entry in entries for control in entry["control_blocks"]}
++
++    def leaf_controls(self, psbt_b64, index=0):
++        """Every control block an input of `psbt_b64` records, as a set of hex strings."""
++        return set(self.leaf_associations(psbt_b64, index))
++
++    def leaf_entries(self, psbt):
++        """The (key, value) pairs of a parsed PSBT's first input that record a leaf script."""
++        return {key: value for key, value in psbt.i[0].map.items()
++                if isinstance(key, bytes) and key[0] == PSBT_IN_TAP_LEAF_SCRIPT}
+ 
+     def roundtrip_and_broadcast(self, wallet, psbt, sighash="DEFAULT"):
+         """Sign, serialize, combine, finalize and broadcast; return the txid.
+@@ -283,6 +298,8 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.test_sighash_types()
+         self.test_bogus_control_block()
+         self.test_recovered_control_blocks()
++        self.test_control_block_associations()
++        self.test_taproot_merge_unchanged()
+         self.test_missing_spent_output()
+         self.test_leaf_selection()
+         self.test_signature_invalidation()
+@@ -424,8 +441,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         #   - the real block with the mandatory last bit of c[0] cleared, which is malformed;
+         #   - a well formed block whose Merkle path is all zeroes, which rebuilds a different root.
+         psbt = PSBT.from_base64(funded["psbt"])
+-        leaves = {k: v for k, v in psbt.i[0].map.items()
+-                  if isinstance(k, bytes) and k[0] == PSBT_IN_TAP_LEAF_SCRIPT}
++        leaves = self.leaf_entries(psbt)
+         assert_greater_than(len(leaves), 0)
+         for tag, (key, value) in enumerate(leaves.items(), start=1):
+             control = bytearray(key[1:])
+@@ -467,9 +483,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         # poisoned PSBT above, this one carries no usable block at all: the wallet has to put back
+         # what it knows about the tree while signing, because no one downstream can work it out.
+         psbt = PSBT.from_base64(funded["psbt"])
+-        for key, value in list(psbt.i[0].map.items()):
+-            if not isinstance(key, bytes) or key[0] != PSBT_IN_TAP_LEAF_SCRIPT:
+-                continue
++        for key, value in self.leaf_entries(psbt).items():
+             broken = bytearray(key[1:])
+             # BIP360 requires the last bit of c[0] to be set, so this block can never be used.
+             broken[0] &= 0xFE
+@@ -500,6 +514,129 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.generate(node, 1)
+         self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+ 
++    def test_control_block_associations(self):
++        self.log.info("A control block names one leaf, whatever the PSBT it arrived in claimed")
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_assoc", inner)
++
++        self.check_swapped_associations(wallet, address)
++        self.check_conflicting_merge(wallet, address)
++
++    def check_swapped_associations(self, wallet, address):
++        """Signing puts each control block back under the leaf the output proves it belongs to."""
++        node = self.nodes[0]
++        funded = self.pinned_psbt(
++            wallet, self.fund_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        truthful = self.leaf_associations(funded["psbt"])
++        assert_equal(len(truthful), 2)
++
++        # Give each leaf the other leaf's control block. Both keys stay unique and both values
++        # still parse, so this is a PSBT a wallet is handed and has to make sense of, not a
++        # malformed one it may reject. Signing adds the associations the output does prove, and
++        # keeping those beside the swapped ones would write each key twice.
++        psbt = PSBT.from_base64(funded["psbt"])
++        (key_a, value_a), (key_b, value_b) = self.leaf_entries(psbt).items()
++        for key in (key_a, key_b):
++            del psbt.i[0].map[key]
++        psbt.i[0].map[key_a] = value_b
++        psbt.i[0].map[key_b] = value_a
++        swapped = psbt.to_base64()
++        assert_equal(self.leaf_controls(swapped), set(truthful))
++        assert self.leaf_associations(swapped) != truthful
++
++        signed = self.sign_without_finalizing(wallet, swapped)
++        assert_equal(self.leaf_associations(signed), truthful)
++        finalized = node.finalizepsbt(signed)
++        assert_equal(finalized["complete"], True)
++        txid = node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++        self.log.info("  a PSBT that swapped the two leaves' control blocks: repaired")
++
++    def check_conflicting_merge(self, wallet, address):
++        """Combining two PSBTs that disagree about a control block keeps the provable reading."""
++        node = self.nodes[0]
++        funded = self.pinned_psbt(
++            wallet, self.fund_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        truthful = self.leaf_associations(funded["psbt"])
++        signed = self.sign_without_finalizing(wallet, funded["psbt"])
++
++        # One leaf, named by the control block that belongs to the other one. Merged either way
++        # round, that control block would otherwise end up under two leaves at once.
++        psbt = PSBT.from_base64(funded["psbt"])
++        (key_a, _), (key_b, value_b) = self.leaf_entries(psbt).items()
++        for key in (key_a, key_b):
++            del psbt.i[0].map[key]
++        psbt.i[0].map[key_a] = value_b
++        conflicting = psbt.to_base64()
++        assert_equal(len(self.leaf_associations(conflicting)), 1)
++
++        spends = []
++        for order in ([signed, conflicting], [conflicting, signed]):
++            combined = node.combinepsbt(order)
++            assert_equal(self.leaf_associations(combined), truthful)
++            merged = node.finalizepsbt(combined)
++            assert_equal(merged["complete"], True)
++            spends.append(merged["hex"])
++        assert_equal(spends[0], spends[1])
++
++        txid = node.sendrawtransaction(spends[0])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++        self.log.info("  combining a PSBT that names a leaf with the wrong control block: resolved")
++
++    def test_taproot_merge_unchanged(self):
++        self.log.info("Combining a tr() input keeps the control blocks of the side merged into")
++        node = self.nodes[0]
++        # The internal key goes in by public key alone, so there is no key path to sign with and
++        # the wallet has to take a script path, which is what carries a control block.
++        internal = self.make_leaf_keys(1)[0][1]
++        leaves = self.make_leaf_keys(2)
++        desc = descsum_create("tr({},{{pk({}),pk({})}})".format(internal, leaves[0][0], leaves[1][0]))
++        node.createwallet(wallet_name="p2mr_tr")
++        wallet = node.get_wallet_rpc("p2mr_tr")
++        assert_equal(wallet.importdescriptors([{"desc": desc, "timestamp": "now"}])[0]["success"], True)
++        address = self.derive_address(desc)
++
++        funded = self.pinned_psbt(
++            wallet, self.fund_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        good = self.sign_without_finalizing(wallet, funded["psbt"])
++
++        # Truncating a control block to its base drops the Merkle path, which leaves a well formed
++        # depth zero block that commits to a different output key. It also sorts before the real
++        # one, and a tr() signer takes the shortest block a leaf has without trying another. Only
++        # one leaf is given it: a control block's base is the leaf version and the internal key,
++        # so both leaves of this tree truncate to the very same bytes.
++        psbt = PSBT.from_base64(funded["psbt"])
++        key, value = next(iter(self.leaf_entries(psbt).items()))
++        control = key[1:]
++        assert_equal(len(control), TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE)
++        truncated = control[:TAPROOT_CONTROL_BASE_SIZE]
++        del psbt.i[0].map[key]
++        psbt.i[0].map[bytes([PSBT_IN_TAP_LEAF_SCRIPT]) + truncated] = value
++        bogus = psbt.to_base64()
++        assert_equal(len(self.leaf_controls(bogus)), len(self.leaf_controls(good)))
++        assert_equal(self.leaf_controls(bogus) - self.leaf_controls(good), {truncated.hex()})
++
++        # A P2MR input takes the union of both sides' control blocks, because its signer checks
++        # each one against the output root. Doing that to a tr() input instead hands its signer a
++        # shorter block it cannot use, so merging has to leave tr() inputs as they were.
++        merged = node.combinepsbt([good, bogus])
++        assert_equal(self.leaf_controls(merged), self.leaf_controls(good))
++        finalized = node.finalizepsbt(merged)
++        assert_equal(finalized["complete"], True)
++        self.assert_accepted(finalized["hex"])
++
++        other_way = node.combinepsbt([bogus, good])
++        assert_equal(self.leaf_controls(other_way), self.leaf_controls(bogus))
++        # Nothing recovers from the shortest block being the wrong one, which is the whole reason
++        # the union must not reach a tr() input.
++        assert_equal(node.finalizepsbt(other_way)["complete"], False)
++
++        node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++
+     def test_missing_spent_output(self):
+         self.log.info("Signing a P2MR input needs every spent output of the transaction")
+         node = self.nodes[0]
+-- 
+2.49.0.windows.1
+
