@@ -60,11 +60,21 @@ independently reproducible.
 | Message start (network magic) | `40e8e404` |
 | Genesis block hash | `00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6` |
 | P2MR activation | buried deployment, active from height 1 |
-| Target block interval | 90 s |
+| Configured miner cadence | 90 s |
+| Consensus target spacing | 600 s (signet default, unchanged by this series) |
 | `nBits` | `1e0377ae` (difficulty 0.001126515290698186) |
 | Node version | `/Satoshi:31.1.0/` (v31.1.0) |
 | Address prefix | `tb1z` (bech32m, witness v2, 32-byte program) |
 | Output type name | `witness_v2_p2mr` |
+
+The last two rows are separate things and it is worth not reading one for the
+other. The cadence is an operational choice: the interval this chain's block
+producer was told to wait between blocks. The target spacing is the consensus
+parameter `nPowTargetSpacing`, which every signet inherits as ten minutes; the
+patch series does not touch it, and a custom challenge does not change it
+either. Producing blocks faster than the target spacing is what a signet is
+for — the signet solution, not proof of work, gates block production — so the
+two numbers differing is expected and is not a consensus modification.
 
 ### On the genesis hash
 

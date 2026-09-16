@@ -26,10 +26,27 @@ To build and test inside Kubernetes instead, use `contrib/k3s` on the `infra`
 branch; its README covers the whole flow, including the runtime image
 `p2mr-node:v31.1-p2mr` that the validation run below used.
 
+Record that directory, and the data directory the node will use, as absolute
+paths now — while the shell is still at the repository root and before any
+`cd`:
+
+```bash
+BINDIR="$PWD/bitcoin/build/bin"
+DATADIR="$PWD/ark0-node"
+```
+
+Every command below calls the daemon and the CLI through `$BINDIR`, never by
+bare name. On a machine that already has Bitcoin Core installed, a bare
+`bitcoind` or `bitcoin-cli` would resolve to that other build and quietly
+produce output this document does not describe; on a machine that has none, it
+would simply not be found. Any shell that runs a command from here needs both
+variables set to these same absolute paths. If `apply.sh` was given an explicit
+target directory, point `BINDIR` at `<that directory>/build/bin` instead.
+
 Check the version:
 
 ```bash
-bitcoind -version | head -1
+"$BINDIR/bitcoind" -version | head -1
 ```
 
 ```
@@ -61,11 +78,10 @@ do not need `-loadblock`.
 
 ```bash
 CHALLENGE=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae
-DATADIR=./ark0-node
 SNAPSHOT=/path/to/ark0/snapshot/ark0-blocks-1264.dat
 
 mkdir -p "$DATADIR"
-bitcoind -signet -signetchallenge=$CHALLENGE -datadir="$DATADIR" \
+"$BINDIR/bitcoind" -signet -signetchallenge=$CHALLENGE -datadir="$DATADIR" \
          -loadblock="$SNAPSHOT" \
          -connect=0 -listen=0 -dnsseed=0 \
          -txindex=1 -server=1 -printtoconsole
@@ -75,14 +91,17 @@ bitcoind -signet -signetchallenge=$CHALLENGE -datadir="$DATADIR" \
 is optional: every `getrawtransaction` below passes a block hash, so the index
 is not required, but the validation run used it.
 
-The import takes about a second for 1265 blocks. In a second shell:
+The import takes about a second for 1265 blocks. In a second shell, set
+`BINDIR` and `DATADIR` to the same two absolute paths as in step 1, then:
 
 ```bash
-alias acli='bitcoin-cli -datadir=./ark0-node -signet'
+alias acli="$BINDIR/bitcoin-cli -datadir=$DATADIR -signet"
 ```
 
-`bitcoin-cli` does not need the challenge; `-signet` is enough for it to find
-the right port and data directory.
+The double quotes matter: they bake both absolute paths into the alias at the
+point it is defined, so `acli` keeps working after a `cd`. The CLI does not
+need the challenge; `-signet` is enough for it to find the right port and data
+directory.
 
 ## 4. Confirm you have the right chain
 
