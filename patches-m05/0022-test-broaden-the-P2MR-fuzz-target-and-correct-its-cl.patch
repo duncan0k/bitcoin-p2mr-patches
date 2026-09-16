@@ -1,7 +1,7 @@
 From fe9d5b248562e3ff247279723ef4941752419cf1 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:46:07 -0600
-Subject: [PATCH 22/28] test: broaden the P2MR fuzz target and correct its
+Subject: [PATCH 22/30] test: broaden the P2MR fuzz target and correct its
  claims
 
 The comment promised arbitrary program lengths and that both sides of every

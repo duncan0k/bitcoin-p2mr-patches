@@ -1,7 +1,7 @@
 From e108eecfe4b93e8a686b400bd843821ede9ffcc2 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 10:17:39 -0600
-Subject: [PATCH 26/28] test: cover the cross-wallet P2MR multisig PSBT flows
+Subject: [PATCH 26/30] test: cover the cross-wallet P2MR multisig PSBT flows
 
 A tmr() leaf is an ordinary BIP342 tapscript, so it can hold a multi_a()
 multisig that no single wallet can satisfy. Two wallets, each holding one

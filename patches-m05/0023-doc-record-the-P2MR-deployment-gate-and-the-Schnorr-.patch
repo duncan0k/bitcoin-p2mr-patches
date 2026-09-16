@@ -1,7 +1,7 @@
 From 14958e425a75e0307d78cd546ebec8a15ba21fc5 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:46:07 -0600
-Subject: [PATCH 23/28] doc: record the P2MR deployment gate and the Schnorr
+Subject: [PATCH 23/30] doc: record the P2MR deployment gate and the Schnorr
  sighash convention
 
 Describe why importdescriptors and deriveaddresses refuse a tmr() descriptor

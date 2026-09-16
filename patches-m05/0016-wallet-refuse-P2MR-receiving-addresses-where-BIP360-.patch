@@ -1,7 +1,7 @@
 From e57ce08fcb60d4c6361b515fac204b39fb55bcee Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 05:30:11 -0600
-Subject: [PATCH 16/28] wallet: refuse P2MR receiving addresses where BIP360 is
+Subject: [PATCH 16/30] wallet: refuse P2MR receiving addresses where BIP360 is
  not deployed
 
 Where the P2MR deployment never activates, a 32 byte witness v2 program is an

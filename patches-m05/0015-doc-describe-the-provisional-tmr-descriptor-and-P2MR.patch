@@ -1,7 +1,7 @@
 From 28db4cc936fde7556d65624124bf45880dc0c259 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 04:25:43 -0600
-Subject: [PATCH 15/28] doc: describe the provisional tmr() descriptor and P2MR
+Subject: [PATCH 15/30] doc: describe the provisional tmr() descriptor and P2MR
  wallet support
 
 Record that tmr() and the reuse of the BIP 371 PSBT fields are placeholders

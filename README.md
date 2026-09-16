@@ -94,10 +94,13 @@ validation only after activation.
   a dedicated fuzz target, `wallet_p2mr.py` and `wallet_p2mr_signet.py`;
 - functional coverage of cross-wallet 2-of-2 multisig leaves signed through PSBT (`wallet_p2mr_multisig.py`),
   CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), and the edits that invalidate a signed
-  P2MR spend (amount, input order, control block, `witness_utxo`).
+  P2MR spend (amount, input order, control block, `witness_utxo`, another input's scriptPubKey).
 
-Review status: two rounds of independent review; the second round found the earlier high and medium
-findings fixed. Later commits only add tests (18 patches in total). Published separately once it has been exercised on the experimental signet.
+Review status: three rounds of independent review; the second round found the earlier high and medium
+findings fixed. The third found one remaining PSBT defect, where the control blocks a wallet recovers
+while signing were dropped on export and when combining, which left a separate finalizer unable to
+complete the input; the last two patches fix it and cover it (20 patches in total). Published
+separately once it has been exercised on the experimental signet.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch

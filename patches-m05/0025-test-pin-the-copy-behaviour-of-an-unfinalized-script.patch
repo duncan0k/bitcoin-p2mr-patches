@@ -1,7 +1,7 @@
 From e504ce388ccfa7ce1a902a6122d41baf8cf0dfd3 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 06:05:01 -0600
-Subject: [PATCH 25/28] test: pin the copy behaviour of an unfinalized script
+Subject: [PATCH 25/30] test: pin the copy behaviour of an unfinalized script
  tree builder
 
 A BIP360 tree is never finalized, but it is copied into and out of signing

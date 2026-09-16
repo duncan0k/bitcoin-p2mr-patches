@@ -1,0 +1,210 @@
+From 0b78b3123bcaadf3de57fda747dc613a329e0ce2 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 06:28:00 -0600
+Subject: [PATCH 30/30] test: cover the control blocks a P2MR signer recovers
+
+Strip a funded PSBT down to one malformed control block per signable leaf, so
+the PSBT alone finalizes nothing, then sign it without finalizing, serialize it
+and finalize it through the node RPC, which has no wallet and no way to rebuild
+the tree. The existing bogus control block case adds bad blocks while keeping
+the real ones, so it cannot see a signer that drops what it recovered.
+combinepsbt is checked in both orders, since only the one that starts from the
+stripped PSBT can lose the recovered blocks.
+
+Also pin that a P2MR signature commits to the scriptPubKey of every spent
+output, not only its own. Sign the same two input PSBT twice, once over the
+second input's real spent output and once over a wrong one, then put the second
+signature into the finished transaction and require the node to reject it
+against the outputs really being spent. Only the signature differs between the
+accepted transaction and the rejected one. The wrong scriptPubKey case next to
+it shows the wallet refusing a tree it does not know, which is a different
+thing.
+---
+ test/functional/wallet_p2mr.py | 130 +++++++++++++++++++++++++++++++--
+ 1 file changed, 124 insertions(+), 6 deletions(-)
+
+diff --git a/test/functional/wallet_p2mr.py b/test/functional/wallet_p2mr.py
+index e03c20d..43651e9 100644
+--- a/test/functional/wallet_p2mr.py
++++ b/test/functional/wallet_p2mr.py
+@@ -178,6 +178,15 @@ class WalletP2MRTest(BitcoinTestFramework):
+     def only_utxo(self, wallet, address):
+         return next(u for u in wallet.listunspent() if u["address"] == address)
+ 
++    def leaf_controls(self, psbt_b64, index=0):
++        """Every control block an input of `psbt_b64` records, as a set of hex strings.
++
++        A PSBT keys a leaf script by its control block alone, so one input can never hold the same
++        block twice and the set loses nothing.
++        """
++        entries = self.nodes[0].decodepsbt(psbt_b64)["inputs"][index]["taproot_scripts"]
++        return {control for entry in entries for control in entry["control_blocks"]}
++
+     def roundtrip_and_broadcast(self, wallet, psbt, sighash="DEFAULT"):
+         """Sign, serialize, combine, finalize and broadcast; return the txid.
+ 
+@@ -273,6 +282,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.test_psbt_roundtrip()
+         self.test_sighash_types()
+         self.test_bogus_control_block()
++        self.test_recovered_control_blocks()
+         self.test_missing_spent_output()
+         self.test_leaf_selection()
+         self.test_signature_invalidation()
+@@ -433,17 +443,63 @@ class WalletP2MRTest(BitcoinTestFramework):
+                 psbt.i[0].map[bytes([PSBT_IN_TAP_LEAF_SCRIPT]) + bytes(candidate)] = value
+         poisoned = psbt.to_base64()
+ 
+-        def control_blocks(psbt_b64):
+-            entries = node.decodepsbt(psbt_b64)["inputs"][0]["taproot_scripts"]
+-            return sum(len(entry["control_blocks"]) for entry in entries)
+-
+-        assert_equal(control_blocks(poisoned), 3 * control_blocks(funded["psbt"]))
++        assert_equal(len(self.leaf_controls(poisoned)), 3 * len(self.leaf_controls(funded["psbt"])))
+ 
+         txid = self.roundtrip_and_broadcast(wallet, poisoned)
+         self.generate(node, 1)
+         # The witness carries the valid control block, not the poisoned one.
+         self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
+ 
++    def test_recovered_control_blocks(self):
++        self.log.info("Signing hands on the control blocks it recovered, so anyone can finalize")
++        node = self.nodes[0]
++        keys = self.make_leaf_keys(2)
++        inner = "{{pk({}),pk({})}}".format(keys[0][0], keys[1][0])
++        wallet, address = self.new_p2mr_wallet("p2mr_recovered", inner)
++        self.fund(address, 1)
++
++        funded = self.pinned_psbt(
++            wallet, self.only_utxo(wallet, address), self.funder.getnewaddress(), amount=Decimal("0.5"))
++        real = self.leaf_controls(funded["psbt"])
++        assert_greater_than(len(real), 0)
++
++        # Leave every signable leaf with one malformed control block and nothing else. Unlike the
++        # poisoned PSBT above, this one carries no usable block at all: the wallet has to put back
++        # what it knows about the tree while signing, because no one downstream can work it out.
++        psbt = PSBT.from_base64(funded["psbt"])
++        for key, value in list(psbt.i[0].map.items()):
++            if not isinstance(key, bytes) or key[0] != PSBT_IN_TAP_LEAF_SCRIPT:
++                continue
++            broken = bytearray(key[1:])
++            # BIP360 requires the last bit of c[0] to be set, so this block can never be used.
++            broken[0] &= 0xFE
++            del psbt.i[0].map[key]
++            psbt.i[0].map[bytes([PSBT_IN_TAP_LEAF_SCRIPT]) + bytes(broken)] = value
++        stripped = psbt.to_base64()
++        assert_equal(self.leaf_controls(stripped) & real, set())
++        assert_equal(node.finalizepsbt(stripped)["complete"], False)
++
++        signed = self.sign_without_finalizing(wallet, stripped)
++        assert real <= self.leaf_controls(signed), self.leaf_controls(signed)
++
++        # finalizepsbt is a node RPC: no wallet, no tree, nothing but the PSBT to work from.
++        finalized = node.finalizepsbt(signed)
++        assert_equal(finalized["complete"], True)
++        self.assert_accepted(finalized["hex"])
++
++        # A combiner merges leaves control block by control block, so neither order may drop the
++        # recovered ones in favour of the set it already holds.
++        for order in ([stripped, signed], [signed, stripped]):
++            combined = node.combinepsbt(order)
++            assert real <= self.leaf_controls(combined), self.leaf_controls(combined)
++            merged = node.finalizepsbt(combined)
++            assert_equal(merged["complete"], True)
++            assert_equal(merged["hex"], finalized["hex"])
++
++        txid = node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++        self.assert_p2mr_spend(txid, expected_control_len=CONTROL_DEPTH_1)
++
+     def test_missing_spent_output(self):
+         self.log.info("Signing a P2MR input needs every spent output of the transaction")
+         node = self.nodes[0]
+@@ -506,6 +562,7 @@ class WalletP2MRTest(BitcoinTestFramework):
+         self.check_input_swap(wallet, address)
+         self.check_control_block_substitution(wallet, address)
+         self.check_witness_utxo_mismatch(wallet, address)
++        self.check_spent_script_commitment(wallet, address)
+ 
+     def check_amount_change(self, wallet, address):
+         """Moving a satoshi after signing breaks the signature."""
+@@ -609,7 +666,9 @@ class WalletP2MRTest(BitcoinTestFramework):
+         assert_equal(wrong_amount["complete"], True)
+ 
+         # A wrong scriptPubKey is a P2MR output whose Merkle root the wallet has no tree for, so
+-        # there is nothing to sign with and the input stays empty.
++        # there is nothing to sign with and the input stays empty. That is a refusal to sign, not
++        # evidence that a signature commits to the spent scriptPubKeys, which is what the two input
++        # case in check_spent_script_commitment pins down.
+         program = bytearray(prevout.scriptPubKey)
+         program[-1] ^= 0xFF
+         refused = sign_claiming(CTxOut(prevout.nValue, bytes(program)), finalize=False)
+@@ -628,6 +687,65 @@ class WalletP2MRTest(BitcoinTestFramework):
+         node.sendrawtransaction(truthful["hex"])
+         self.generate(node, 1)
+ 
++    def check_spent_script_commitment(self, wallet, address):
++        """The signature commits to the scriptPubKey of every spent output, not only its own."""
++        node = self.nodes[0]
++        p2mr_utxo = self.fund_utxo(wallet, address)
++        # A second input this wallet does not own, so a lie about it leaves this wallet's own
++        # input, its tree and its signing untouched, and only the signed message changes.
++        external_address = self.funder.getnewaddress(address_type="bech32m")
++        self.fund(external_address, 2)
++        external = next(u for u in self.funder.listunspent() if u["address"] == external_address)
++
++        utxos = [p2mr_utxo, external]
++        spent = [tx_from_hex(node.getrawtransaction(u["txid"])).vout[u["vout"]] for u in utxos]
++        base = PSBT.from_base64(node.createpsbt(
++            [{"txid": u["txid"], "vout": u["vout"]} for u in utxos],
++            [{self.funder.getnewaddress(): sum(u["amount"] for u in utxos) - Decimal("0.001")}],
++        ))
++        # Both inputs carry a witness_utxo and nothing else, so what the PSBT says about a spent
++        # output is all either signer has to go on.
++        for index, out in enumerate(spent):
++            base.i[index].map[PSBT_IN_WITNESS_UTXO] = out.serialize()
++
++        def sign_claiming(script_pubkey):
++            """Sign the P2MR input while the second input claims to spend `script_pubkey`."""
++            psbt = PSBT.from_base64(base.to_base64())
++            psbt.i[1].map[PSBT_IN_WITNESS_UTXO] = CTxOut(spent[1].nValue, script_pubkey).serialize()
++            return self.sign_without_finalizing(wallet, psbt.to_base64())
++
++        # The honest spend, signed by both wallets over the outputs really being spent. Finalizing
++        # tests the satisfaction it builds, so this is also the only one that can be finalized.
++        truthful = self.funder.walletprocesspsbt(
++            sign_claiming(spent[1].scriptPubKey), True, "DEFAULT", True, False)
++        finalized = node.finalizepsbt(truthful["psbt"])
++        assert_equal(finalized["complete"], True)
++        self.assert_accepted(finalized["hex"])
++
++        forged = bytearray(spent[1].scriptPubKey)
++        forged[-1] ^= 0xFF
++        assert bytes(forged) != spent[1].scriptPubKey
++        lying = sign_claiming(bytes(forged))
++
++        # Put the signature made over the wrong scriptPubKey into the finished transaction and
++        # change nothing else, not even which leaf is used. The BIP341 message commits to the
++        # scriptPubKey of every spent output, so it cannot stand against the outputs really spent.
++        tx = tx_from_hex(finalized["hex"])
++        stack = tx.wit.vtxinwit[0].scriptWitness.stack
++        assert_equal(len(stack), 3)
++        # A pk() leaf is a 32 byte pubkey push followed by OP_CHECKSIG, so it names its own key.
++        pubkey = stack[-2].hex()[2:2 + 64]
++        sigs = node.decodepsbt(lying)["inputs"][0]["taproot_script_path_sigs"]
++        over_wrong_script = bytes.fromhex(next(s["sig"] for s in sigs if s["pubkey"] == pubkey))
++        assert_equal(len(over_wrong_script), len(stack[0]))
++        assert over_wrong_script != stack[0], over_wrong_script.hex()
++        stack[0] = over_wrong_script
++        self.assert_rejected(tx.serialize().hex(), MEMPOOL_SIG_FAILURE)
++        self.log.info("  signing over another input's wrong scriptPubKey: rejected")
++
++        node.sendrawtransaction(finalized["hex"])
++        self.generate(node, 1)
++
+     def test_mixed_inputs(self):
+         self.log.info("Estimate and spend P2MR alongside legacy and segwit inputs")
+         node = self.nodes[0]
+-- 
+2.49.0.windows.1
+
