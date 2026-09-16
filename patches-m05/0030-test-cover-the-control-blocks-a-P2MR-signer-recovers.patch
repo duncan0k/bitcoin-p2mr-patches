@@ -1,7 +1,7 @@
 From 0b78b3123bcaadf3de57fda747dc613a329e0ce2 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Wed, 16 Sep 2026 06:28:00 -0600
-Subject: [PATCH 30/32] test: cover the control blocks a P2MR signer recovers
+Subject: [PATCH 30/34] test: cover the control blocks a P2MR signer recovers
 
 Strip a funded PSBT down to one malformed control block per signable leaf, so
 the PSBT alone finalizes nothing, then sign it without finalizing, serialize it

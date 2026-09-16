@@ -1,7 +1,7 @@
 From ce5fc3c4f09f3452be6b37e07ff0eee95e0b0372 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 10:18:04 -0600
-Subject: [PATCH 28/32] test: pin what invalidates a signed P2MR spend
+Subject: [PATCH 28/34] test: pin what invalidates a signed P2MR spend
 
 Four edits, each made to an otherwise valid script path spend that the node
 accepts untouched, so the rejection is attributable to the edit alone:

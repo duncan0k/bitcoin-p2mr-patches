@@ -1,7 +1,7 @@
 From ce7a4718c2ea02b63713b08e4ca93ef423eab205 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Wed, 16 Sep 2026 08:35:16 -0600
-Subject: [PATCH 32/32] test: cover which leaf a control block names, and tr()
+Subject: [PATCH 32/34] test: cover which leaf a control block names, and tr()
  merging
 
 Three cases the earlier control block coverage could not see.

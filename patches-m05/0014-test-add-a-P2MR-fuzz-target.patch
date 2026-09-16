@@ -1,7 +1,7 @@
 From 5e09b74121b0448217ac1f97219b40ea46e30529 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 04:25:42 -0600
-Subject: [PATCH 14/32] test: add a P2MR fuzz target
+Subject: [PATCH 14/34] test: add a P2MR fuzz target
 
 Feed structured and corrupted BIP 360 spends to VerifyScript with
 SCRIPT_VERIFY_P2MR. The witness program, the control block, the leaf script,

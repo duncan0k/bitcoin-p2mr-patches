@@ -95,14 +95,17 @@ validation only after activation.
 - functional coverage of cross-wallet 2-of-2 multisig leaves signed through PSBT (`wallet_p2mr_multisig.py`),
   CLTV/CSV timelocked leaves (`wallet_p2mr_timelock.py`), the edits that invalidate a signed P2MR
   spend (amount, input order, control block, `witness_utxo`, another input's scriptPubKey), which
-  leaf a control block names, and that merging leaves a `tr()` input's control blocks alone.
+  leaf a control block names however the input says what it spends, and that merging leaves a
+  `tr()` input's control blocks alone.
 
 Review status: four rounds of independent review; the second round found the earlier high and medium
 findings fixed. The third found that the control blocks a wallet recovers while signing were dropped
 on export and when combining, which left a separate finalizer unable to complete the input. The
 fourth found the repair for it too broad in two ways: a control block names one leaf and not several,
-and the wider merging behaviour had to stop at P2MR inputs rather than reach `tr()` ones. Four patches
-cover those two rounds (22 patches in total). Published separately once it has been exercised on the
+and the wider merging behaviour had to stop at P2MR inputs rather than reach `tr()` ones. The fifth
+found the remaining half of the first: an input that says what it spends with the whole previous
+transaction rather than the output alone was still exporting without it. Six patches cover those
+three rounds (24 patches in total). Published separately once it has been exercised on the
 experimental signet.
 
 ```bash

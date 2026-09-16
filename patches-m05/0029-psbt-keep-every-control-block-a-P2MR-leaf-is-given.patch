@@ -1,7 +1,7 @@
 From f4a680f789cb797b969aa30e05f11d5f3c2d200b Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Wed, 16 Sep 2026 06:27:45 -0600
-Subject: [PATCH 29/32] psbt: keep every control block a P2MR leaf is given
+Subject: [PATCH 29/34] psbt: keep every control block a P2MR leaf is given
 
 A PSBT can name a leaf with control blocks that do not rebuild the output's
 Merkle root. SignP2MR skips those and recovers usable ones from the script tree

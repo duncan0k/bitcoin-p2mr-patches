@@ -1,7 +1,7 @@
 From 9b3c54682fc403b84b3330f03dd10095dc4ebdbc Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Wed, 16 Sep 2026 08:35:06 -0600
-Subject: [PATCH 31/32] psbt: keep one leaf per control block, and tr() inputs
+Subject: [PATCH 31/34] psbt: keep one leaf per control block, and tr() inputs
  out of it
 
 BIP 371 keys a leaf script by its control block, so a control block names exactly

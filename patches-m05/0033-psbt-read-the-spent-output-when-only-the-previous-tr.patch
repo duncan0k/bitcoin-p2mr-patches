@@ -1,0 +1,153 @@
+From 5537dfaf13762b462b05e01274dee4c2838b0a57 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 16 Sep 2026 12:27:32 -0600
+Subject: [PATCH 33/34] psbt: read the spent output when only the previous
+ transaction names it
+
+An input may say what it spends either with the output itself or with the whole
+transaction that created it. Both were resolved for signing, but only the first
+reached the step that works out which leaf a P2MR control block proves, so an
+input named the second way exported with whatever associations it arrived with
+and lost the ones signing had recovered. A finalizer without the wallet has no
+way to work them out again.
+
+Put the witness UTXO that signing resolved in place before writing the input
+back, which is the same output it just signed against and the same assignment
+that happened a few lines later. An input carrying only its previous
+transaction now exports the associations its output proves.
+
+Merging reads the spent output the same way, which needs the outpoint to index
+the previous transaction and to check it belongs to this input, so it is passed
+in. That also settles a disagreement between two such PSBTs the way a witness
+UTXO already did.
+
+Where neither is present nothing can tell a P2MR input from a Taproot one, and
+control blocks are combined as they were before. A leaf that is new to the input
+still cannot bring in a control block another leaf already holds, since two
+leaves sharing one block write the same key twice and the result no longer
+parses.
+---
+ src/psbt.cpp | 47 ++++++++++++++++++++++++++++++++++-------------
+ src/psbt.h   |  5 ++++-
+ 2 files changed, 38 insertions(+), 14 deletions(-)
+
+diff --git a/src/psbt.cpp b/src/psbt.cpp
+index d968cce..52fe8ab 100644
+--- a/src/psbt.cpp
++++ b/src/psbt.cpp
+@@ -34,7 +34,7 @@ bool PartiallySignedTransaction::Merge(const PartiallySignedTransaction& psbt)
+     }
+ 
+     for (unsigned int i = 0; i < inputs.size(); ++i) {
+-        inputs[i].Merge(psbt.inputs[i]);
++        inputs[i].Merge(psbt.inputs[i], tx->vin[i].prevout);
+     }
+     for (unsigned int i = 0; i < outputs.size(); ++i) {
+         outputs[i].Merge(psbt.outputs[i]);
+@@ -172,14 +172,23 @@ namespace {
+ using TapLeafKey = std::pair<std::vector<unsigned char>, int>;
+ using TapLeafScripts = std::map<TapLeafKey, std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>>;
+ 
+-//! The BIP360 Merkle root an input spends, when the spent output is known to be a P2MR one.
+-//! A PSBTInput does not know its own prevout, so only witness_utxo can answer this; an input that
+-//! carries nothing but a non_witness_utxo is treated as unknown.
+-std::optional<uint256> SpentP2MRRoot(const CTxOut& witness_utxo)
++//! The output an input spends, as far as the input itself can say: either named directly, or read
++//! out of the whole previous transaction, which needs the outpoint to index and to check.
++CTxOut SpentOutput(const PSBTInput& input, const COutPoint& prevout)
+ {
+-    if (witness_utxo.IsNull()) return std::nullopt;
++    if (input.non_witness_utxo && input.non_witness_utxo->GetHash() == prevout.hash
++        && prevout.n < input.non_witness_utxo->vout.size()) {
++        return input.non_witness_utxo->vout[prevout.n];
++    }
++    return input.witness_utxo;
++}
++
++//! The BIP360 Merkle root of a spent output, when that output is known to be a P2MR one.
++std::optional<uint256> SpentP2MRRoot(const CTxOut& spent)
++{
++    if (spent.IsNull()) return std::nullopt;
+     std::vector<std::vector<unsigned char>> solutions;
+-    if (Solver(witness_utxo.scriptPubKey, solutions) != TxoutType::WITNESS_V2_P2MR) return std::nullopt;
++    if (Solver(spent.scriptPubKey, solutions) != TxoutType::WITNESS_V2_P2MR) return std::nullopt;
+     return uint256{solutions[0]};
+ }
+ 
+@@ -287,7 +296,7 @@ void PSBTInput::FromSignatureData(const SignatureData& sigdata)
+     }
+ }
+ 
+-void PSBTInput::Merge(const PSBTInput& input)
++void PSBTInput::Merge(const PSBTInput& input, const COutPoint& prevout)
+ {
+     if (!non_witness_utxo && input.non_witness_utxo) non_witness_utxo = input.non_witness_utxo;
+     if (witness_utxo.IsNull() && !input.witness_utxo.IsNull()) {
+@@ -306,14 +315,23 @@ void PSBTInput::Merge(const PSBTInput& input)
+     // the union of both sides rather than keep whichever set arrived first. Only P2MR inputs take
+     // that route: a Taproot signer picks the shortest control block a leaf has and never tries
+     // another, so a second one admitted there turns a PSBT that finalized into one that does not.
+-    if (const std::optional<uint256> p2mr_root{SpentP2MRRoot(witness_utxo)}) {
++    if (const std::optional<uint256> p2mr_root{SpentP2MRRoot(SpentOutput(*this, prevout))}) {
+         for (const auto& [leaf_script, control_blocks] : input.m_tap_scripts) {
+             for (const auto& control : control_blocks) {
+                 AddTapLeafControl(m_tap_scripts, leaf_script, control, p2mr_root);
+             }
+         }
+     } else {
+-        m_tap_scripts.insert(input.m_tap_scripts.begin(), input.m_tap_scripts.end());
++        // Nothing says what this input spends, so it cannot be told apart from a Taproot one and
++        // its control blocks are combined as they were before: a leaf already recorded here keeps
++        // what it has. A leaf that is new to this input still cannot bring in a control block
++        // another leaf already holds, because that would write the same key twice.
++        for (const auto& [leaf_script, control_blocks] : input.m_tap_scripts) {
++            if (m_tap_scripts.contains(leaf_script)) continue;
++            for (const auto& control : control_blocks) {
++                AddTapLeafControl(m_tap_scripts, leaf_script, control, std::nullopt);
++            }
++        }
+     }
+     m_tap_bip32_paths.insert(input.m_tap_bip32_paths.begin(), input.m_tap_bip32_paths.end());
+ 
+@@ -583,9 +601,10 @@ PSBTError SignPSBTInput(const SigningProvider& provider, PartiallySignedTransact
+     // If we are not finalizing, set sigdata.complete to false to not set the scriptWitness
+     if (!finalize && sigdata.complete) sigdata.complete = false;
+ 
+-    input.FromSignatureData(sigdata);
+-
+-    // If we have a witness signature, put a witness UTXO.
++    // If we have a witness signature, put a witness UTXO. This has to happen before the input is
++    // written back below: that step needs the output being spent to work out which leaf a P2MR
++    // control block proves, and an input named by its previous transaction alone carries no such
++    // output of its own.
+     if (sigdata.witness) {
+         input.witness_utxo = utxo;
+         // We can remove the non_witness_utxo if and only if there are no non-segwit or segwit v0
+@@ -593,6 +612,8 @@ PSBTError SignPSBTInput(const SigningProvider& provider, PartiallySignedTransact
+         // is something for the caller to deal with (i.e. FillPSBT).
+     }
+ 
++    input.FromSignatureData(sigdata);
++
+     // Fill in the missing info
+     if (out_sigdata) {
+         out_sigdata->missing_pubkeys = sigdata.missing_pubkeys;
+diff --git a/src/psbt.h b/src/psbt.h
+index 7fe9967..a9f019c 100644
+--- a/src/psbt.h
++++ b/src/psbt.h
+@@ -295,7 +295,10 @@ struct PSBTInput
+     bool IsNull() const;
+     void FillSignatureData(SignatureData& sigdata) const;
+     void FromSignatureData(const SignatureData& sigdata);
+-    void Merge(const PSBTInput& input);
++    //! Merge another input for the same `prevout` into this one. The outpoint is what lets the
++    //! spent output be read out of a non_witness_utxo, and that output decides how the two sides'
++    //! control blocks are combined.
++    void Merge(const PSBTInput& input, const COutPoint& prevout);
+     PSBTInput() = default;
+ 
+     template <typename Stream>
+-- 
+2.49.0.windows.1
+

@@ -1,7 +1,7 @@
 From 4c75dac9f97db88a20afe990dfea8f03f08ba734 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 15 Sep 2026 06:05:01 -0600
-Subject: [PATCH 24/32] test: close the remaining P2MR wallet coverage gaps
+Subject: [PATCH 24/34] test: close the remaining P2MR wallet coverage gaps
 
 Five gaps from the review, all in wallet_p2mr.py and none of them requiring a
 production change.
