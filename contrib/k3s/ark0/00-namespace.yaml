@@ -1,0 +1,17 @@
+# Namespace for the Ark-0 experimental signet.
+#
+# Everything the network needs lives here and nothing is published outside the
+# cluster: the two Services are headless, there is no NodePort, no
+# LoadBalancer and no Ingress. Reaching an RPC from outside is `kubectl exec`
+# or `kubectl port-forward`.
+#
+# The files in this directory are numbered in the order they must be applied.
+# Do not apply the directory in one go: the volumes have to be loaded with the
+# existing chain between 20-pvcs.yaml and the two StatefulSets. ARK0-MIGRATION.md
+# is the procedure.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0

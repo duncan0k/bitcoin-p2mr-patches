@@ -1,0 +1,42 @@
+# Names for the two nodes, inside the cluster only.
+#
+# Headless: `clusterIP: None` makes each name resolve to the pod's own address
+# rather than to a virtual one. Bitcoin peers exchange and remember addresses,
+# so a node should advertise and be reached at the address it actually has.
+#
+# These are also the StatefulSets' governing Services, which is what gives each
+# pod its stable name, nodea-0.ark0-nodea.ark0.svc.cluster.local.
+#
+# Nothing here is reachable from outside the cluster and nothing is meant to
+# be. Use `kubectl port-forward` for an occasional RPC session.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ark0-nodea
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: nodea
+  ports:
+    - { name: p2p, port: 38433, targetPort: 38433, protocol: TCP }
+    - { name: rpc, port: 38432, targetPort: 38432, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ark0-nodeb
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: nodeb
+  ports:
+    - { name: p2p, port: 38443, targetPort: 38443, protocol: TCP }
+    - { name: rpc, port: 38442, targetPort: 38442, protocol: TCP }

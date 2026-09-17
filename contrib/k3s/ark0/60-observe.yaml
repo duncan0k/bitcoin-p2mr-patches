@@ -1,0 +1,254 @@
+# Observation, moved off the host's crontab.
+#
+# The host ran observe.sh every ten minutes and appended one line to
+# observe.log. This keeps that probe, its first twelve fields and its ten
+# minute period, so the cluster's log continues the host's rather than starting
+# a new format, and appends five more:
+#
+#   utc | heightA | heightB | tipA | tipB | peersA | peersB | tipsA | mempoolA
+#       | phase nodea-0 | phase nodeb-0 | phase miner
+#       | rpcA | rpcB
+#       | health nodea-0 | health nodeb-0 | health miner
+#
+# Fields 1 to 12 are unchanged and in the same order, so anything reading the
+# older log still reads this one. Fields 10 to 12 were `systemctl is-active` on
+# the host and are pod phases here, which is the same question asked of the new
+# supervisor.
+#
+# The five new fields exist because the old twelve claimed more than they
+# checked. Phase alone says Running for a pod failing its readiness probe and
+# for a pod in a crash loop, so `health` carries readiness and the restart
+# count as well: restarts are the only field that reveals a node that died and
+# came back between two samples. And RPC reachability was only inferrable from
+# whether the other fields came back as ERR, so `rpcA` and `rpcB` state it,
+# using the same `uptime` call the nodes' startup probes use.
+#
+# The log lives on its own 1Gi volume rather than in node A's data directory:
+# a second writer inside a running bitcoind's datadir buys nothing, and a
+# separate claim can be read, rotated or deleted without touching the chain.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ark0-observe
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: observe
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Reading the three pod phases is the only thing the probe needs from the API,
+# so the account it runs under can do only that, in this namespace only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ark0-observer
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ark0-observer
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ark0-observer
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+subjects:
+  - kind: ServiceAccount
+    name: ark0-observer
+    namespace: ark0
+roleRef:
+  kind: Role
+  name: ark0-observer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ark0-observe-script
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+data:
+  observe.sh: |
+    #!/bin/sh
+    # One line per run, appended to /observe/observe.log.
+    set -u
+    # bitcoin-cli needs somewhere to read credentials from; the Secret is
+    # mounted read-only, so the two client configurations are assembled here.
+    for n in a b; do
+        : > /tmp/$n.conf
+        chmod 600 /tmp/$n.conf
+        cat /secrets/rpccredentials.conf >> /tmp/$n.conf
+    done
+    printf 'rpcconnect=ark0-nodea\nrpcport=38432\n' >> /tmp/a.conf
+    printf 'rpcconnect=ark0-nodeb\nrpcport=38442\n' >> /tmp/b.conf
+    A="bitcoin-cli -conf=/tmp/a.conf -datadir=/tmp"
+    B="bitcoin-cli -conf=/tmp/b.conf -datadir=/tmp"
+
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    hA="$($A getblockcount 2>/dev/null || echo ERR)"
+    hB="$($B getblockcount 2>/dev/null || echo ERR)"
+    tA="$($A getbestblockhash 2>/dev/null | cut -c1-16 || echo ERR)"
+    tB="$($B getbestblockhash 2>/dev/null | cut -c1-16 || echo ERR)"
+    pA="$($A getconnectioncount 2>/dev/null || echo ERR)"
+    pB="$($B getconnectioncount 2>/dev/null || echo ERR)"
+    tipsA="$($A getchaintips 2>/dev/null | grep -c '"hash"' || echo ERR)"
+    mA="$($A getmempoolinfo 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["size"])' 2>/dev/null || echo ERR)"
+
+    # An explicit RPC health result for each node, rather than leaving it to be
+    # inferred from whether the fields above came back as ERR. `uptime` is the
+    # cheapest authenticated call there is, and it is the same one the nodes'
+    # startup probes use, so a FAIL here and an unready pod mean the same
+    # thing. Distinguishing the two failures is the point: a node that is
+    # merely behind still answers, a node that is wedged or whose credentials
+    # are wrong does not.
+    rpcA="$($A uptime > /dev/null 2>&1 && echo ok || echo FAIL)"
+    rpcB="$($B uptime > /dev/null 2>&1 && echo ok || echo FAIL)"
+
+    # Pod phase, readiness and restart count, read straight from the API with
+    # the probe's own ServiceAccount token.
+    #
+    # Phase alone was not enough. A pod stays Running while its container fails
+    # its readiness probe, and it stays Running across a crash loop: the
+    # restart count is the only field that shows a node that has been dying and
+    # coming back between two ten-minute samples. Both are recorded now.
+    podinfo="$(python3 - <<'PY'
+    import json, ssl, urllib.request
+    WATCH = ("nodea-0", "nodeb-0", "ark0-miner")
+    base = "/var/run/secrets/kubernetes.io/serviceaccount"
+    try:
+        token = open(base + "/token").read().strip()
+        ctx = ssl.create_default_context(cafile=base + "/ca.crt")
+        req = urllib.request.Request(
+            "https://kubernetes.default.svc/api/v1/namespaces/ark0/pods",
+            headers={"Authorization": "Bearer " + token})
+        pods = json.load(urllib.request.urlopen(req, context=ctx, timeout=10))["items"]
+    except Exception:
+        print(" | ".join("ERR" for _ in WATCH))
+        print(" | ".join("ready:ERR restarts:ERR" for _ in WATCH))
+    else:
+        def find(prefix):
+            for p in pods:
+                if p["metadata"]["name"].startswith(prefix):
+                    return p
+            return None
+        phases, health = [], []
+        for prefix in WATCH:
+            p = find(prefix)
+            if p is None:
+                phases.append("absent")
+                health.append("ready:absent restarts:-")
+                continue
+            phases.append(p["status"].get("phase", "?"))
+            # A pod with no container statuses yet is not ready, and saying so
+            # is more use than saying nothing.
+            cs = p["status"].get("containerStatuses") or []
+            ready = bool(cs) and all(c.get("ready") for c in cs)
+            restarts = sum(c.get("restartCount", 0) for c in cs)
+            health.append("ready:%s restarts:%d" % ("yes" if ready else "no", restarts))
+        print(" | ".join(phases))
+        print(" | ".join(health))
+    PY
+    )"
+    phases="$(printf '%s\n' "$podinfo" | sed -n 1p)"
+    health="$(printf '%s\n' "$podinfo" | sed -n 2p)"
+
+    line="$ts | $hA | $hB | $tA | $tB | $pA | $pB | $tipsA | $mA | $phases | $rpcA | $rpcB | $health"
+    echo "$line" >> /observe/observe.log
+    echo "$line"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ark0-observe
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: observe
+spec:
+  # Every ten minutes, as the host crontab line did.
+  schedule: "*/10 * * * *"
+  # A run that overruns must not be joined by the next one: the log is appended
+  # to by one writer at a time.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: ark0-observer
+          # The probe reads the pod phases from the API, so it needs its token.
+          automountServiceAccountToken: true
+          # Unprivileged, exactly as in 40-statefulset-nodea.yaml, where the
+          # BPF socket restriction that forces this cluster on to the
+          # ../overlays/root-sockets/ variant is written out in full. fsGroup is
+          # what lets uid 10000 read the credentials Secret and write the log
+          # on the shared observation volume.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            fsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: observe
+              # The producer image, for its bitcoin-cli and python3. It runs
+              # the loop only when given no arguments; this gives it one.
+              image: p2mr-miner
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "/script/observe.sh"]
+              # Two RPC calls and one HTTPS call to the API server, then a line
+              # appended to a file.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: "10m", memory: "32Mi" }
+                limits: { cpu: "500m", memory: "256Mi" }
+              volumeMounts:
+                - { name: script, mountPath: /script, readOnly: true }
+                - { name: secrets, mountPath: /secrets, readOnly: true }
+                - { name: observe, mountPath: /observe }
+          volumes:
+            - name: script
+              configMap:
+                name: ark0-observe-script
+                defaultMode: 0555
+            - name: secrets
+              secret:
+                secretName: ark0-rpc
+                items:
+                  - { key: rpccredentials.conf, path: rpccredentials.conf }
+                # A Secret volume is owned by root and the pod's fsGroup, so
+                # 0400 would be readable only by root. 0440 is the tightest
+                # mode an unprivileged pod can actually read, and it is still
+                # nothing to anyone outside this pod.
+                defaultMode: 0440
+            - name: observe
+              persistentVolumeClaim:
+                claimName: ark0-observe

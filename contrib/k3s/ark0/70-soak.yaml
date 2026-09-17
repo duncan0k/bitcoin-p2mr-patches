@@ -1,0 +1,381 @@
+# The M0.5 wallet soak.
+#
+# Every six hours: node A pays 0.01 to a fresh P2MR address that node B's
+# ark0soak wallet controls, and once that confirms node B spends the output
+# straight back through the PSBT flow. One line per run is appended to
+# /observe/soak.log:
+#
+#   utc | fund txid | spend txid | fundHeight/spendHeight | result
+#
+# This is the regression watch for the twenty-four M0.5 wallet patches. The
+# consensus side is already watched by ark0-observe, which would notice the two
+# nodes parting company; nothing watched whether the wallet can still build,
+# sign, finalize and get a BIP360 script path spend mined. That is what this
+# exists to catch.
+#
+# The result field also carries the witness dimensions and a PASS or FAIL
+# against the ones this descriptor must produce: a 64 byte signature, a 34 byte
+# leaf and a 33 byte control block. They used to be logged and not checked,
+# which made the line a record of whatever happened rather than a test of
+# anything. A spend that starts paying for a bigger control block or a more
+# expensive leaf is a regression even while it still confirms, so a FAIL fails
+# the Job as surely as a round trip that never completed. The two are still
+# distinguishable in the log: "fail:" means the round trip broke, "dims FAIL"
+# means it worked and its cost changed.
+#
+# Prerequisite, created by hand and not by this file: a descriptor wallet
+# `ark0soak` on node B holding a ranged two leaf tmr() descriptor whose keys it
+# has. The job reads that descriptor back out of the wallet with
+# listdescriptors, so no network specific value and no key material appears in
+# this manifest. Reproduce it with the recipe in test/functional/wallet_p2mr.py
+# on the p2mr-m05 branch: tmr({pk(<xprv>/0/*),pk(<xprv>/1/*)}), imported with a
+# range. The wallet's own master key is enough, and it never has to leave the
+# pod.
+#
+# Addresses are taken at index 100 + (lines already in soak.log), so runs never
+# reuse an address and never collide with the low indices used by hand. The
+# wallet tops the descriptor's range up to 1001 by itself on import, which is
+# about 225 days of runs; widen it by re-importing with a larger range.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ark0-soak-script
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: soak
+data:
+  soak.sh: |
+    #!/bin/sh
+    # Credentials, exactly as ark0-observe assembles them: the Secret is
+    # mounted read-only, so the two client configurations are built here.
+    set -u
+    for n in a b; do
+        : > /tmp/$n.conf
+        chmod 600 /tmp/$n.conf
+        cat /secrets/rpccredentials.conf >> /tmp/$n.conf
+    done
+    printf 'rpcconnect=ark0-nodea\nrpcport=38432\n' >> /tmp/a.conf
+    printf 'rpcconnect=ark0-nodeb\nrpcport=38442\n' >> /tmp/b.conf
+    exec python3 /script/soak.py
+
+  soak.py: |
+    #!/usr/bin/env python3
+    """One P2MR fund and spend round trip, appended to /observe/soak.log."""
+
+    import datetime
+    import json
+    import subprocess
+    import sys
+    import time
+
+    LOG = "/observe/soak.log"
+    WALLET = "ark0soak"          # on node B, holds the tmr() descriptor
+    FUNDER = "ark0"              # on node A, holds the coinbase funds
+    AMOUNT = "0.01"
+    FEE_RATE = 10                # sat/vB
+    INDEX_BASE = 100             # leaves the low indices to hand driven work
+    CONFIRM_TIMEOUT = 420        # seconds; a block is produced every 90
+    POLL = 10
+
+    # BIP360 control block: one leaf version byte plus 32 bytes per Merkle path
+    # element, and the last bit of the leaf version byte is mandatory.
+    CONTROL_BASE = 1
+    CONTROL_NODE = 32
+    LEAF_TAPSCRIPT = 0xC0
+
+    # The witness dimensions this descriptor must produce. They were logged but
+    # not checked, which made the log a record of whatever happened rather than
+    # a test of anything: a spend paying for a bigger control block or a more
+    # expensive leaf would have been written down as a success.
+    #
+    #   signature      64  Schnorr over SIGHASH_DEFAULT. 65 would mean an
+    #                      explicit sighash byte, so no longer DEFAULT.
+    #   leaf script    34  OP_PUSHBYTES_32 <xonly pubkey> OP_CHECKSIG
+    #   control block  33  one leaf version byte and one 32 byte sibling, which
+    #                      is depth 1, which is what a two leaf tree has. 65
+    #                      would mean depth 2, i.e. not the descriptor this job
+    #                      imported.
+    EXPECT_SIG = 64
+    EXPECT_LEAF = 34
+    EXPECT_CONTROL = 33
+
+
+    class SoakError(Exception):
+        pass
+
+
+    def cli(conf, *args, wallet=None):
+        cmd = ["bitcoin-cli", "-conf=/tmp/" + conf + ".conf", "-datadir=/tmp"]
+        if wallet:
+            cmd.append("-rpcwallet=" + wallet)
+        cmd += [str(a) for a in args]
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if done.returncode != 0:
+            # Safe to quote back: the credentials are in a file, not here.
+            raise SoakError(str(args[0]) + " failed: " + done.stderr.strip()[:200])
+        return done.stdout.strip()
+
+
+    def cli_json(conf, *args, wallet=None):
+        return json.loads(cli(conf, *args, wallet=wallet))
+
+
+    def ensure_wallet():
+        """Node B keeps no startup wallet list, so it may need loading first."""
+        if WALLET not in cli_json("b", "listwallets"):
+            cli("b", "loadwallet", WALLET)
+
+
+    def soak_descriptor():
+        """The ranged two leaf tmr() descriptor, read back from the wallet.
+
+        listdescriptors without the private flag returns the xpub spelling, so
+        nothing secret is handled here. A multisig tree imported beside it
+        spells its first leaf multi_a( and is skipped.
+        """
+        for entry in cli_json("b", "listdescriptors", wallet=WALLET)["descriptors"]:
+            desc = entry["desc"]
+            if desc.startswith("tmr({pk(") and "/*" in desc:
+                return desc
+        raise SoakError("no ranged tmr() descriptor in wallet " + WALLET)
+
+
+    def next_index():
+        try:
+            with open(LOG) as handle:
+                used = sum(1 for line in handle if line.strip())
+        except FileNotFoundError:
+            used = 0
+        return INDEX_BASE + used
+
+
+    def wait_confirmed(conf, txid):
+        """Block until `txid` is mined, and return the height it was mined at.
+
+        getrawtransaction answering "no such transaction" is a normal first
+        result here, not a failure: the spend is broadcast on node B and this
+        waits on node A, which has to be relayed it first. Only the deadline
+        decides that a transaction is not coming.
+        """
+        deadline = time.monotonic() + CONFIRM_TIMEOUT
+        unseen = ""
+        while time.monotonic() < deadline:
+            try:
+                tx = cli_json(conf, "getrawtransaction", txid, "true")
+            except SoakError as error:
+                unseen = str(error)
+                tx = {}
+            if tx.get("confirmations", 0) >= 1:
+                return cli_json(conf, "getblockheader", tx["blockhash"])["height"]
+            time.sleep(POLL)
+        raise SoakError(txid[:16] + " not confirmed in time" +
+                        ((" (" + unseen[:60] + ")") if unseen else ""))
+
+
+    def wait_seen(txid, address):
+        """Block until node B's wallet holds the funded output, and return it."""
+        deadline = time.monotonic() + CONFIRM_TIMEOUT
+        while time.monotonic() < deadline:
+            for utxo in cli_json("b", "listunspent", 1, 9999999,
+                                 json.dumps([address]), wallet=WALLET):
+                if utxo["txid"] == txid:
+                    return utxo
+            time.sleep(POLL)
+        raise SoakError("wallet never saw " + txid[:16] + " at " + address[:16])
+
+
+    def check_witness(witness):
+        """Check the spend is a BIP360 script path spend, and size its parts.
+
+        Returns ((sig, leaf, control) lengths, verdict), where the verdict is
+        PASS or a FAIL naming every dimension that moved.
+
+        The split is deliberate. A wrong shape raises, because it means this is
+        not the spend the job set out to make and nothing downstream is worth
+        measuring. A wrong size is reported rather than raised, because the
+        spend was built, signed, finalized and accepted, and what changed is
+        what it costs. Both end up failing the Job; only one of them says the
+        round trip broke.
+        """
+        if len(witness) != 3:
+            raise SoakError("witness has " + str(len(witness)) +
+                            " items, expected 3 (signature, leaf, control)")
+        sig = bytes.fromhex(witness[0])
+        leaf = bytes.fromhex(witness[1])
+        control = bytes.fromhex(witness[2])
+        depth, remainder = divmod(len(control) - CONTROL_BASE, CONTROL_NODE)
+        if remainder or depth < 1:
+            raise SoakError("control block is " + str(len(control)) + " bytes")
+        if control[0] & 1 != 1 or control[0] & 0xFE != LEAF_TAPSCRIPT:
+            raise SoakError("control block leaf version is " + hex(control[0]))
+        moved = ["%s %dB not %dB" % (name, got, want)
+                 for name, got, want in (("sig", len(sig), EXPECT_SIG),
+                                         ("leaf", len(leaf), EXPECT_LEAF),
+                                         ("control", len(control), EXPECT_CONTROL))
+                 if got != want]
+        verdict = "PASS" if not moved else "FAIL (" + ", ".join(moved) + ")"
+        return (len(sig), len(leaf), len(control)), verdict
+
+
+    def round_trip(state):
+        """Run the round trip, recording each txid in `state` as it is made.
+
+        A run that funds an output and then fails has to say which output, or
+        the coins it left behind cannot be found from the log alone.
+        """
+        ensure_wallet()
+        index = next_index()
+        descriptor = soak_descriptor()
+        address = cli_json("b", "deriveaddresses", descriptor,
+                           json.dumps([index, index]))[0]
+        if not address.startswith("tb1z"):
+            raise SoakError("index " + str(index) + " derived " + address + ", not P2MR")
+        info = cli_json("b", "getaddressinfo", address, wallet=WALLET)
+        if not info.get("ismine") or info.get("witness_version") != 2:
+            raise SoakError("index " + str(index) + " is outside the imported range")
+
+        fund_txid = cli("a", "sendtoaddress", address, AMOUNT, wallet=FUNDER)
+        state["fund"] = fund_txid
+        fund_height = wait_confirmed("a", fund_txid)
+        state["fund_height"] = fund_height
+        utxo = wait_seen(fund_txid, address)
+
+        # The whole output goes back, so no change piles up in the wallet.
+        destination = cli("a", "getnewaddress", "ark0-soak", "bech32", wallet=FUNDER)
+        funded = cli_json(
+            "b", "walletcreatefundedpsbt",
+            json.dumps([{"txid": fund_txid, "vout": utxo["vout"]}]),
+            json.dumps([{destination: float(utxo["amount"])}]),
+            0,
+            json.dumps({"fee_rate": FEE_RATE, "add_inputs": False,
+                        "subtractFeeFromOutputs": [0]}),
+            wallet=WALLET)
+        processed = cli_json("b", "walletprocesspsbt", funded["psbt"],
+                             "true", "DEFAULT", "true", "false", wallet=WALLET)
+        final = cli_json("b", "finalizepsbt", processed["psbt"])
+        if not final.get("complete"):
+            raise SoakError("finalizepsbt did not complete the spend")
+
+        decoded = cli_json("b", "decoderawtransaction", final["hex"])
+        sizes, verdict = check_witness(decoded["vin"][0]["txinwitness"])
+        state["dims"] = verdict
+        spend_txid = cli("b", "sendrawtransaction", final["hex"])
+        state["spend"] = spend_txid
+        state["spend_height"] = wait_confirmed("a", spend_txid)
+
+        return "ok (index %d, vsize %d, sig %dB, leaf %dB, control %dB, dims %s)" % (
+            (index, decoded["vsize"]) + sizes + (verdict,))
+
+
+    def main():
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state = {}
+        try:
+            result = round_trip(state)
+            # A round trip that confirmed but whose witness dimensions moved is
+            # still a regression, and has to fail the Job, or only the log
+            # would know and nobody reads a log that has never been wrong.
+            failed = str(state.get("dims", "")).startswith("FAIL")
+        except Exception as error:                      # noqa: BLE001
+            result = "fail: " + str(error).replace("\n", " ")[:160]
+            failed = True
+
+        heights = "%s/%s" % (state.get("fund_height", "-"), state.get("spend_height", "-"))
+        line = " | ".join([stamp, state.get("fund", "-"), state.get("spend", "-"),
+                           heights, result])
+        try:
+            with open(LOG, "a") as handle:
+                handle.write(line + "\n")
+        except OSError as error:
+            print("could not write " + LOG + ": " + str(error), file=sys.stderr)
+        print(line)
+        # A failed round trip has to fail the Job too, or only the log says so.
+        return 1 if failed else 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ark0-soak
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: soak
+spec:
+  # Every six hours. More often would not find more: what is being watched is a
+  # build, not a race, and each run costs two blocks of waiting.
+  schedule: "0 */6 * * *"
+  # One writer to soak.log at a time, and never two round trips funding from
+  # the same wallet at once.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One attempt per schedule. A retry would fund a second output before the
+      # first one is accounted for, and the next run is only six hours away.
+      backoffLimit: 0
+      # Two confirmations at a 90 second cadence, with room for a slow block.
+      activeDeadlineSeconds: 1200
+      template:
+        spec:
+          restartPolicy: Never
+          # The job talks to two RPC endpoints and to nothing else.
+          automountServiceAccountToken: false
+          # Unprivileged, exactly as in 40-statefulset-nodea.yaml, where the
+          # BPF socket restriction that forces this cluster on to the
+          # ../overlays/root-sockets/ variant is written out in full. fsGroup is
+          # what lets uid 10000 read the credentials Secret and append to
+          # soak.log on the shared observation volume.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10000
+            runAsGroup: 10000
+            fsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: soak
+              # The producer image, for its bitcoin-cli and python3, which are
+              # the same two things ark0-observe uses it for.
+              image: p2mr-miner
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "/script/soak.sh"]
+              # Outbound RPC to the two nodes and a line appended to a file.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: "10m", memory: "32Mi" }
+                limits: { cpu: "500m", memory: "256Mi" }
+              volumeMounts:
+                - { name: script, mountPath: /script, readOnly: true }
+                - { name: secrets, mountPath: /secrets, readOnly: true }
+                - { name: observe, mountPath: /observe }
+          volumes:
+            - name: script
+              configMap:
+                name: ark0-soak-script
+                defaultMode: 0555
+            - name: secrets
+              secret:
+                secretName: ark0-rpc
+                items:
+                  - { key: rpccredentials.conf, path: rpccredentials.conf }
+                # 0440 rather than 0400 for the reason given in
+                # 60-observe.yaml: a Secret volume is owned by root and the
+                # pod's fsGroup, so an unprivileged pod reads it by group.
+                defaultMode: 0440
+            # The observation claim, shared with ark0-observe. ReadWriteOnce is
+            # a per node restriction rather than a per pod one, and every pod
+            # here runs on the one node. The two jobs write different files and
+            # neither reads the other's.
+            - name: observe
+              persistentVolumeClaim:
+                claimName: ark0-observe

@@ -1,0 +1,11 @@
+# Namespace for the P2MR build and test environment.
+#
+# Everything this directory creates lives here. No other namespace on the
+# cluster is read from or written to, and no NodePort, LoadBalancer or Ingress
+# is created: the build and test workloads need no inbound connectivity.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: p2mr-build
+  labels:
+    app.kubernetes.io/part-of: p2mr

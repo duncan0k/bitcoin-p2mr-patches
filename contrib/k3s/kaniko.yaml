@@ -1,0 +1,72 @@
+# Pod template for one kaniko image build.
+#
+# A template, not a manifest: build-image.sh substitutes the __TOKEN__
+# placeholders and applies the result.
+#
+# The node runs k3s with containerd and no Docker daemon, and there is no
+# registry to push to, so kaniko builds the image to a tarball on the work PVC
+# and build-image.sh imports that tarball with `k3s ctr images import`, with the
+# build context on the PVC instead of a host path, so that nothing has to be
+# staged on the host.
+#
+# The context is mounted with a subPath, so kaniko only ever sees the directory
+# belonging to the image it is building, not the rest of the volume.
+#
+# The executor is pinned by digest, not by :latest. This one is the digest that
+# built every p2mr image so far, so re-running a build with this file reuses the
+# same builder rather than whatever :latest happened to resolve to that day.
+#
+# It will not move again on its own. The upstream project,
+# github.com/GoogleContainerTools/kaniko, was archived on 2025-06-03 and is
+# read-only: "no longer developed or maintained. The code remains available for
+# historic purposes". So there are no more upstream fixes, security or
+# otherwise, and this tool is a known dead end rather than a temporary one.
+# It stays because it is the only thing here that builds an OCI image without a
+# Docker daemon and without a registry, which is the constraint this cluster
+# actually has. Replacing it is its own piece of work.
+#
+# Pinning the executor does not make the builds reproducible, and README.md
+# says which parts still float: the Dockerfiles pull Ubuntu packages from
+# moving repositories at build time, so two builds from the same context on
+# different days can differ.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: p2mr-build
+  labels:
+    app.kubernetes.io/part-of: p2mr
+    app.kubernetes.io/component: image-build
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor@sha256:4e7a52dd1f14872430652bb3b027405b8dfd17c4538751c620ac005741ef9698
+      imagePullPolicy: IfNotPresent
+      args:
+        - --dockerfile=/workspace/__DOCKERFILE__
+        - --context=dir:///workspace
+        - --no-push
+        - --tar-path=/img/__TAR_NAME__
+        - --destination=__IMAGE__
+        - --custom-platform=linux/amd64
+        # Dropped by build-image.sh when REGISTRY_MIRROR is empty. kaniko does
+        # its own registry pulls and so ignores the node's containerd mirror
+        # configuration; where that configuration exists because the node
+        # cannot reach Docker Hub directly, kaniko needs to be told separately.
+        - __REGISTRY_MIRROR_ARG__
+      resources:
+        requests: { cpu: "2", memory: "2Gi" }
+        limits: { cpu: "8", memory: "8Gi" }
+      volumeMounts:
+        - name: work
+          mountPath: /workspace
+          subPath: __CONTEXT_SUBPATH__
+        - name: work
+          mountPath: /img
+          subPath: img
+  volumes:
+    - name: work
+      persistentVolumeClaim:
+        claimName: p2mr-work

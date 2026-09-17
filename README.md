@@ -19,6 +19,7 @@ SHA256SUMS       checksums of the patches
 SHA256SUMS-m05   checksums of the M0.5 patches
 apply.sh         clone v31.1, verify, apply, build, run the core tests
 ark0/            evidence pack for the experimental custom signet (see below)
+contrib/k3s/     build, test and run the series inside a k3s cluster
 ```
 
 ## Usage
@@ -131,8 +132,8 @@ outside it. Since 2026-09-16 the verifying node of the Ark-0 signet runs a build
 the block producing node runs the consensus series alone, so the two are continuously checked against
 each other on a live chain; a divergence would be the finding. A job every six hours funds a P2MR
 address from one node and spends it back from the other through the PSBT flow, asserting the witness
-dimensions each time. The operations tooling and the roll records are kept outside this repository
-until they have been through the same review as the patches.
+dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records that roll, the build it came from, and
+the first round trip it produced.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch

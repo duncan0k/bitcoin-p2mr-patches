@@ -1,0 +1,36 @@
+# Long-lived helper pod that mounts the work PVC.
+#
+# Its only jobs are to bind the PVC (local-path is WaitForFirstConsumer, so the
+# volume does not exist until something schedules against it) and to give
+# `kubectl cp` and `kubectl exec` a way in and out of the volume. It runs a
+# cached image so it needs no registry pull, and it idles at ~0 CPU.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: p2mr-shell
+  namespace: p2mr-build
+  labels:
+    app.kubernetes.io/part-of: p2mr
+    app.kubernetes.io/component: shell
+spec:
+  restartPolicy: Always
+  # No inbound ports, no service account token: this pod only touches the PVC.
+  automountServiceAccountToken: false
+  containers:
+    - name: shell
+      # Pinned by digest, like every other image here: this one is only a
+      # shell around the volume, but a helper that silently changes underneath
+      # a build is still a build input. ubuntu:22.04 as of 2026-09-16; any
+      # image with tar would do, because kubectl cp needs tar.
+      image: docker.io/library/ubuntu@sha256:3ba65aa20f86a0fad9df2b2c259c613df006b2e6d0bfcc8a146afb8c525a9751
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      resources:
+        requests: { cpu: "10m", memory: "32Mi" }
+        limits: { cpu: "500m", memory: "512Mi" }
+      volumeMounts:
+        - { name: work, mountPath: /work }
+  volumes:
+    - name: work
+      persistentVolumeClaim:
+        claimName: p2mr-work

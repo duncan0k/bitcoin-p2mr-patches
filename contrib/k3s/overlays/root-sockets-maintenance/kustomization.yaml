@@ -1,0 +1,50 @@
+# Ark-0 with the block producer held at zero replicas.
+#
+# This is root-sockets with one field changed, and it exists because of a
+# hazard that bit a real roll. `50-miner.yaml` declares `replicas: 1`. Scaling
+# the producer to zero by hand does not change that declaration, so the next
+# `kubectl apply -k` puts the replica count back and starts the producer again.
+# During the 2026-09-16 release roll the producer restarted mid-apply and mined
+# a block against a node A that was not answering RPC yet. The loop retried and
+# recovered, but "scale to nothing, apply, verify, scale back" is not a
+# sequence that survives an apply, and that is exactly the sequence maintenance
+# needs.
+#
+# So maintenance applies this instead. The producer is declared at zero here,
+# an apply keeps it at zero, and starting it again is a separate, deliberate
+# command.
+#
+# Use it for every apply while nodes or configuration are being changed, and
+# for any verification against a frozen tip. Kubernetes' own guidance on how
+# declarative fields and imperative scaling interact is the background:
+# https://kubernetes.io/docs/tasks/manage-kubernetes-objects/declarative-config/
+#
+#   kubectl apply --dry-run=server -k contrib/k3s/overlays/root-sockets-maintenance
+#   kubectl apply             -k contrib/k3s/overlays/root-sockets-maintenance
+#   ... do the work, verify the tip ...
+#   kubectl -n ark0 scale deployment/ark0-miner --replicas=1
+#
+# Afterwards, going back to `root-sockets` also restores `replicas: 1`, so on a
+# day with no maintenance the ordinary overlay both applies and starts the
+# producer. That is fine, and it is the difference between the two.
+#
+# On a cluster that does not need the root workaround, point `resources` at
+# `../../ark0` instead and keep the same patch.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ark0
+
+resources:
+  - ../root-sockets
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ark0-miner
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 0

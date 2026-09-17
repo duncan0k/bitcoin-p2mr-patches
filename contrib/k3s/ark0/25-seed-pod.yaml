@@ -1,0 +1,43 @@
+# Helper pod used only to load the chain into the two volumes, and to take it
+# back out again if the migration is rolled back.
+#
+# local-path binds a volume when something first schedules against it, so this
+# pod also exists to make the two claims real. Delete it once the copy is done:
+# nothing should hold a node's volume while the node runs.
+#
+# It runs as root, and that is the point: copying a chain in and handing it to
+# another uid needs an identity that can chown. Chown it to whichever uid the
+# nodes will run as -- 10000:10000 for the manifests as committed, 0:0 under
+# ../overlays/root-sockets/. This pod is a one-shot helper, not part of the
+# running network, so it is not in the kustomization and it is deleted as soon
+# as the copy is done.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ark0-seed
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: seed
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: seed
+      # Pinned by digest for the same reason as contrib/k3s/shell.yaml: this
+      # pod copies a chain into a volume, and what it copies with should not
+      # change on its own. ubuntu:22.04 as of 2026-09-16.
+      image: docker.io/library/ubuntu@sha256:3ba65aa20f86a0fad9df2b2c259c613df006b2e6d0bfcc8a146afb8c525a9751
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "3600"]
+      resources:
+        requests: { cpu: "10m", memory: "32Mi" }
+        limits: { cpu: "1", memory: "512Mi" }
+      volumeMounts:
+        - { name: a, mountPath: /a }
+        - { name: b, mountPath: /b }
+  volumes:
+    - name: a
+      persistentVolumeClaim: { claimName: data-nodea-0 }
+    - name: b
+      persistentVolumeClaim: { claimName: data-nodeb-0 }

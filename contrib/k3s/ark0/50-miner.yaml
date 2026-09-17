@@ -1,0 +1,96 @@
+# The block producer.
+#
+# A Deployment rather than a StatefulSet: it keeps no state. Everything it
+# needs is the node A RPC endpoint, the credentials, and the coinbase
+# destination. The signing key is not here; it is in node A's wallet, and the
+# producer asks node A to sign the signet solution through walletprocesspsbt.
+#
+# Apply this last, and only once both nodes are Ready and agree on the tip.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ark0-miner
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: miner
+spec:
+  replicas: 1
+  # Recreate, never RollingUpdate. A rolling update would run two producers
+  # against one chain with one signing key for a few seconds, which is how a
+  # signet forks itself.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: ark0
+      app.kubernetes.io/component: miner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ark0
+        app.kubernetes.io/component: miner
+    spec:
+      automountServiceAccountToken: false
+      # Unprivileged, exactly as in 40-statefulset-nodea.yaml, where the BPF
+      # socket restriction that forces this cluster on to the
+      # ../overlays/root-sockets/ variant is written out in full. fsGroup is what
+      # lets uid 10000 read the credentials Secret, which is mounted 0440.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: miner
+          image: p2mr-miner
+          imagePullPolicy: IfNotPresent
+          # The producer opens outbound RPC connections and writes two client
+          # configurations into its own emptyDir. Nothing else.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # No command: the image's entry point writes the two client
+          # configurations from the environment below and then runs the loop.
+          env:
+            - { name: ARK0_BLOCK_INTERVAL, value: "90" }
+            - { name: ARK0_WALLET, value: "ark0" }
+            - { name: ARK0_RPC_HOST_A, value: "ark0-nodea" }
+            - { name: ARK0_RPC_PORT_A, value: "38432" }
+            - { name: ARK0_RPC_HOST_B, value: "ark0-nodeb" }
+            - { name: ARK0_RPC_PORT_B, value: "38442" }
+            - { name: ARK0_CREDENTIALS, value: "/secrets/rpccredentials.conf" }
+            - { name: ARK0_REWARD_ADDRESS_FILE, value: "/config/reward_address.txt" }
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          volumeMounts:
+            # The client configurations and ark0.py's evidence log are written
+            # here at start-up. Nothing on it has to survive a restart.
+            - { name: home, mountPath: /var/lib/ark0 }
+            - { name: credentials, mountPath: /secrets, readOnly: true }
+            - { name: config, mountPath: /config, readOnly: true }
+            # Only so the wallet can be rebuilt without going back to the host;
+            # the loop never reads it.
+            - { name: signer, mountPath: /signer, readOnly: true }
+      volumes:
+        - name: home
+          emptyDir: {}
+        - name: credentials
+          secret:
+            secretName: ark0-rpc
+            items:
+              - { key: rpccredentials.conf, path: rpccredentials.conf }
+            defaultMode: 0440
+        - name: config
+          configMap:
+            name: ark0-conf
+            items:
+              - { key: reward_address.txt, path: reward_address.txt }
+        - name: signer
+          secret:
+            secretName: ark0-signer
+            defaultMode: 0440

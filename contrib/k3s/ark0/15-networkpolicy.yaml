@@ -1,0 +1,109 @@
+# Namespace isolation, enforced rather than asserted.
+#
+# Headless Services and the absence of a NodePort keep these pods off the
+# node's network, but they do nothing about the cluster's own pod network: by
+# default every pod in every namespace can open a connection to every other
+# pod's address, and a headless Service is if anything easier to reach, because
+# it publishes the pod addresses directly. Until these policies existed, the
+# claim that the namespace isolated the network was not backed by anything.
+#
+# Three policies, in the order the API evaluates them (it does not; policies
+# are additive, and a connection is allowed if any policy allows it):
+#
+#   ark0-default-deny-ingress   selects every pod here and permits nothing
+#   ark0-nodea-ingress          re-opens node A's P2P and RPC ports
+#   ark0-nodeb-ingress          re-opens node B's P2P and RPC ports
+#
+# The two allow rules use `from: [{podSelector: {}}]`, which means pods in this
+# namespace and no other. Nothing selects a namespaceSelector or an ipBlock, so
+# a pod in another namespace matches no allow rule and is left with the deny.
+#
+# Who this leaves able to talk to what:
+#
+#   node A  <-> node B    P2P, both directions; node B connects, node A addnodes
+#   producer -> node A    RPC, and node B for its tip check
+#   observe  -> both      RPC
+#   soak     -> both      RPC
+#   anything else         refused at the node's firewall, before bitcoind
+#
+# The producer, the probe and the soak job listen on nothing, so the deny leaves
+# them correctly unreachable and no allow rule names them.
+#
+# Egress is deliberately unrestricted, and this is the one loosening worth
+# stating plainly. Closing it would need rules for DNS, for the API server that
+# the observation probe reads pod phases from, and for the node ports above,
+# and would buy little while ingress is already closed: these pods initiate
+# nothing but RPC to each other and one HTTPS call to the API server. If that
+# changes, egress is the next thing to close.
+#
+# Two things a NetworkPolicy does not cover, so that nobody reads more into it:
+# `kubectl exec` and `kubectl port-forward` reach a container through the
+# kubelet rather than through the pod network and are unaffected, and the
+# startup probes are exec probes that run inside the container and never cross
+# the network at all.
+#
+# Enforcement is the cluster's job. The API server accepts NetworkPolicy
+# objects whether or not anything implements them, so on a cluster with no
+# policy controller these files are decoration. k3s ships kube-router's
+# NetworkPolicy controller and enables it unless started with
+# --disable-network-policy; `sudo iptables -L -n | grep KUBE-ROUTER` showing
+# its chains is the check.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ark0-default-deny-ingress
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+spec:
+  # Every pod in the namespace, including ones added later: a policy that
+  # listed the current workloads would quietly stop covering the next one.
+  podSelector: {}
+  policyTypes: ["Ingress"]
+  # No ingress rules at all. This is what "default deny" is: the absence of a
+  # permission, not the presence of a prohibition.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ark0-nodea-ingress
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: nodea
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: ark0
+      app.kubernetes.io/component: nodea
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # An empty podSelector inside `from` means every pod in this
+        # namespace. It is not the same as an empty `from`, which would mean
+        # every pod in the cluster.
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 38433 }   # P2P
+        - { protocol: TCP, port: 38432 }   # RPC
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ark0-nodeb-ingress
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: nodeb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: ark0
+      app.kubernetes.io/component: nodeb
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 38443 }   # P2P
+        - { protocol: TCP, port: 38442 }   # RPC

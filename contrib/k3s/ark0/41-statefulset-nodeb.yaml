@@ -1,0 +1,111 @@
+# Node B, the verifying node.
+#
+# Apply only after 20-pvcs.yaml has been loaded with the existing chain. The
+# volumeClaimTemplate adopts data-nodeb-0 if it already exists, and creates an
+# empty one if it does not, which would re-sync the whole chain from node A.
+#
+# Identical to 40-statefulset-nodea.yaml apart from the name, the component
+# label, the configuration key, the two port numbers and the image: node A runs
+# the consensus series alone, node B runs the M0.5 build on top of it.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nodeb
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+    app.kubernetes.io/component: nodeb
+spec:
+  serviceName: ark0-nodeb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: ark0
+      app.kubernetes.io/component: nodeb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: ark0
+        app.kubernetes.io/component: nodeb
+    spec:
+      automountServiceAccountToken: false
+      # Unprivileged, exactly as in 40-statefulset-nodea.yaml, where the BPF
+      # socket restriction that forces this cluster on to the
+      # ../overlays/root-sockets/ variant is written out in full.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # Matches TimeoutStopSec=180 on the host unit: bitcoind has to finish
+      # flushing its chainstate, or the next start has to reindex.
+      terminationGracePeriodSeconds: 180
+      containers:
+        - name: bitcoind
+          # M0.5: the ten consensus patches plus the twenty-four wallet patches.
+          # Running the verifying node on it is deliberate, and it is the soak
+          # this network exists for. M0.5 adds wallet and descriptor code only
+          # and changes no consensus rule, so node B accepts exactly the blocks
+          # node A's m0 build produces; what is being watched for is the
+          # opposite result. If node B ever diverges from node A, that is the
+          # finding, not an accident, and the rollback in ARK0-MIGRATION.md
+          # applies.
+          image: p2mr-node-m05
+          # Built in-cluster and imported into containerd; never pulled.
+          imagePullPolicy: IfNotPresent
+          # A node binds two ports above 1024, reads its volume and its
+          # configuration, and needs nothing else the kernel can hand out.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - -conf=/config/nodeb.conf
+            - -datadir=/data
+            - -printtoconsole
+            # Expanded from the environment below, so the RPC password itself
+            # never appears in a command line. rpcauth carries only a salted
+            # hash, which cannot be used to authenticate.
+            - -rpcauth=$(ARK0_RPCAUTH)
+          env:
+            - name: ARK0_RPCAUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ark0-rpc
+                  key: rpcauth
+          ports:
+            - { name: p2p, containerPort: 38443 }
+            - { name: rpc, containerPort: 38442 }
+          # Answering RPC is what "ready" means for a node, and it is what makes
+          # `kubectl rollout status` wait for a chain that is still loading.
+          # bitcoin-cli authenticates with the cookie in the node's own data
+          # directory, which bitcoind writes whether or not rpcauth is set.
+          # There is deliberately no liveness probe: restarting a node that is
+          # merely busy flushing costs a reindex.
+          startupProbe:
+            exec:
+              command: ["bitcoin-cli", "-conf=/config/nodeb.conf", "-datadir=/data", "uptime"]
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "4", memory: "8Gi" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config, readOnly: true }
+      volumes:
+        - name: config
+          configMap:
+            name: ark0-conf
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi

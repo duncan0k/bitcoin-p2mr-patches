@@ -1,0 +1,33 @@
+# Work volume shared by the seed pod, the kaniko image builds and the build Job.
+#
+# Layout once seeded (see README.md):
+#   /work/patches/master/   the 10 consensus patches + SHA256SUMS
+#   /work/patches/m05/      the 24 M0.5 wallet patches + SHA256SUMS-m05
+#   /work/imgctx/builder/   kaniko context for Dockerfile.builder
+#   /work/imgctx/node/      kaniko context for Dockerfile.node (bin/ staged by build.sh)
+#   /work/img/              image tarballs produced by kaniko, imported with ctr
+#   /work/src/              bitcoin/bitcoin clone at v31.1 with the series applied
+#   /work/ccache/           compiler cache, reused across runs
+#   /work/test-cache/       functional test framework --cachedir
+#   /work/test-tmp/         functional test framework --tmpdir (one dir per run)
+#   /work/out/bin/          binaries of the last successful build
+#   /work/logs/<run-id>/    build, unit test and functional test logs
+#
+# Sizing: a Release build tree is ~10 GB, the functional --tmpdir of a full
+# default run peaks around 40 GB, ccache is capped at 20 GB. 200Gi leaves room
+# for several runs' logs and tmpdirs before they need pruning.
+#
+# local-path is node-local and WaitForFirstConsumer, so the volume is created
+# on the node that first schedules a consumer; on a single-node k3s that is
+# always the same node and ReadWriteOnce is sufficient.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: p2mr-work
+  namespace: p2mr-build
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 200Gi

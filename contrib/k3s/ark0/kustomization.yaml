@@ -1,0 +1,100 @@
+# The Ark-0 workloads as they should be published: unprivileged.
+#
+# This exists so that the manifests can be validated in one command and so that
+# ../overlays/root-sockets/ has something to patch. It is NOT a bring-up
+# procedure. A first-time deployment still follows the numbered order in
+# ../ARK0-MIGRATION.md, because the chain has to be copied into the two volumes
+# after 20-pvcs.yaml and before the StatefulSets; applying everything at once
+# leaves the nodes starting empty, and node A then mines a branch that competes
+# with the chain that already exists.
+#
+# Two files are deliberately absent.
+#
+# 25-seed-pod.yaml is the one-shot helper the chain is copied through. It runs
+# as root because chowning is its whole job, and it is deleted once the copy is
+# done.
+#
+# 10-configmap.yaml is a template, not a manifest: it carries
+# REPLACE_WITH_SIGNET_CHALLENGE and REPLACE_WITH_REWARD_ADDRESS. Including it
+# here made `kubectl apply -k` able to overwrite the running nodes'
+# configuration with those literal strings, and a server-side dry run does not
+# catch it: the API server validates that a ConfigMap holds strings, not that
+# the strings are a usable bitcoin.conf. Render it instead:
+#
+#   ./render-config.sh --from-live -o ~/ark0-conf.yaml
+#
+# which fills the values, refuses a placeholder or an implausible one, and
+# shows `kubectl diff` against the live object before anything is applied.
+# README.md in this directory has the detail.
+#
+# Validate without changing anything:
+#
+#   kubectl apply --dry-run=server -k contrib/k3s/ark0
+#   kubectl apply --dry-run=server -k contrib/k3s/overlays/root-sockets
+#   kubectl apply --dry-run=server -k contrib/k3s/overlays/root-sockets-maintenance
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ark0
+
+# Which build each workload runs, in one place.
+#
+# The workload files name an image without a tag, and this block supplies the
+# tag. Every tag here is immutable: `build-image.sh` names an image after the
+# commit its provenance records, and never moves a tag it has already written.
+# So a tag identifies one build for good, and what a workload runs is a fact
+# about this file rather than about whatever a shared tag happens to point at
+# today.
+#
+# That is what replaced the rollback guard. Rebuilding used to move a tag a pod
+# was using, taking away the only name its running image had, and the guard
+# that tried to preserve those names had to work out what was running -- a
+# question with no small, complete answer. Now nothing is ever overwritten, so
+# nothing has to be preserved.
+#
+# Rolling a workload:
+#
+#   kustomize edit set image p2mr-node-m05=p2mr-node:v31.1-p2mr-m05-<head12>
+#
+# or edit the `newTag` below, then follow the maintenance sequence in
+# ../ARK0-MIGRATION.md. Rolling back is the same edit with the previous tag,
+# which is recorded in that document's roll table. Both overlays inherit this,
+# so neither can disagree with it.
+#
+# The three names on the left are labels for this block to match, not image
+# names in containerd: node A and node B both run `p2mr-node` and a kustomize
+# `images:` entry matches by name, so they need distinct names to be given
+# distinct tags. It follows that these manifests are applied through kustomize;
+# `kubectl apply -f` on one of the workload files alone would ask for an image
+# that does not exist.
+#
+# The three `newTag` values below are not defaults and are not examples. They
+# are the Ark-0 network's, recorded on 2026-09-16 when it moved off shared
+# tags, and they name builds that exist only in that cluster's containerd. The
+# two node tags end in a digest rather than a commit because they were made by
+# aliasing the images that were already running; every tag written since ends
+# in the first twelve characters of the commit its build's PROVENANCE.txt
+# records. A bootstrap anywhere else replaces all three with the references its
+# own builds printed, before it starts a workload -- step 2 of
+# ../ARK0-MIGRATION.md says where to read them.
+images:
+  - name: p2mr-node-m0
+    newName: p2mr-node
+    newTag: v31.1-p2mr-m0-b120da303df8
+  - name: p2mr-node-m05
+    newName: p2mr-node
+    newTag: v31.1-p2mr-m05-a64bad420d00
+  - name: p2mr-miner
+    newName: p2mr-miner
+    newTag: v31.1-p2mr-ed54f802502c
+
+resources:
+  - 00-namespace.yaml
+  - 15-networkpolicy.yaml
+  - 20-pvcs.yaml
+  - 30-services.yaml
+  - 40-statefulset-nodea.yaml
+  - 41-statefulset-nodeb.yaml
+  - 50-miner.yaml
+  - 60-observe.yaml
+  - 70-soak.yaml

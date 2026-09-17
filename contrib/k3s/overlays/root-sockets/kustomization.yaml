@@ -1,0 +1,82 @@
+# Ark-0 for a cluster whose kernel refuses AF_INET sockets to unprivileged uids.
+#
+# The base runs every workload as uid 10000. This overlay puts the five of them
+# back on uid 0 and removes runAsNonRoot, fsGroup and the seccomp profile with
+# it. README.md in this directory says why that is necessary here and what to
+# check before deciding it is necessary anywhere else.
+#
+# Nothing else is patched. The images, the ports, the configuration, the
+# Secrets and the NetworkPolicy are the base's.
+#
+#   kubectl apply --dry-run=server -k contrib/k3s/ark0/overlays/root-sockets
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ark0
+
+resources:
+  - ../../ark0
+
+# One replacement per workload rather than a merge: the point is to drop
+# runAsNonRoot and fsGroup as well as to change the uid, and a strategic merge
+# cannot remove a field it does not mention.
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: nodea
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0
+
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: nodeb
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0
+
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ark0-miner
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0
+
+  - target:
+      group: batch
+      version: v1
+      kind: CronJob
+      name: ark0-observe
+    patch: |-
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0
+
+  - target:
+      group: batch
+      version: v1
+      kind: CronJob
+      name: ark0-soak
+    patch: |-
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/securityContext
+        value:
+          runAsUser: 0
+          runAsGroup: 0

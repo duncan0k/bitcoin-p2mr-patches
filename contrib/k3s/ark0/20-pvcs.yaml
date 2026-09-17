@@ -1,0 +1,37 @@
+# The two node volumes, created by hand before the StatefulSets exist.
+#
+# A StatefulSet adopts a claim that already carries the name its
+# volumeClaimTemplate would generate, `<template>-<statefulset>-<ordinal>`.
+# Creating them here means the chain can be loaded into them first, so neither
+# node ever starts on an empty chain and mines a competing branch.
+#
+# 20Gi against a signet directory of about 20 MB is not a typo: it is room for
+# the network to keep producing a block every 90 seconds for years, and
+# local-path allocates nothing it does not use.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-nodea-0
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-nodeb-0
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi

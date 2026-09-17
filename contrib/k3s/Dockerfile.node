@@ -1,0 +1,55 @@
+# Runtime image for an experimental P2MR signet node.
+#
+# Carries only the runtime libraries the binaries link against; no compiler,
+# no source, no patches. The binaries come from the build context, which
+# build.sh stages at /work/imgctx/node/bin on the work PVC after a successful
+# build. Build it with:
+#
+#   ./build-image.sh node
+#
+# The base image must stay in step with Dockerfile.builder: binaries built
+# against the glibc of Ubuntu 24.04 will not run on an older one.
+#
+# ZMQ is deliberately absent: build.sh configures Core with -DWITH_ZMQ=OFF,
+# matching apply.sh. If ZMQ notifications are ever enabled, add libzmq5 here.
+
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libevent-2.1-7t64 \
+        libevent-extra-2.1-7t64 \
+        libevent-pthreads-2.1-7t64 \
+        libsqlite3-0 \
+    ; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --gid 10000 bitcoin; \
+    useradd --uid 10000 --gid 10000 --home-dir /data --shell /usr/sbin/nologin bitcoin; \
+    mkdir -p /data; \
+    chown 10000:10000 /data
+
+# bitcoind, bitcoin-cli, bitcoin-tx, bitcoin-util, bitcoin-wallet
+COPY bin/ /usr/local/bin/
+
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/bitcoin*; \
+    if ldd /usr/local/bin/bitcoind | grep -q "not found"; then \
+        echo "bitcoind has unsatisfied shared library dependencies:" >&2; \
+        ldd /usr/local/bin/bitcoind >&2; \
+        exit 1; \
+    fi; \
+    /usr/local/bin/bitcoind -version | head -1
+
+USER 10000:10000
+WORKDIR /data
+VOLUME ["/data"]
+
+# Every node parameter (-signet, -signetchallenge, -datadir, ports, RPC auth)
+# is supplied by the pod spec, so that one image serves every node.
+ENTRYPOINT ["/usr/local/bin/bitcoind"]
+CMD ["-printtoconsole"]

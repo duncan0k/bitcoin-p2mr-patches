@@ -1,0 +1,89 @@
+# Block producer image for the Ark-0 experimental signet.
+#
+# Contents: the same runtime as Dockerfile.node, plus python3, plus the four
+# pieces the producer needs, which stage-miner.sh puts into the build context:
+#
+#   bin/                      bitcoin-cli and bitcoin-util from the built tree
+#   bitcoin/contrib/signet/   the upstream signet miner module
+#   bitcoin/test/functional/  test_framework, which that module imports
+#   demo/                     ark0.py and miner_loop.sh, from ark0/producer/
+#
+# contrib/signet/miner resolves ../../test/functional relative to its own real
+# path, so the two have to keep their relative positions under /opt/ark0.
+#
+# Both producer scripts take every path and the wallet name from the
+# environment, with a workstation default for each, so this image sets the pod
+# layout in the ENV block below and edits neither file. Nothing operator
+# specific is baked in.
+#
+# This does not say FROM p2mr-node because there is no registry for kaniko to
+# pull a locally imported image from; the runtime package list below is
+# therefore a copy of the one in Dockerfile.node and has to be kept in step
+# with it. No bitcoind: a block producer drives a node, it is not one.
+#
+# Neither ark0.py nor miner_loop.sh carries key material; stage-miner.sh checks
+# that before it copies them. The signing key stays in node A's wallet, and the
+# RPC password arrives at runtime from a Secret.
+
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libevent-2.1-7t64 \
+        libevent-extra-2.1-7t64 \
+        libevent-pthreads-2.1-7t64 \
+        python3 \
+    ; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --gid 10000 bitcoin; \
+    useradd --uid 10000 --gid 10000 --home-dir /var/lib/ark0 --shell /usr/sbin/nologin bitcoin; \
+    mkdir -p /var/lib/ark0; \
+    chown 10000:10000 /var/lib/ark0
+
+COPY bin/ /usr/local/bin/
+COPY bitcoin/ /opt/ark0/bitcoin/
+COPY demo/ /opt/ark0/demo/
+COPY miner-entrypoint.sh /opt/ark0/entrypoint.sh
+
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/bitcoin* /opt/ark0/entrypoint.sh /opt/ark0/demo/*.sh; \
+    chmod 0644 /opt/ark0/demo/ark0.py; \
+    for b in /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-util; do \
+        if ldd "$b" | grep -q "not found"; then \
+            echo "$b has unsatisfied shared library dependencies:" >&2; \
+            ldd "$b" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    /usr/local/bin/bitcoin-cli -version | head -1; \
+    python3 -c "import sys; print(sys.version.split()[0])"
+
+# Defaults for the pod layout. The entry point reads these, and ark0.py and
+# miner_loop.sh read them through the substitutions above. Everything a
+# deployment needs to change, it changes here.
+ENV ARK0_HOME=/var/lib/ark0 \
+    ARK0_BIN=/usr/local/bin \
+    ARK0_MINER_PATH=/opt/ark0/bitcoin/contrib/signet/miner \
+    ARK0_PY=/opt/ark0/demo/ark0.py \
+    ARK0_NODE_A=/var/lib/ark0/nodeA \
+    ARK0_NODE_B=/var/lib/ark0/nodeB \
+    ARK0_WALLET=ark0 \
+    ARK0_BLOCK_INTERVAL=90 \
+    ARK0_RPC_HOST_A=ark0-nodea \
+    ARK0_RPC_PORT_A=38432 \
+    ARK0_RPC_HOST_B=ark0-nodeb \
+    ARK0_RPC_PORT_B=38442 \
+    ARK0_CREDENTIALS=/secrets/rpccredentials.conf \
+    ARK0_REWARD_ADDRESS_FILE=/config/reward_address.txt
+
+USER 10000:10000
+WORKDIR /var/lib/ark0
+
+# With no arguments the entry point runs the block producing loop. With
+# arguments it runs them instead, which is how the image is inspected.
+ENTRYPOINT ["/opt/ark0/entrypoint.sh"]

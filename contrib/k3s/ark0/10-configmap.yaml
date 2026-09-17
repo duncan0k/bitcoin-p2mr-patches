@@ -1,0 +1,70 @@
+# Node configuration and the coinbase destination.
+#
+# TEMPLATE. Two values have to be filled in before this is applied, because
+# they belong to one particular network and not to this repository:
+#
+#   REPLACE_WITH_SIGNET_CHALLENGE   the signetchallenge both nodes already run,
+#                                   taken from ~/.ark0/nodeA/bitcoin.conf
+#   REPLACE_WITH_REWARD_ADDRESS     the coinbase destination the producer uses,
+#                                   taken from ~/.ark0/reward_address.txt
+#
+# ARK0-MIGRATION.md step 3 does this with sed and checks that no placeholder
+# survives. Neither value is a secret; the credentials live in Secrets, see
+# README.md in this directory.
+#
+# The configurations differ from the host's only where a pod forces them to:
+# bind and rpcbind move off the loopback, because another pod cannot reach a
+# pod's loopback, and the peer addresses become Service names. The ports, the
+# challenge, txindex and the debug category are unchanged.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ark0-conf
+  namespace: ark0
+  labels:
+    app.kubernetes.io/part-of: ark0
+data:
+  nodea.conf: |
+    # Ark-0 experimental signet -- block producing node A
+    signet=1
+    server=1
+    txindex=1
+    dnsseed=0
+    listenonion=0
+    debug=validation
+
+    [signet]
+    signetchallenge=REPLACE_WITH_SIGNET_CHALLENGE
+    port=38433
+    rpcport=38432
+    listen=1
+    bind=0.0.0.0:38433
+    rpcbind=0.0.0.0
+    rpcallowip=10.42.0.0/16
+    addnode=ark0-nodeb:38443
+    fallbackfee=0.0001
+
+  nodeb.conf: |
+    # Ark-0 experimental signet -- verifying node B
+    signet=1
+    server=1
+    txindex=1
+    dnsseed=0
+    listenonion=0
+    debug=validation
+
+    [signet]
+    signetchallenge=REPLACE_WITH_SIGNET_CHALLENGE
+    port=38443
+    rpcport=38442
+    listen=1
+    bind=0.0.0.0:38443
+    rpcbind=0.0.0.0
+    rpcallowip=10.42.0.0/16
+    connect=ark0-nodea:38433
+    fallbackfee=0.0001
+
+  # ark0.py reads the coinbase destination from $ARK0_HOME/reward_address.txt;
+  # the image's entry point puts this there. An address, not a key.
+  reward_address.txt: |
+    REPLACE_WITH_REWARD_ADDRESS
