@@ -150,7 +150,8 @@ connection does not measure it. A `kubectl exec` that could not start, an image
 without `bash`, a `/dev/tcp` the shell was built without, a node that is not
 listening on the port yet: each of those exits non-zero and says nothing at all
 about the policy. So the denied connection is only worth reading once two
-things have been established from the same run.
+things have been established from the same run, and even then it shows that
+something filtered the path rather than that this file did.
 
 ```bash
 PROBE_NS=<a namespace that is not ark0>
@@ -177,21 +178,47 @@ Read the three together:
 
 | control | listener | probe | what it means |
 |---|---|---|---|
-| 0 | 0 | 124 | **enforced.** The pod can connect, the port accepts connections from inside the namespace, and from outside the packets go nowhere until `timeout` gives up. A dropping policy looks exactly like this. |
-| 0 | 0 | 0 | **not enforced.** The connection went through; the policy is decoration. |
-| 0 | 0 | 1 | **inconclusive.** `bash` was refused rather than left hanging, which a default-deny policy does not usually produce. Read the policy and ask the CNI plugin what it programmed before calling this either way. |
+| 0 | 0 | 124 | **consistent with filtering; enforcement unconfirmed.** The pod can connect, the port accepts connections from inside the namespace, and from outside the packets go nowhere until `timeout` gives up. Something is dropping them. These three readings cannot say it was this file. |
+| 0 | 0 | 0 | **not enforced.** The connection went through, so nothing filtered that path. This is the one reading the probe settles by itself. |
+| 0 | 0 | 1 | **inconclusive.** `bash` was refused rather than left hanging, which a default-deny policy does not usually produce. |
 | non-zero | any | any | **inconclusive.** The probe pod cannot make connections, or has no `bash`, or no `/dev/tcp`. 126 and 127 are that last case. Nothing was tested. |
 | 0 | non-zero | any | **inconclusive.** Nothing is listening on that port, so the probe had nothing to be blocked from. Check the node is up first. |
 
-An image without `/dev/tcp` can use `nc -z -w 5 "$IP" 38432` in all three
-places instead; the readings mean the same thing, except that `nc` reports a
-timeout as 1 rather than 124, which collapses the third row into the fourth.
+**The first row is not a pass, and the reason is worth being exact about.** The
+two controls establish that the probe pod can open connections and that the
+listener accepts them. Neither ties the timeout to `15-networkpolicy.yaml`. A
+probe pod under an egress policy of its own, one that permits DNS and denies
+this namespace, passes the first control and produces the same timeout with
+Ark-0's ingress policy absent entirely. Node B's success in the second control
+would also be unchanged by that absence, because a default-allow cluster lets
+it through anyway. Any of a host firewall, another namespace's policy, a
+service mesh or a CNI default can produce this reading.
 
-On the cluster this network runs on the policy is decoration today:
+So the timeout is the beginning of the case and not the end of it. Declaring
+enforcement needs the rules the CNI actually installed, naming these policies,
+read out of the CNI rather than inferred from a connection that failed. What
+that means depends on the plugin: for kube-router, the policy chains and ipsets
+it programs on the node, visible in `iptables-save` and `ipset list`; for
+Calico or Cilium, that plugin's own policy dump for the pod. If this cluster's
+policies are absent from that output, the timeout came from something else.
+
+An image without `/dev/tcp` can use `nc` instead, keeping each place aimed
+where it was: `nc -z -w 5 "$DNS" 53` for the first control, and
+`nc -z -w 5 "$IP" 38432` for the second and the third. Aiming the first
+control at the port under test would make it a second copy of the denied
+probe and leave nothing controlled. One reading changes: `nc` exits 1 for a
+timeout as well as for a refusal, so the first and third data rows collapse
+into `0/0/1`, and under `nc` that combination is inconclusive rather than
+consistent with filtering. `nc` cannot tell you which of the two happened.
+
+On the cluster this network runs on the policy is decoration today, and that
+conclusion rests on the CNI's own rules rather than on a probe:
 kube-router's policy controller cannot program its ipsets there, so no policy
-chain and no ipset exists and every pod-to-pod path is open. The diagnostic,
-the measurement and what it would take to fix are in `../ARK0-MIGRATION.md`.
-Nothing here should be read as if the file were in force.
+chain and no ipset exists for these policies and every pod-to-pod path is open.
+That is the same kind of evidence enforcement would need, pointing the other
+way. The diagnostic, the measurement and what it would take to fix are in
+`../ARK0-MIGRATION.md`. Nothing here should be read as if the file were in
+force.
 
 ## Running as a normal user, and the one cluster that cannot
 
