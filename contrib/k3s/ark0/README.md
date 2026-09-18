@@ -145,19 +145,53 @@ pod-to-pod traffic across all namespaces by default, and a headless Service
 publishes the pod addresses directly.
 
 The API server accepts a NetworkPolicy whether or not anything implements it,
-so applying the file proves nothing. Verify enforcement from a pod in another
-namespace:
+so applying the file proves nothing. It has to be measured, and one failed
+connection does not measure it. A `kubectl exec` that could not start, an image
+without `bash`, a `/dev/tcp` the shell was built without, a node that is not
+listening on the port yet: each of those exits non-zero and says nothing at all
+about the policy. So the denied connection is only worth reading once two
+things have been established from the same run.
 
 ```bash
+PROBE_NS=<a namespace that is not ark0>
+PROBE_POD=<a pod in it, from an image with bash>
 IP=$(kubectl -n ark0 get pod nodea-0 -o jsonpath='{.status.podIP}')
-kubectl -n <other-namespace> exec <some-pod> -- timeout 5 bash -c "echo > /dev/tcp/$IP/38432"
+K="kubectl -n $PROBE_NS exec $PROBE_POD -- timeout 5"
+
+# 1. Control: can this pod open a TCP connection at all, with this tooling?
+#    Aim it outside ark0, where no policy here has an opinion. Any listener
+#    will do; the cluster DNS Service is one that is always there.
+DNS=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
+$K bash -c "echo > /dev/tcp/$DNS/53"; echo "control: $?"
+
+# 2. Control: is anything accepting connections on the port under test? Ask
+#    from inside ark0, which is what the policy's allow rule is for.
+kubectl -n ark0 exec nodeb-0 -- timeout 5 bash -c "echo > /dev/tcp/$IP/38432"
+echo "listener: $?"
+
+# 3. The measurement.
+$K bash -c "echo > /dev/tcp/$IP/38432"; echo "probe: $?"
 ```
 
-A non-zero exit is enforcement. Success means the connection went through and
-the policy is decoration. On the cluster this network runs on it is decoration
-today: kube-router's policy controller cannot program its ipsets there. The
-diagnostic, the measurement and what it would take to fix are in
-`../ARK0-MIGRATION.md`.
+Read the three together:
+
+| control | listener | probe | what it means |
+|---|---|---|---|
+| 0 | 0 | 124 | **enforced.** The pod can connect, the port accepts connections from inside the namespace, and from outside the packets go nowhere until `timeout` gives up. A dropping policy looks exactly like this. |
+| 0 | 0 | 0 | **not enforced.** The connection went through; the policy is decoration. |
+| 0 | 0 | 1 | **inconclusive.** `bash` was refused rather than left hanging, which a default-deny policy does not usually produce. Read the policy and ask the CNI plugin what it programmed before calling this either way. |
+| non-zero | any | any | **inconclusive.** The probe pod cannot make connections, or has no `bash`, or no `/dev/tcp`. 126 and 127 are that last case. Nothing was tested. |
+| 0 | non-zero | any | **inconclusive.** Nothing is listening on that port, so the probe had nothing to be blocked from. Check the node is up first. |
+
+An image without `/dev/tcp` can use `nc -z -w 5 "$IP" 38432` in all three
+places instead; the readings mean the same thing, except that `nc` reports a
+timeout as 1 rather than 124, which collapses the third row into the fourth.
+
+On the cluster this network runs on the policy is decoration today:
+kube-router's policy controller cannot program its ipsets there, so no policy
+chain and no ipset exists and every pod-to-pod path is open. The diagnostic,
+the measurement and what it would take to fix are in `../ARK0-MIGRATION.md`.
+Nothing here should be read as if the file were in force.
 
 ## Running as a normal user, and the one cluster that cannot
 
