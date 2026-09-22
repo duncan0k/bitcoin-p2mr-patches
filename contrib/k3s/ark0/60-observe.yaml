@@ -103,6 +103,19 @@ data:
     A="bitcoin-cli -conf=/tmp/a.conf -datadir=/tmp"
     B="bitcoin-cli -conf=/tmp/b.conf -datadir=/tmp"
 
+    # A new pod's address reaches the namespace's policy sets a moment after
+    # its container starts (first success 1.8 s after start, measured on
+    # kube-router on 2026-09-22), and until then the nodes refuse it. Wait
+    # once, bounded, for each node, so a run that begins inside that moment
+    # does not record ERR for a node that is up. A node that is really down
+    # costs one timeout and still reads ERR below. -rpcclienttimeout bounds
+    # each attempt, so a filter that drops packets instead of refusing them
+    # cannot hold the wait itself past the Job's deadline. The reads below
+    # keep bitcoin-cli's default client timeout, as before, so under such a
+    # filter the Job would still end without a line.
+    $A -rpcclienttimeout=10 -rpcwait -rpcwaittimeout=20 uptime > /dev/null 2>&1
+    $B -rpcclienttimeout=10 -rpcwait -rpcwaittimeout=20 uptime > /dev/null 2>&1
+
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     hA="$($A getblockcount 2>/dev/null || echo ERR)"
     hB="$($B getblockcount 2>/dev/null || echo ERR)"

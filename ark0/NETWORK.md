@@ -62,7 +62,7 @@ independently reproducible.
 | P2MR activation | buried deployment, active from height 1 |
 | Configured miner cadence | 90 s |
 | Consensus target spacing | 600 s (signet default, unchanged by this series) |
-| `nBits` | `1e0377ae` (difficulty 0.001126515290698186) |
+| `nBits` | `1e0377ae` (difficulty 0.001126515290698186) at the start; the retarget moves it, see below |
 | Node version | `/Satoshi:31.1.0/` (v31.1.0) |
 | Address prefix | `tb1z` (bech32m, witness v2, 32-byte program) |
 | Output type name | `witness_v2_p2mr` |
@@ -73,8 +73,33 @@ producer was told to wait between blocks. The target spacing is the consensus
 parameter `nPowTargetSpacing`, which every signet inherits as ten minutes; the
 patch series does not touch it, and a custom challenge does not change it
 either. Producing blocks faster than the target spacing is what a signet is
-for — the signet solution, not proof of work, gates block production — so the
-two numbers differing is expected and is not a consensus modification.
+for — the signet solution decides who may produce a block, while proof of
+work still paces how fast, as the next paragraph records — so the two
+numbers differing is expected and is not a consensus modification.
+
+What the difference does over time was not written down here until it had
+been observed. Signet keeps Bitcoin's difficulty adjustment: every 2016
+blocks the target is multiplied by the time the last period actually took
+over the time it was expected to take (2016 × 600 s), with that ratio
+clamped to between a quarter and four. While blocks come less than 150 s
+apart on average, as in the first two periods, a period takes less than a
+quarter of the expected time, so the difficulty rises by the full factor of
+four at each retarget; it keeps rising, by less
+each time, until the proof of work on top of the producer's 90 s pause
+brings the average spacing up to 600 s. Observed on this chain (node A,
+2026-09-22):
+
+| Heights | `nBits` | Difficulty | Average spacing |
+|---|---|---|---|
+| 0–4031 | `1e0377ae` | 0.0011 | 94.9 s (over 2016–4031) |
+| 4032–6047 | `1e00ddeb` | 0.0045 | 116.3 s |
+| 6048– | `1d377ac0` | 0.0180 | 168.4 s (over 6048–6295) |
+
+So the `nBits` row above is the starting value, not a constant, and the
+cadence row is the pause the producer keeps, not the spacing the chain
+shows. The next retarget is at height 8064. Any change to how this network
+retargets would be a consensus change; it will be recorded in this file,
+with the height it takes effect at, before that height is reached.
 
 ### On the genesis hash
 

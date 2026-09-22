@@ -144,7 +144,9 @@ The `ip_set_hash_*` modules are present under `/lib/modules` but were not
 loaded, and the iptables `set` match (`xt_set`) is missing as well, which is
 the error that remains after loading them. No policy chain and no ipset was
 ever created, and a cross-namespace connection to the RPC port succeeded
-exactly as before. The policies were removed again, and these were the first
+exactly as before. The policies were removed again (they were applied again
+at 13:20 UTC the same day and stayed in place, unenforced, until the reboot
+described below), and these were the first
 NetworkPolicy objects this cluster had ever been given, so the breakage is
 pre-existing and was merely unobserved.
 
@@ -156,6 +158,15 @@ and rely on RPC authentication and on nothing being published outside the
 cluster. Anyone adopting these manifests on another cluster gets the policy for
 free, and should verify enforcement rather than assume it; the check is in the
 header of `ark0/15-networkpolicy.yaml`.
+
+*Update, 2026-09-22.* The host was rebooted on 2026-09-21 (down 00:41 to
+04:25 UTC) and came back with `ip_set`, `ip_set_hash_ip` and `xt_set` loaded,
+and kube-router has enforced these three policies since; nothing in the
+manifests changed. The evidence, the side effect on the observe and soak jobs
+(in the one measurement taken, a fresh pod was refused for its first 1.8 s, so
+both scripts now wait once for each node) and what it means for reading this
+section are in
+`ark0/README.md`, "Network isolation, and whether your cluster enforces it".
 
 ## Order of work
 

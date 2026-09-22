@@ -180,7 +180,7 @@ Read the three together:
 |---|---|---|---|
 | 0 | 0 | 124 | **consistent with filtering; enforcement unconfirmed.** The pod can connect, the port accepts connections from inside the namespace, and from outside the packets go nowhere until `timeout` gives up. Something is dropping them. These three readings cannot say it was this file. |
 | 0 | 0 | 0 | **not enforced.** The connection went through, so nothing filtered that path. This is the one reading the probe settles by itself. |
-| 0 | 0 | 1 | **inconclusive.** `bash` was refused rather than left hanging, which a default-deny policy does not usually produce. |
+| 0 | 0 | 1 | **consistent with filtering; enforcement unconfirmed.** `bash` was refused rather than left hanging. A plugin that drops denied packets gives the first row instead; kube-router rejects them with an ICMP port-unreachable, so on a kube-router cluster, which is what k3s runs by default, this is the reading enforcement gives. Like the first row, it needs the CNI's own rules to confirm. |
 | non-zero | any | any | **inconclusive.** The probe pod cannot make connections, or has no `bash`, or no `/dev/tcp`. 126 and 127 are that last case. Nothing was tested. |
 | 0 | non-zero | any | **inconclusive.** Nothing is listening on that port, so the probe had nothing to be blocked from. Check the node is up first. |
 
@@ -211,14 +211,36 @@ timeout as well as for a refusal, so the first and third data rows collapse
 into `0/0/1`, and under `nc` that combination is inconclusive rather than
 consistent with filtering. `nc` cannot tell you which of the two happened.
 
-On the cluster this network runs on the policy is decoration today, and that
-conclusion rests on the CNI's own rules rather than on a probe:
-kube-router's policy controller cannot program its ipsets there, so no policy
-chain and no ipset exists for these policies and every pod-to-pod path is open.
-That is the same kind of evidence enforcement would need, pointing the other
-way. The diagnostic, the measurement and what it would take to fix are in
-`../ARK0-MIGRATION.md`. Nothing here should be read as if the file were in
-force.
+On the cluster this network runs on, the policy was decoration until the
+host was rebooted on 2026-09-21 and has been in force since, and both
+conclusions rest on the CNI's own rules rather than on a probe. Before the
+reboot kube-router's policy controller could not program its ipsets there,
+so no policy chain and no ipset existed for these policies and every
+pod-to-pod path was open; the diagnostic is in `../ARK0-MIGRATION.md`.
+Since the reboot the `ip_set`, `ip_set_hash_ip` and `xt_set` modules are
+loaded, and `iptables -S` on the node shows `KUBE-NWPLCY-*` chains naming
+`ark0-nodea-ingress` and `ark0-nodeb-ingress`, matching on `KUBE-SRC-*` and
+`KUBE-DST-*` sets, and one for `ark0-default-deny-ingress`. The probe above,
+run from a pod in another namespace against node A's RPC port, reads
+`0/0/1`. The observe job, whose pod is new every ten minutes, read heights
+and peer counts from both nodes on every run until the host went down and
+from neither on any run after it came back (its later `uptime` fields
+read `ok`, the pod having been admitted by then), which puts the change
+at the reboot. Nothing in
+the manifests changed between the two readings. Whether this file is in
+force is a property of the node, not of the file, and it has to be re-read
+after any host change.
+
+Enforcement has one consequence for pods in this namespace. kube-router adds
+a pod's address to the source sets after the pod starts, and until it has,
+the nodes refuse that pod (kube-router rejects rather than drops, which is
+also why the probe above reads `0/0/1` here and not `0/0/124`). In the one
+measurement taken, from a fresh pod, the first connections failed and the
+first success came 1.8 s after start. A long-running pod never
+notices; a CronJob pod whose script talks to a node in its first second does,
+and that is how it was found, as `ERR` in every observe line and a failed
+soak run after the reboot. `60-observe.yaml` and `70-soak.yaml` therefore
+wait once, bounded, for each node to answer before they read anything.
 
 ## Running as a normal user, and the one cluster that cannot
 

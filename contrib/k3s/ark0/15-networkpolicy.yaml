@@ -46,8 +46,11 @@
 # objects whether or not anything implements them, so on a cluster with no
 # policy controller these files are decoration. k3s ships kube-router's
 # NetworkPolicy controller and enables it unless started with
-# --disable-network-policy; `sudo iptables -L -n | grep KUBE-ROUTER` showing
-# its chains is the check.
+# --disable-network-policy. Its top-level chains (`KUBE-ROUTER-*`) appear as
+# soon as the controller starts, even when it cannot program the ipsets a
+# policy needs, so they prove nothing. The check is `sudo iptables -S | grep
+# KUBE-NWPLCY` listing chains that name these policies; README.md in this
+# directory has the detail.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

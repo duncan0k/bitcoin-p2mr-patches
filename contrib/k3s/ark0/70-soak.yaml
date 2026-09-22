@@ -75,7 +75,13 @@ data:
     AMOUNT = "0.01"
     FEE_RATE = 10                # sat/vB
     INDEX_BASE = 100             # leaves the low indices to hand driven work
-    CONFIRM_TIMEOUT = 420        # seconds; a block is produced every 90
+    CONFIRM_TIMEOUT = 3600       # seconds; a liveness bound, not a cadence estimate.
+                                 # The producer pauses 90 s between blocks, but the
+                                 # proof of work on top of the pause grows with each
+                                 # retarget (see ark0/NETWORK.md) and can approach
+                                 # ten minutes on average. An hour is then exceeded
+                                 # without a stall only rarely (two intervals of a
+                                 # ten-minute average pass it about 1% of the time)
     POLL = 10
 
     # BIP360 control block: one leaf version byte plus 32 bytes per Merkle path
@@ -112,13 +118,29 @@ data:
         cmd += [str(a) for a in args]
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if done.returncode != 0:
-            # Safe to quote back: the credentials are in a file, not here.
-            raise SoakError(str(args[0]) + " failed: " + done.stderr.strip()[:200])
+            # Name the method, not an option that may precede it. Safe to quote
+            # back: the credentials are in a file, not here.
+            method = next((str(a) for a in args if not str(a).startswith("-")),
+                          str(args[0]))
+            raise SoakError(method + " failed: " + done.stderr.strip()[:200])
         return done.stdout.strip()
 
 
     def cli_json(conf, *args, wallet=None):
         return json.loads(cli(conf, *args, wallet=wallet))
+
+
+    def wait_ready():
+        """Wait, bounded, for both nodes to answer at all.
+
+        A new pod's address reaches the namespace's policy sets a moment after
+        its container starts (first success 1.8 s after start, measured on
+        kube-router on 2026-09-22), and until then the nodes refuse it. One
+        refused call fails the round trip, so the first call must not be the
+        one that finds out.
+        """
+        for conf in ("a", "b"):
+            cli(conf, "-rpcclienttimeout=10", "-rpcwait", "-rpcwaittimeout=30", "uptime")
 
 
     def ensure_wallet():
@@ -224,6 +246,7 @@ data:
         A run that funds an output and then fails has to say which output, or
         the coins it left behind cannot be found from the log alone.
         """
+        wait_ready()
         ensure_wallet()
         index = next_index()
         descriptor = soak_descriptor()
@@ -320,8 +343,12 @@ spec:
       # One attempt per schedule. A retry would fund a second output before the
       # first one is accounted for, and the next run is only six hours away.
       backoffLimit: 0
-      # Two confirmations at a 90 second cadence, with room for a slow block.
-      activeDeadlineSeconds: 1200
+      # soak.py bounds three waits by CONFIRM_TIMEOUT (3600 s each: the funding
+      # confirmation, node B's wallet seeing it, the spend confirmation), plus
+      # the readiness wait and the calls between them. The deadline has to
+      # outlast all of that, or the Job is killed before soak.py can log which
+      # output it funded. Still well inside the six-hour schedule.
+      activeDeadlineSeconds: 12000
       template:
         spec:
           restartPolicy: Never
