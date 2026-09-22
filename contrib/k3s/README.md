@@ -28,7 +28,7 @@ built with kaniko to a tarball on the volume and imported with `ctr`.
 | `stage-miner.sh` | assemble the producer image's build context from the built tree and `ark0/producer/` |
 | `build-image.sh` | build one image with kaniko and import it into containerd |
 | `run-build.sh` | start one run, wait for it, print the log tail and the summary |
-| `ARK0-MIGRATION.md` | step by step plan for moving the experimental signet nodes into the cluster, and the records of the two 2026-09-16 runs that followed it |
+| `ARK0-MIGRATION.md` | step by step plan for moving the experimental signet nodes into the cluster, and the records of the runs that followed it |
 | `ark0/` | the manifests that plan applies, with their own README |
 
 `build.yaml` and `kaniko.yaml` are templates: `run-build.sh` and
@@ -140,8 +140,27 @@ FUNCTIONAL_TESTS="wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py w
 contrib/k3s/run-build.sh
 ```
 
+Either one with the retarget spacing patch on top, which is what both Ark-0
+nodes run since 2026-09-22:
+
+```bash
+KUBECTL="sudo k3s kubectl" \
+PATCH_SETS="master spacing" \
+FRESH_CLONE=1 \
+FUNCTIONAL_TESTS="feature_p2mr.py feature_p2mr_signet.py feature_signet.py tool_signet_miner.py p2p_segwit.py" \
+contrib/k3s/run-build.sh
+
+KUBECTL="sudo k3s kubectl" \
+PATCH_SETS="master m05 spacing" \
+FRESH_CLONE=1 \
+RUN_DEFAULT_FUNCTIONAL=1 \
+FUNCTIONAL_TESTS="wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py wallet_p2mr_timelock.py feature_p2mr.py feature_p2mr_signet.py p2p_segwit.py" \
+contrib/k3s/run-build.sh
+```
+
 The patch set names are directories under `/work/patches`, applied in the order
-given. `seed.sh` publishes `patches/` as `master` and `patches-m05/` as `m05`.
+given. `seed.sh` publishes `patches/` as `master`, `patches-m05/` as `m05` and
+`patches-spacing/` as `spacing`.
 
 ## Configuration
 
@@ -184,6 +203,7 @@ compiled; the default build leaves it out, as `apply.sh` does.
 ```
 /work/patches/master/   the 10 consensus patches + SHA256SUMS
 /work/patches/m05/      the 24 M0.5 wallet patches + SHA256SUMS-m05
+/work/patches/spacing/  the retarget spacing patch + SHA256SUMS-spacing
 /work/imgctx/builder/   kaniko context for Dockerfile.builder
 /work/imgctx/node/      kaniko context for Dockerfile.node, bin/ staged by build.sh
 /work/img/              image tarballs, deleted once imported
@@ -234,7 +254,8 @@ pod spec.
 
 The command names no tag, and that is deliberate. There is no single node
 image: Ark-0 runs node A on the ten consensus patches and node B on those plus
-the twenty-four M0.5 wallet patches, so the two need different tags, and getting
+the twenty-four M0.5 wallet patches, each with the retarget spacing patch on top
+since 2026-09-22, so the two need different tags, and getting
 them the wrong way round would put wallet code on the block producing node.
 `build-image.sh` therefore reads the patch sets out of the provenance file and
 derives the suffix from what was actually built and tested:
@@ -243,6 +264,8 @@ derives the suffix from what was actually built and tested:
 |---|---|
 | `master` | `p2mr-node:v31.1-p2mr-m0-<head12>` |
 | `master m05` | `p2mr-node:v31.1-p2mr-m05-<head12>` |
+| `master spacing` | `p2mr-node:v31.1-p2mr-m0-spacing-<head12>` |
+| `master m05 spacing` | `p2mr-node:v31.1-p2mr-m05-spacing-<head12>` |
 
 The `<head12>` suffix is what makes the tag immutable; the next section covers
 it. The series part is what this lookup decides.

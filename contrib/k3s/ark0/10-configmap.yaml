@@ -15,7 +15,10 @@
 # The configurations differ from the host's only where a pod forces them to:
 # bind and rpcbind move off the loopback, because another pod cannot reach a
 # pod's loopback, and the peer addresses become Service names. The ports, the
-# challenge, txindex and the debug category are unchanged.
+# challenge, txindex and the debug category are unchanged. The one line the
+# host never had is signetpowtargetspacing, added on 2026-09-22 for the
+# retargets from height 8064 on; it needs a node image built with
+# patches-spacing/, and an older bitcoind would ignore it with only a warning.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,6 +38,10 @@ data:
 
     [signet]
     signetchallenge=REPLACE_WITH_SIGNET_CHALLENGE
+    # The retargets from height 8064 on measure each period against 90 s per
+    # block rather than 600 s (patches-spacing/, ark0/NETWORK.md). A consensus
+    # rule: both nodes carry the same value, and neither may drop it.
+    signetpowtargetspacing=90@8064
     port=38433
     rpcport=38432
     listen=1
@@ -55,6 +62,10 @@ data:
 
     [signet]
     signetchallenge=REPLACE_WITH_SIGNET_CHALLENGE
+    # The retargets from height 8064 on measure each period against 90 s per
+    # block rather than 600 s (patches-spacing/, ark0/NETWORK.md). A consensus
+    # rule: both nodes carry the same value, and neither may drop it.
+    signetpowtargetspacing=90@8064
     port=38443
     rpcport=38442
     listen=1

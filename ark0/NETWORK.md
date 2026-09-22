@@ -2,7 +2,9 @@
 
 Ark-0 is a private, experimental **custom signet** whose nodes run the BIP-360
 Pay-to-Merkle-Root (P2MR) spending rules, enforced in block validation, on
-Bitcoin Core v31.1 patched with the ten-commit series in `patches/`.
+Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Since
+2026-09-22 both nodes also run the one patch in `patches-spacing/`, which
+sets how the chain retargets from height 8064 on; see "Parameters" below.
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -61,21 +63,25 @@ independently reproducible.
 | Genesis block hash | `00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6` |
 | P2MR activation | buried deployment, active from height 1 |
 | Configured miner cadence | 90 s |
-| Consensus target spacing | 600 s (signet default, unchanged by this series) |
+| Consensus target spacing (`nPowTargetSpacing`) | 600 s (signet default, unchanged) |
+| Retarget target spacing | 600 s up to and including the retarget at 6048; 90 s from the retarget at 8064 on (`-signetpowtargetspacing=90@8064`, `patches-spacing/`) |
 | `nBits` | `1e0377ae` (difficulty 0.001126515290698186) at the start; the retarget moves it, see below |
 | Node version | `/Satoshi:31.1.0/` (v31.1.0) |
 | Address prefix | `tb1z` (bech32m, witness v2, 32-byte program) |
 | Output type name | `witness_v2_p2mr` |
 
-The last two rows are separate things and it is worth not reading one for the
-other. The cadence is an operational choice: the interval this chain's block
-producer was told to wait between blocks. The target spacing is the consensus
-parameter `nPowTargetSpacing`, which every signet inherits as ten minutes; the
-patch series does not touch it, and a custom challenge does not change it
-either. Producing blocks faster than the target spacing is what a signet is
-for — the signet solution decides who may produce a block, while proof of
-work still paces how fast, as the next paragraph records — so the two
-numbers differing is expected and is not a consensus modification.
+The cadence and the two target spacings are separate things, and it is worth
+not reading one for another. The cadence is an operational choice: the
+interval this chain's block producer was told to wait between blocks. The
+consensus target spacing is `nPowTargetSpacing`, which every signet inherits
+as ten minutes; no patch in this repository touches it, and Core still uses
+it for timeouts and estimates. The retarget target spacing is what the
+difficulty adjustment measures each period against: the same 600 s on every
+signet, and on this one 90 s from the retarget at 8064 on. That change, made
+by the patch in `patches-spacing/`, is the one consensus change on this
+network besides P2MR. Producing blocks faster than ten minutes is what a
+signet is for: the signet solution decides who may produce a block, while
+proof of work still paces how fast, as the next paragraphs record.
 
 What the difference does over time was not written down here until it had
 been observed. Signet keeps Bitcoin's difficulty adjustment: every 2016
@@ -97,9 +103,19 @@ brings the average spacing up to 600 s. Observed on this chain (node A,
 
 So the `nBits` row above is the starting value, not a constant, and the
 cadence row is the pause the producer keeps, not the spacing the chain
-shows. The next retarget is at height 8064. Any change to how this network
-retargets would be a consensus change; it will be recorded in this file,
-with the height it takes effect at, before that height is reached.
+shows. Left alone, the retarget at 8064 would have raised the difficulty
+again, and the spacing would have settled at ten minutes.
+
+Instead, both nodes have run with `-signetpowtargetspacing=90@8064` since
+2026-09-22, well before height 8064, so the retargets from 8064 on measure
+each period against 90 s per block (2016 × 90 s = 181,440 s) rather than
+against two weeks. A period that takes longer than that lowers the
+difficulty, by up to a factor of four, back towards `powLimit`, where the
+spacing is the producer's pause plus a moment of proof of work. The retarget
+interval is still 2016 blocks. A node that replays or follows this chain
+past height 8063 needs the patch in `patches-spacing/` and the same option;
+without them it rejects the block at 8064, whose difficulty the two rules
+set differently.
 
 ### On the genesis hash
 

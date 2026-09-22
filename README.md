@@ -13,13 +13,15 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 ## Layout
 
 ```
-patches/         10 git format-patch files, apply in order with git am
-patches-m05/     24 further patches, the M0.5 wallet series (see below)
-SHA256SUMS       checksums of the patches
-SHA256SUMS-m05   checksums of the M0.5 patches
-apply.sh         clone v31.1, verify, apply, build, run the core tests
-ark0/            evidence pack for the experimental custom signet (see below)
-contrib/k3s/     build, test and run the series inside a k3s cluster
+patches/            10 git format-patch files, apply in order with git am
+patches-m05/        24 further patches, the M0.5 wallet series (see below)
+patches-spacing/    1 patch, the retarget spacing Ark-0 uses from height 8064 (see below)
+SHA256SUMS          checksums of the patches
+SHA256SUMS-m05      checksums of the M0.5 patches
+SHA256SUMS-spacing  checksum of the retarget spacing patch
+apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
+ark0/               evidence pack for the experimental custom signet (see below)
+contrib/k3s/        build, test and run the series inside a k3s cluster
 ```
 
 ## Usage
@@ -129,8 +131,9 @@ three rounds (24 patches in total).
 
 It has been exercised on the experimental signet, which is why it is in this tree rather than waiting
 outside it. Since 2026-09-16 the verifying node of the Ark-0 signet runs a build of this series while
-the block producing node runs the consensus series alone, so the two are continuously checked against
-each other on a live chain; a divergence would be the finding. A job every six hours funds a P2MR
+the block producing node runs the consensus series without it, so the two are continuously checked
+against each other on a live chain; a divergence would be the finding. Since 2026-09-22 both also
+carry `patches-spacing/`, described below. A job every six hours funds a P2MR
 address from one node and spends it back from the other through the PSBT flow, asserting the witness
 dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records that roll, the build it came from, and
 the first round trip it produced.
@@ -145,4 +148,39 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
 ```bash
 git format-patch --start-number 11 be23b12..p2mr-m05 -o patches-m05
 (cd patches-m05 && sha256sum -b *.patch) > SHA256SUMS-m05
+```
+
+## Ark-0 retarget spacing (`patches-spacing/`)
+
+One patch, applied on top of `patches/`, with or without `patches-m05/`. It is not part of P2MR. It
+adds `-signetpowtargetspacing=<seconds>[@<height>]`, which makes a custom signet's difficulty
+retargets at or above `<height>` measure each 2016-block period against `<seconds>` per block instead
+of 600. Ark-0's producer pauses 90 s between blocks, and signet's own retarget had been raising the
+difficulty since height 4032, which `ark0/NETWORK.md` records with the numbers. Both Ark-0 nodes run
+the patch with `-signetpowtargetspacing=90@8064`, so the retargets from height 8064 on aim at 90 s
+per block. It is a consensus rule of that network: a node without the patch and the option follows
+Ark-0 up to height 8063 and rejects the block at 8064.
+
+The patch also makes every signet node check at startup that each retarget header in its block index
+has the difficulty its current rule gives it, and refuse to start otherwise, so a node cannot keep
+headers it accepted before the option was added, removed or changed. `doc/signet-target-spacing.md`,
+added by the patch, describes the option and what a running network has to do to adopt it.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-spacing/*.patch
+# or on top of both series
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
+       ../bitcoin-p2mr-patches/patches-spacing/*.patch
+```
+
+Verified on 2026-09-22 in the k3s cluster (`contrib/k3s`), in the two builds the Ark-0 nodes run,
+which `contrib/k3s/ARK0-MIGRATION.md` records: with `patches/`, `test_bitcoin` passed 736 of 742 test
+cases with 5 skipped, and `feature_p2mr`, `feature_p2mr_signet`, `feature_signet`, `tool_signet_miner`
+and `p2p_segwit` passed; with `patches/` and `patches-m05/`, `test_bitcoin` passed 739 of 745 with 5
+skipped, and the default functional suite passed, 273 tests with 17 skipped. The patch is exported
+from a branch of the Core tree based on the last consensus commit `be23b12`:
+
+```bash
+git format-patch --start-number 35 -1 <commit> -o patches-spacing
+(cd patches-spacing && sha256sum -b *.patch) > SHA256SUMS-spacing
 ```

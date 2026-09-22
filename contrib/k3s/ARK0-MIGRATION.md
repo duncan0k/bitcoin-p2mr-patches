@@ -72,15 +72,17 @@ Three images, not two, and the two node builds are not interchangeable:
 
 | Name in the manifests | Built from | Used by |
 |---|---|---|
-| `p2mr-node-m0` | the ten consensus patches | node A, the block producer's chain |
+| `p2mr-node-m0` | the ten consensus patches and the retarget spacing patch | node A, the block producer's chain |
 | `p2mr-node-m05` | those plus the twenty-four M0.5 wallet patches | node B, the verifying node |
 | `p2mr-miner` | the built tree's CLI and the producer scripts | the producer, the probe, the soak job |
 
 Those are names without tags. The tag each one runs is in one place,
 the `images:` block of `ark0/kustomization.yaml`, and it is always an
-immutable tag of the form `p2mr-node:v31.1-p2mr-m05-<head12>`, where the
+immutable tag such as `p2mr-node:v31.1-p2mr-m05-spacing-<head12>`, where the
 suffix is the first twelve hex digits of the commit the build's
-`PROVENANCE.txt` records. `build-image.sh` writes such a tag once and never
+`PROVENANCE.txt` records; the producer's tag, made on 2026-09-16 by aliasing
+the image that was then running, ends in that image's manifest digest instead.
+`build-image.sh` writes such a tag once and never
 moves it, so a tag names one build for good and what a workload runs is a fact
 about that file. The consequence for these commands is that the workload files
 are applied through kustomize; a `kubectl apply -f` on one of them alone asks
@@ -88,7 +90,8 @@ for an image with no tag and gets `p2mr-node-m0:latest`, which does not exist.
 `README.md` in this directory carries the rule; rolling and rolling back are
 below under [Maintenance](#maintenance-every-apply-is-a-producer-start).
 
-The three tags committed in that block are this network's, from 2026-09-16.
+The three tags committed in that block are this network's: the producer's
+from 2026-09-16, the two nodes' from 2026-09-22.
 They are not defaults: a bootstrap elsewhere replaces them with the references
 its own builds print, in step 2 below, before step 5 starts anything.
 
@@ -198,9 +201,14 @@ the network has a problem that migrating will only hide.
 
 ### 2. Build the three images, in this order
 
-All three were built and imported on 2026-09-15, so on this network the step is
-a check rather than work. `contrib/k3s/README.md` covers the machinery; what
-follows is the exact sequence that produces the three tags the manifests name,
+The producer image the manifests name was built and imported on 2026-09-16
+and the two node images on 2026-09-22, so on this network the step is a check
+rather than work. Both node images carry the retarget spacing patch, because
+the chain above height 8063 needs it (`ark0/NETWORK.md`), so the two node
+builds below name `spacing` too; the roll that moved the network onto them is
+recorded at the end of this file. `contrib/k3s/README.md` covers the
+machinery; what follows is the exact sequence that produces the three tags
+the manifests name,
 because an earlier version of this document was not one. It said
 `build-image.sh node` once, which produced `p2mr-node:v31.1-p2mr` -- a tag no
 workload asks for -- and never produced the two that they do.
@@ -221,12 +229,15 @@ cd /path/to/bitcoin-p2mr-patches
 contrib/k3s/seed.sh
 contrib/k3s/build-image.sh builder
 
-# 1. The ten consensus patches -> node A's image.
-PATCH_SETS="master" contrib/k3s/run-build.sh
+# 1. The ten consensus patches and the retarget spacing patch -> node A's image.
+PATCH_SETS="master spacing" \
+FUNCTIONAL_TESTS="feature_p2mr.py feature_p2mr_signet.py feature_signet.py \
+                  tool_signet_miner.py p2p_segwit.py" \
+  contrib/k3s/run-build.sh
 contrib/k3s/build-image.sh node            # last two lines: the reference, then its digest
 
-# 2. Those plus the twenty-four M0.5 wallet patches -> node B's image.
-PATCH_SETS="master m05" FRESH_CLONE=1 RUN_DEFAULT_FUNCTIONAL=1 \
+# 2. The ten, the twenty-four M0.5 wallet patches and the spacing patch -> node B's image.
+PATCH_SETS="master m05 spacing" FRESH_CLONE=1 RUN_DEFAULT_FUNCTIONAL=1 \
 FUNCTIONAL_TESTS="wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py \
                   wallet_p2mr_timelock.py feature_p2mr.py feature_p2mr_signet.py \
                   p2p_segwit.py" \
@@ -257,8 +268,8 @@ and there is nothing else to derive them from afterwards, because a head-suffixe
 reference cannot be guessed from the patch set. Write all six values down:
 
 ```
-p2mr-node:v31.1-p2mr-m0-<head12>     sha256:...     # from build 1
-p2mr-node:v31.1-p2mr-m05-<head12>    sha256:...     # from build 2
+p2mr-node:v31.1-p2mr-m0-spacing-<head12>     sha256:...     # from build 1
+p2mr-node:v31.1-p2mr-m05-spacing-<head12>    sha256:...     # from build 2
 p2mr-miner:v31.1-p2mr-<head12>       sha256:...     # from build 3
 ```
 
@@ -266,8 +277,8 @@ Then put them in the file the workloads read, before step 5 starts anything:
 
 ```bash
 ( cd contrib/k3s/ark0
-  kustomize edit set image p2mr-node-m0=p2mr-node:v31.1-p2mr-m0-<head12>
-  kustomize edit set image p2mr-node-m05=p2mr-node:v31.1-p2mr-m05-<head12>
+  kustomize edit set image p2mr-node-m0=p2mr-node:v31.1-p2mr-m0-spacing-<head12>
+  kustomize edit set image p2mr-node-m05=p2mr-node:v31.1-p2mr-m05-spacing-<head12>
   kustomize edit set image p2mr-miner=p2mr-miner:v31.1-p2mr-<head12> )
 ```
 
@@ -315,14 +326,14 @@ after a switch between two names for one digest is the old one. The spec says
 what is pinned and the `imageID` says what is running.
 
 Two node digests that are equal mean the same build was published twice and
-node B is not running M0.5 at all. Node A's image must be the `-m0` one: the
+node B is not running M0.5 at all. Node A's image must be the `-m0-spacing` one: the
 block producer extends this chain, and a different consensus build would fork
 it. Cross-check its version and series against whatever the chain was produced
 with so far, using the reference recorded above:
 
 ```bash
 sudo k3s kubectl -n p2mr-build run p2mr-node-check-m0 --rm -i --restart=Never \
-  --image=p2mr-node:v31.1-p2mr-m0-<head12> --image-pull-policy=IfNotPresent -- -version
+  --image=p2mr-node:v31.1-p2mr-m0-spacing-<head12> --image-pull-policy=IfNotPresent -- -version
 ```
 
 The producer image carries the copies of `ark0.py` and `miner_loop.sh` from
@@ -710,7 +721,7 @@ $K -n ark0 exec nodeb-0 -- bitcoin-cli -conf=/config/nodeb.conf -datadir=/data g
 #    In a subshell: kustomize edit runs beside the file, and everything else
 #    in this block is relative to the repository root.
 ( cd contrib/k3s/ark0 && kustomize edit set image \
-      p2mr-node-m05=p2mr-node:v31.1-p2mr-m05-<head12> )
+      p2mr-node-m05=p2mr-node:v31.1-p2mr-m05-spacing-<head12> )
 
 # 3. Apply it. The producer is already gone and this declares it at zero, so
 #    the only thing moving is the node.
@@ -2058,3 +2069,161 @@ any workload. `p2mr-node:v31.1-p2mr-m05-running-a97926175af2` and
 build, which is node B's way back one step; `p2mr-miner:v31.1-p2mr-previous`
 and `-pre-release` are the same for the producer. None of them should be
 removed while it is somebody's way back.
+
+## Executed on 2026-09-22 (retarget spacing roll)
+
+Both nodes moved onto builds that also carry `patches-spacing/`, and both now
+run with `-signetpowtargetspacing=90@8064`, so the retargets from height 8064
+on measure each period against 90 s per block. Why, with the numbers, is in
+`ark0/NETWORK.md`. The option is a consensus rule of this network, which is
+why it went onto both nodes in one roll, with the producer stopped, and 1,684
+blocks before the first retarget it changes. Node A stays on the consensus
+series and node B on the M0.5 series; each gained the one patch. Carried out
+between 20:03Z and 20:29Z, following "Rolling a workload onto a new build" and
+the maintenance sequence above.
+
+### The builds
+
+| Run | Patch sets | Job | Result |
+|---|---|---|---|
+| `roll-m0s-0922` | `master spacing`, 11 commits | 20:03:06Z to 20:05:12Z | `test_bitcoin` 736 of 742 passed, 5 skipped; `feature_p2mr_signet`, `feature_p2mr`, `feature_signet`, `tool_signet_miner` and `p2p_segwit` passed |
+| `roll-m05s-0922` | `master m05 spacing`, 35 commits | 20:06:46Z to 20:10:52Z | `test_bitcoin` 739 of 745 passed, 5 skipped; the four `wallet_p2mr*` tests, `feature_p2mr`, `feature_p2mr_signet` and `p2p_segwit` passed; the default functional suite passed, 273 tests, 17 skipped |
+
+Both runs reset the reused source clone to `v31.1` before `git am`, and both
+trees were identified by patch-id as the series they were asked for. `seed.sh`
+published `patches-spacing/` as `spacing` beside the two existing sets. Each
+image answers `-version` with v31.1.0 and lists the new option in `-help`.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0` | `p2mr-node:v31.1-p2mr-m0-spacing-b366cab55464`, new | `sha256:0c9e73ad76112ee0237dd2bee50ef3161d28203aee04cd95b640f63459308388` | `sha256:08ffc8f53be01a5330b087c9a8041121da71dded65c01927e74c54d766a8f034` |
+| `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-b0cf3ef36747`, new | `sha256:cc1f30bb19f7815ba8038639f8908f2c11e34c0fe8e1e4304e6a1b946f4b440d` | `sha256:68b5624d4d39d931bb33fdfb681f10be4320b06e3f8a8e6cb0fb17a4430300f6` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-ed54f802502c`, unchanged | — | — |
+| nothing | `p2mr-node:v31.1-p2mr-m0-b120da303df8`, kept | — | node A's way back, see below |
+| nothing | `p2mr-node:v31.1-p2mr-m05-a64bad420d00`, kept | — | node B's way back |
+
+The kubelet's imageIDs were checked against `crictl inspecti` of the two new
+tags, and match. The producer image was not rebuilt: it takes each block's
+nBits from node A's `getblocktemplate` and grinds with `bitcoin-util`, and
+neither step reads the option.
+
+### The sequence
+
+1. **`render-config.sh --from-live`** rendered the template with its one new
+   setting. The diff against the live ConfigMap was exactly that setting and
+   its three-line comment, once in `nodea.conf` and once in `nodeb.conf`.
+   **`kubectl diff -k` of the maintenance overlay** showed exactly three
+   changes: the producer's `replicas` from 1 to 0 and the two node images.
+2. **The producer was scaled to zero on its own** at 20:14:50Z. Its pod was in
+   the middle of a grind and took until 20:15:23Z to terminate; nothing was
+   applied before it was gone. The tip was then frozen at 6380 on both nodes.
+3. **The rendered ConfigMap was applied, then the maintenance overlay**, at
+   20:15:37Z. Both StatefulSets rolled, and both pods were ready at 20:15:51Z.
+4. **Both nodes logged** `Signet difficulty retargets against 90 s per block
+   from height 8064` at start, and neither logged `Ignoring unknown
+   configuration value`, which is what a node without the patch does with the
+   same configuration. Both loaded the frozen tip, and the startup retarget
+   check found nothing to refuse. `tmr()` still tells the two series apart:
+   node A does not know the descriptor function, and node B rejects a one-leaf
+   tree with the M0.5 explanation.
+5. **The ordinary overlay**, whose diff was only the producer's `replicas` from
+   0 to 1, started the producer at 20:16:55Z.
+
+### Before and after
+
+| | 20:08:23Z, health check | 20:14:53Z, frozen | 20:16:23Z, both nodes on the new images | 20:21:09Z |
+|---|---|---|---|---|
+| block count, both nodes | 6377 | 6380 | 6380 | 6381 |
+| best hash, both | `0000002939db40f44212366d5e5221b78dc018c7112161f7d7d8bdf41238b7df` | `0000001558b52849a1f1628b3d223486ad136062bad860218d912ec8e015c823` | the frozen one | `0000001f32200b22205d653b3efa1092925da71388c168b4b68c360cad8d05e3` |
+| nBits at the tip | `1d377ac0` | `1d377ac0` | `1d377ac0` | `1d377ac0` |
+| chain tips, each node | 1 `active`, 3 `invalid` at 127 | same | same | same |
+| `p2mr`, each node | buried, active, height 1 | same | same | same |
+| connections, each node | 2 | 2 | 1 | 2 |
+| `ark0` wallet txcount on node A | 6451 | 6454 | 6454 | 6455 |
+
+Nothing about the chain moved during the window: both nodes loaded the frozen
+tip hash for hash, and the difficulty at the tip is unchanged, as it has to be,
+because the option changes nothing below height 8064. The single connection
+at 20:16:23Z is the half of the pair that had re-established by then.
+
+### Blocks after the roll
+
+Header times from node A, which are the producer's own.
+
+| height | hash | header time | gap |
+|---|---|---|---|
+| 6380 | `0000001558b52849a1f1628b3d223486ad136062bad860218d912ec8e015c823` | 20:12:17Z | the frozen tip |
+| 6381 | `0000001f32200b22205d653b3efa1092925da71388c168b4b68c360cad8d05e3` | 20:17:12Z | 295 s |
+| 6382 | `00000033f7988a3967e8b708a032891c1fcf8fe94c0e56df4e5c6ac090522afa` | 20:21:20Z | 248 s |
+| 6383 | `00000024242c8c57975d1cd57e8d279fdaa9b0c576ad48a6feb146fdc1c85ea2` | 20:23:13Z | 113 s |
+| 6384 | `0000002861556eee5c69374b0cc1ca74f3ebf3466cf32a32fa414d3a441162ec` | 20:24:48Z | 95 s |
+
+The 295 s gap contains the window: the producer was stopped from 20:14:50Z to
+20:16:55Z, block 6381's header time is when the restarted producer took its
+template, and its grind finished at 20:19:50Z. The gaps after it are the
+current difficulty's, whose average over 6048 to 6295 was 168.4 s. Node B
+carried the same height and hash at every reading.
+
+### The soak
+
+`soak-roll-0922`, funding from node A and spending from node B, both on the new
+builds:
+
+```
+2026-09-22T20:25:46Z | 5fe8d35f35c3e94182af5dffc57b1363bb053e8b0525f0c63fb012a8c99cefa5 | 1f823b24b3e52cc53494d3c1d0a81566d63c441ea2ec9f43762653785e597fb6 | 6385/6386 | ok (index 134, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)
+```
+
+The job finished at 20:29:10Z, the last step of the roll. A manual observe run
+at 20:25:42Z read 6384 on both nodes with the same tip, two connections each,
+and both RPC checks `ok`.
+
+### Where this departed from the plan
+
+Neither build used `FRESH_CLONE=1`, which step 2 gives node B's build and
+`contrib/k3s/README.md` asks of every build whose image is deployed. Both
+reused the source clone on the volume: the tree was reset to `v31.1` before
+`git am`, it was clean, and its patch-ids matched the requested series, which
+is what `series verified: yes` records. That does not show that the bytes the
+compiler read were the ones the check saw, so both series were built again
+afterwards from a fresh clone with the same tests, as `fresh-m0s-0922` and
+`fresh-m05s-0922`. Both passed with the roll builds' counts, and all five
+binaries of each came out byte for byte the same as the roll build's; the
+`bitcoind` each node runs hashes to its roll build's:
+
+| Series | `bitcoind` SHA-256 of the roll build | fresh clone | running |
+|---|---|---|---|
+| `master spacing` | `b2114341dce0a549b183c873bbfcb7f1c3fb57fc43fcb9e883b53753871f4635` | the same | `nodea-0`, the same |
+| `master m05 spacing` | `03289079d911ba173ad993b6eb986ad47c59fd4cb5dbbf372061cd7db3fbaa65` | the same | `nodeb-0`, the same |
+
+The two fresh builds were not imported as images. Like every build that passes,
+each published its binaries to `/work/imgctx/node/bin`, so that context now
+holds the second one's: node B's binaries, under a `PROVENANCE.txt` naming
+`fresh-m05s-0922`.
+
+### What this roll does not show yet
+
+The option changes nothing until the retarget at 8064, expected around
+2026-09-26 at the current spacing. What to check then, on both nodes: that the
+header of block 8064 carries the nBits the 90 s rule gives, which is block
+8063's target multiplied by the time from block 6048 to block 8063 over
+181,440 s, with the usual clamp; that both nodes hold 8064 on their active
+chain, with no `invalid` tip at that height; and that the spacing falls over
+the period that follows.
+
+### Rolling back this roll
+
+Below height 8064 the roll is fully reversible, because the two rules agree on
+every block below it. Stop the producer, set the two node pins back to
+`p2mr-node:v31.1-p2mr-m0-b120da303df8` and
+`p2mr-node:v31.1-p2mr-m05-a64bad420d00`, apply the maintenance overlay, and
+start the producer. The configuration line may stay, since an older bitcoind
+ignores it with a warning, or be removed by rendering a copy of the template
+with the line deleted.
+
+From height 8064 on there is no rollback in that sense. A node on the old rule
+that syncs the chain rejects block 8064, and one rolled back onto an existing
+block index keeps the blocks it has but rejects the next retarget whose
+difficulty the two rules set differently. The option has to stay on both
+nodes.

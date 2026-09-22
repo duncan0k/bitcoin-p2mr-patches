@@ -24,7 +24,8 @@ MINER_IMAGE="${MINER_IMAGE:-p2mr-miner:v31.1-p2mr}"
 
 # There is no single node image. The two nodes deliberately run different
 # builds -- node A the ten consensus patches, node B those plus the twenty-four
-# M0.5 wallet patches -- so one tag cannot name both, and the default used to
+# M0.5 wallet patches, each with the retarget spacing patch on top since
+# 2026-09-22 -- so one tag cannot name both, and the default used to
 # name neither: it was p2mr-node:v31.1-p2mr while the manifests asked for
 # -m0 and -m05, so following the documented commands produced an image no
 # workload would ever pull.
@@ -138,8 +139,10 @@ TABLE
 # mislabel it.
 node_image_for_patch_sets() {
     case "$1" in
-        "master")     printf '%s-m0\n'  "$NODE_IMAGE_BASE" ;;
-        "master m05") printf '%s-m05\n' "$NODE_IMAGE_BASE" ;;
+        "master")             printf '%s-m0\n'          "$NODE_IMAGE_BASE" ;;
+        "master m05")         printf '%s-m05\n'         "$NODE_IMAGE_BASE" ;;
+        "master spacing")     printf '%s-m0-spacing\n'  "$NODE_IMAGE_BASE" ;;
+        "master m05 spacing") printf '%s-m05-spacing\n' "$NODE_IMAGE_BASE" ;;
         *) die "no node image tag is defined for patch sets '$1';" \
                "add one to node_image_for_patch_sets in common.sh" ;;
     esac

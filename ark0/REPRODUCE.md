@@ -22,6 +22,11 @@ That clones `bitcoin/bitcoin` at tag `v31.1` (commit `9be056a`), verifies the
 patch checksums, applies the ten patches in `patches/` with `git am`,
 configures, builds and runs the core tests. The binaries land in `bitcoin/build/bin`.
 
+The snapshot ends at height 1264, below the first retarget that
+`patches-spacing/` changes (8064), so replaying it needs `patches/` alone. A
+node that follows the live chain past height 8063 also needs that patch and
+`-signetpowtargetspacing=90@8064`; `NETWORK.md` explains why.
+
 To build and test inside Kubernetes instead, use `contrib/k3s` on the `infra`
 branch; its README covers the whole flow, including the runtime image
 `p2mr-node:v31.1-p2mr` that the validation run below used.

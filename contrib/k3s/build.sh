@@ -26,6 +26,7 @@
 #   PATCH_SETS             subdirectories of $WORK/patches, in order
 #                          "master" = the 10 consensus patches
 #                          "master m05" = those plus the 24 M0.5 wallet patches
+#                          either, then "spacing" = the retarget spacing patch
 #   FRESH_CLONE            1 = delete and re-clone the source tree first
 #   APPLY_PATCHES          1 = reset to the tag and git am the series
 #                          0 = build whatever is already in the tree
@@ -300,6 +301,8 @@ if tree_is_clean; then
     try_series "$PATCH_SETS"
     try_series "master"
     try_series "master m05"
+    try_series "master spacing"
+    try_series "master m05 spacing"
     if [ "$SERIES_VERIFIED" != "yes" ]; then
         SERIES_NOTE="the $TREE_COMMITS commits over $CORE_TAG match no known patch set"
     fi
