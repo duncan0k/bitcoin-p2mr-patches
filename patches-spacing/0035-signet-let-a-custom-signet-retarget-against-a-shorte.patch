@@ -1,0 +1,682 @@
+From cdc4704d51a79b7022db2e0a414c821163431c2d Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 22 Sep 2026 11:19:15 -0600
+Subject: [PATCH] signet: let a custom signet retarget against a shorter target
+ spacing from a height on
+
+A signet keeps Bitcoin's difficulty adjustment: every 2016 blocks the
+target is multiplied by the time the last period took over the time it
+was expected to take (2016 * 600 s), with that ratio clamped to between
+a quarter and four. A custom signet whose producer runs faster than
+every ten minutes has its difficulty raised at each retarget, by the
+full factor while a period takes under a quarter of two weeks, until the
+proof of work on top of the producer's pause brings the interval back to
+ten minutes. Ark-0 (a block every 90 s plus the grind) went 1e0377ae ->
+1e00ddeb at height 4032 -> 1d377ac0 at 6048, and its average spacing
+from 94.9 s to 168.4 s.
+
+-signetpowtargetspacing=<seconds>[@<height>] makes the retargets at or
+above <height> (default 0) measure each period against <seconds> per
+block (1 to 600) instead. The retarget interval stays 2016 blocks, so
+the change is a different expected timespan and nothing else:
+Consensus::Params gains pow_target_spacing_change and
+PowTargetTimespan(height), and CalculateNextWorkRequired and
+PermittedDifficultyTransition read the timespan through it.
+nPowTargetSpacing stays 600 for everything else that reads it. Every
+other chain, and a signet without the option, keeps nPowTargetTimespan
+everywhere. The option requires -signetchallenge, and the node logs the
+values at startup. The upper bound is 600 because signet's powLimit
+leaves room for the retarget's 256-bit product (old target times up to
+four times the timespan) at 2016 blocks of 600 s and not at 601.
+
+A header is checked when it is first accepted, not when the block index
+is loaded, so a node given the option after it accepted a header at or
+above a retarget the option changes, or one whose option was removed or
+changed later, would keep headers its current rule rejects and could
+follow a chain that a fresh node with the same rule rejects.
+RetargetConflicts() in pow.cpp asks whether a header is a retarget whose
+nBits differs from the one the node's current rule gives it, and on
+every signet CompleteChainstateInitialization asks it of every valid
+header, not only the active chain's, right after the block index is
+loaded: a conflict refuses startup, as the witness redownload check
+does, naming the lowest conflicting height and asking for the setting it
+was accepted under to be restored or for -reindex. On a signet whose
+rule never changed it finds nothing. doc/signet-target-spacing.md
+describes the option and what a running network has to do to adopt it.
+
+Based on the consensus series alone, so it applies on top of it with or
+without the M0.5 wallet series.
+
+Tests: pow_tests checks that no chain has the change by default; that
+powLimit leaves room for the product at 600 s and not at 601; on a
+custom signet with 90@8064, Ark-0's own retarget at 6048 (234,329 s over
+4032..6047: clamped, target / 4 -> 1d377ac0), the same period at the
+change height (target * 234,329 / 181,440 -> 1e011e9b), both clamps at
+the new timespan (1d377ac0 accepted and 1d377abf refused; 1e0377ac
+accepted and 1e0377ad, still below powLimit, refused), saturation at
+powLimit, that 90@8065 changes the retarget at 10080 and not the one at
+8064, and that the target does not move between retargets. A second case
+builds 4033 blocks through GetNextWorkRequired under the old rule and
+under 90@4032 (1e00ddeb and 1e03773d at 4032) and checks that
+RetargetConflicts finds exactly the retarget at 4032 under 90@4032 and
+under 90@0 (whose retarget at 2016 coincides with the old rule's),
+nothing under the rule a chain was built with or under 90@4033, and the
+retarget at 4032 again when the 90@4032 chain is checked with the option
+removed or moved to 4033. feature_p2mr_signet covers the missing
+challenge, malformed values (empty, signs, whitespace, a second '@',
+overflow of either half), values out of range, a negative height, a bare
+option (read as empty), repetition, negation, and a start and restart
+with the option. The startup refusal itself is not covered by a
+functional test: reaching a retarget takes 2016 signet blocks at
+signet's minimum difficulty, which is too slow for the suite.
+---
+ doc/signet-target-spacing.md           |  53 ++++++++
+ src/chainparams.cpp                    |  29 +++++
+ src/chainparamsbase.cpp                |   1 +
+ src/consensus/params.h                 |  26 ++++
+ src/kernel/chainparams.cpp             |   8 ++
+ src/kernel/chainparams.h               |   5 +
+ src/node/chainstate.cpp                |  22 ++++
+ src/pow.cpp                            |  33 +++--
+ src/pow.h                              |  10 ++
+ src/test/pow_tests.cpp                 | 166 +++++++++++++++++++++++++
+ test/functional/feature_p2mr_signet.py |  46 ++++++-
+ 11 files changed, 388 insertions(+), 11 deletions(-)
+ create mode 100644 doc/signet-target-spacing.md
+
+diff --git a/doc/signet-target-spacing.md b/doc/signet-target-spacing.md
+new file mode 100644
+index 0000000..7e779c9
+--- /dev/null
++++ b/doc/signet-target-spacing.md
+@@ -0,0 +1,53 @@
++# Difficulty retargets on a custom signet
++
++A signet keeps Bitcoin's difficulty adjustment. Every 2016 blocks the target is
++multiplied by the time the last period actually took over the time it was
++expected to take (`2016 * nPowTargetSpacing`, two weeks), with that ratio
++clamped to between a quarter and four. A custom signet whose blocks come faster
++than every ten minutes therefore has its difficulty raised at each retarget, by
++the full factor of four while a period takes less than a quarter of two weeks,
++until the proof of work on top of its producer's pause brings the average
++interval back up to ten minutes.
++
++`-signetpowtargetspacing=<seconds>[@<height>]` makes the retargets at or above
++`<height>` (default 0) measure each period against `<seconds>` per block
++instead, from 1 to 600. Nothing else changes: the retarget interval stays 2016
++blocks, the clamp stays a factor of four, and `nPowTargetSpacing` itself, which
++the node also uses for timeouts and estimates, stays 600. A signet that
++produces a block every `<seconds>` then keeps a steady difficulty; one that
++produces faster than that still has it raised. A `<height>` inside a retarget
++period takes effect at the next retarget.
++
++The option requires `-signetchallenge`, and it is a consensus rule of the
++network that uses it:
++
++- Every node must use the same values. A node without them, or with others,
++  computes a different target wherever the two rules differ, and rejects the
++  network's blocks from the first retarget where they do.
++- A network that already exists must give every node the option before the
++  chain reaches the first retarget it changes, the first multiple of 2016 at or
++  above `<height>`. The retargets below it were computed against 600 s and stay
++  valid; the first one it changes has to be produced under it.
++- A signet node checks at startup that every block header it holds at a
++  retarget has the difficulty its current rule gives it. If one does not, it
++  refuses to start, names the lowest such header, and asks for the setting
++  that header was accepted under to be restored or for `-reindex`. That
++  catches a node given the option after it accepted a header at or above the
++  first retarget the option changes (when the two rules differ at that
++  retarget), and one whose option was removed or changed after it accepted
++  headers under it. A header is checked when it is first accepted, not when
++  the block index is loaded, and keeping such a header would let the node
++  follow a chain that a fresh node with the same rule rejects.
++- Removing or changing the option after the network has passed the first
++  retarget it changes takes the node off the network: it refuses to start
++  until the option is restored or the node is reindexed, and after `-reindex`
++  it rejects the network's blocks from the first retarget where the two rules
++  differ.
++
++The node logs `Signet difficulty retargets against N s per block from height H`
++at startup.
++
++The upper bound of 600 is where signet's `powLimit` stops leaving room for the
++retarget's arithmetic: it multiplies the old target by up to four times the
++expected period in 256 bits. At 2016 blocks of 600 s that still fits, and at
++601 s it would not.
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 32c3bff..a9e2cea 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -18,6 +18,7 @@
+ #include <cassert>
+ #include <cstdint>
+ #include <limits>
++#include <optional>
+ #include <stdexcept>
+ #include <vector>
+ 
+@@ -39,6 +40,34 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.challenge.emplace(*val);
+     }
++    if (!args.GetArgs("-signetpowtargetspacing").empty()) {
++        const auto values = args.GetArgs("-signetpowtargetspacing");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetpowtargetspacing cannot be multiple values.");
++        }
++        if (!options.challenge) {
++            throw std::runtime_error("-signetpowtargetspacing requires -signetchallenge.");
++        }
++        const auto& value{values[0]};
++        const auto at{value.find('@')};
++        const auto spacing{ToIntegral<int64_t>(value.substr(0, at))};
++        const auto height{at == std::string::npos ? std::optional<int32_t>{0} : ToIntegral<int32_t>(value.substr(at + 1))};
++        if (!spacing || !height) {
++            throw std::runtime_error(strprintf("-signetpowtargetspacing must be <seconds>[@<height>], not '%s'.", value));
++        }
++        // Not longer than the signet default. The retarget multiplies the old
++        // target by up to four times the expected timespan in 256 bits, and
++        // signet's powLimit leaves room for exactly that at 2016 blocks of 600 s
++        // (sanity_check_chainparams in pow_tests.cpp); 601 s would overflow. The
++        // same bound keeps that factor inside the 32 bits arith_uint256 takes.
++        if (*spacing < 1 || *spacing > 10 * 60) {
++            throw std::runtime_error(strprintf("-signetpowtargetspacing must be between 1 and 600 seconds, not %d.", *spacing));
++        }
++        if (*height < 0) {
++            throw std::runtime_error(strprintf("-signetpowtargetspacing height must not be negative (%s).", value));
++        }
++        options.pow_target_spacing_change.emplace(Consensus::PowTargetSpacingChange{.height = *height, .spacing = *spacing});
++    }
+ }
+ 
+ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& options)
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index 2146d1a..c333ef3 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -23,6 +23,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signet", "Use the signet chain. Equivalent to -chain=signet. Note that the network is defined by the -signetchallenge parameter", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetchallenge", "Blocks must satisfy the given script to be considered valid (only for signet networks; defaults to the global default signet test network challenge)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetseednode", "Specify a seed node for the signet network, in the hostname[:port] format, e.g. sig.net:1234 (may be used multiple times to specify multiple seed nodes; defaults to the global default signet test network seed node(s))", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetpowtargetspacing=<seconds>[@<height>]", "Measure the difficulty retargets at or above <height> (default: 0) against <seconds> per block (1 to 600) instead of the signet default of 600. The retarget interval stays 2016 blocks. This is a consensus rule of the network: every node must use the same values, and must have them before the chain reaches the first retarget they change. Requires -signetchallenge (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+ static std::unique_ptr<CBaseChainParams> globalChainBaseParams;
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index c03a431..5982299 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -13,6 +13,7 @@
+ #include <chrono>
+ #include <limits>
+ #include <map>
++#include <optional>
+ #include <vector>
+ 
+ namespace Consensus {
+@@ -79,6 +80,15 @@ struct BIP9Deployment {
+     static constexpr int64_t NEVER_ACTIVE = -2;
+ };
+ 
++/**
++ * A target spacing that difficulty retargets measure their period against
++ * from a height on; see Params::pow_target_spacing_change.
++ */
++struct PowTargetSpacingChange {
++    int height;
++    int64_t spacing;
++};
++
+ /**
+  * Parameters that influence chain consensus.
+  */
+@@ -128,6 +138,22 @@ struct Params {
+         return std::chrono::seconds{nPowTargetSpacing};
+     }
+     int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
++    /**
++     * A change of the target spacing that difficulty retargets measure their
++     * period against: retargets for blocks at or above `height` use `spacing`
++     * seconds per block instead of nPowTargetSpacing. The retarget interval,
++     * DifficultyAdjustmentInterval(), is not changed by it. Only set on a
++     * signet given -signetpowtargetspacing, which requires -signetchallenge.
++     */
++    std::optional<PowTargetSpacingChange> pow_target_spacing_change{};
++    /** The timespan the retarget for the block at `height` measures against. */
++    int64_t PowTargetTimespan(int64_t height) const
++    {
++        if (pow_target_spacing_change && height >= pow_target_spacing_change->height) {
++            return pow_target_spacing_change->spacing * DifficultyAdjustmentInterval();
++        }
++        return nPowTargetTimespan;
++    }
+     /** The best chain should have at least this much work */
+     uint256 nMinimumChainWork;
+     /** By default assume that the signatures in ancestors of this block are valid */
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 8705aa4..31c1ed6 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -491,6 +491,14 @@ public:
+         consensus.P2MRHeight = options.challenge ? 1 : std::numeric_limits<int>::max();
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
++        // A different target spacing for the retargets from a height on.
++        // ReadSigNetArgs only accepts it together with -signetchallenge.
++        if (options.pow_target_spacing_change) {
++            assert(options.challenge);
++            consensus.pow_target_spacing_change = *options.pow_target_spacing_change;
++            LogInfo("Signet difficulty retargets against %d s per block from height %d",
++                    options.pow_target_spacing_change->spacing, options.pow_target_spacing_change->height);
++        }
+         consensus.fPowAllowMinDifficultyBlocks = false;
+         consensus.enforce_BIP94 = false;
+         consensus.fPowNoRetargeting = false;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index f7209be..0858fbc 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -133,6 +133,11 @@ public:
+     struct SigNetOptions {
+         std::optional<std::vector<uint8_t>> challenge{};
+         std::optional<std::vector<std::string>> seeds{};
++        /**
++         * Target spacing the difficulty retarget measures against from a
++         * height on. Only accepted together with a challenge of its own.
++         */
++        std::optional<Consensus::PowTargetSpacingChange> pow_target_spacing_change{};
+     };
+ 
+     /**
+diff --git a/src/node/chainstate.cpp b/src/node/chainstate.cpp
+index ff3de29..69b7115 100644
+--- a/src/node/chainstate.cpp
++++ b/src/node/chainstate.cpp
+@@ -10,6 +10,7 @@
+ #include <consensus/params.h>
+ #include <kernel/caches.h>
+ #include <node/blockstorage.h>
++#include <pow.h>
+ #include <sync.h>
+ #include <threadsafety.h>
+ #include <tinyformat.h>
+@@ -52,6 +53,27 @@ static ChainstateLoadResult CompleteChainstateInitialization(
+         return {ChainstateLoadStatus::FAILURE_INCOMPATIBLE_DB, _("Incorrect or no genesis block found. Wrong datadir for network?")};
+     }
+ 
++    // A header is checked when it is first accepted, not when the block index is
++    // loaded, and a signet's retarget rule can change between two runs of the same
++    // node (-signetpowtargetspacing added, removed or changed). Keeping a header the
++    // current rule rejects would let the node follow a chain that a fresh node
++    // with the same rule rejects, so a signet asks every valid header, not only
++    // the active chain's: a branch it holds could become the most-work chain later.
++    if (chainman.GetConsensus().signet_blocks) {
++        // Report the lowest one, so the message does not depend on map order.
++        const CBlockIndex* conflict{nullptr};
++        for (const auto& entry : chainman.BlockIndex()) {
++            const CBlockIndex& index{entry.second};
++            if (index.IsValid(BLOCK_VALID_TREE) && RetargetConflicts(index, chainman.GetConsensus()) &&
++                (conflict == nullptr || index.nHeight < conflict->nHeight)) {
++                conflict = &index;
++            }
++        }
++        if (conflict != nullptr) {
++            return {ChainstateLoadStatus::FAILURE, strprintf(_("The block header at height %d does not have the difficulty this node's retarget rule gives it, for example because -signetpowtargetspacing was added, removed or changed after the header was accepted. Restore the setting it was accepted under, or restart with -reindex."), conflict->nHeight)};
++        }
++    }
++
+     // Check for changed -prune state.  What we are concerned about is a user who has pruned blocks
+     // in the past, but is now trying to run unpruned.
+     if (chainman.m_blockman.m_have_pruned && !options.prune) {
+diff --git a/src/pow.cpp b/src/pow.cpp
+index 9a9f4e5..f62e316 100644
+--- a/src/pow.cpp
++++ b/src/pow.cpp
+@@ -52,12 +52,16 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+     if (params.fPowNoRetargeting)
+         return pindexLast->nBits;
+ 
++    // The timespan this retarget measures against; a custom signet may have
++    // changed its target spacing from a height on (pow_target_spacing_change).
++    const int64_t nTargetTimespan = params.PowTargetTimespan(pindexLast->nHeight + 1);
++
+     // Limit adjustment step
+     int64_t nActualTimespan = pindexLast->GetBlockTime() - nFirstBlockTime;
+-    if (nActualTimespan < params.nPowTargetTimespan/4)
+-        nActualTimespan = params.nPowTargetTimespan/4;
+-    if (nActualTimespan > params.nPowTargetTimespan*4)
+-        nActualTimespan = params.nPowTargetTimespan*4;
++    if (nActualTimespan < nTargetTimespan/4)
++        nActualTimespan = nTargetTimespan/4;
++    if (nActualTimespan > nTargetTimespan*4)
++        nActualTimespan = nTargetTimespan*4;
+ 
+     // Retarget
+     const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
+@@ -76,7 +80,7 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
+     }
+ 
+     bnNew *= nActualTimespan;
+-    bnNew /= params.nPowTargetTimespan;
++    bnNew /= nTargetTimespan;
+ 
+     if (bnNew > bnPowLimit)
+         bnNew = bnPowLimit;
+@@ -91,8 +95,9 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
+     if (params.fPowAllowMinDifficultyBlocks) return true;
+ 
+     if (height % params.DifficultyAdjustmentInterval() == 0) {
+-        int64_t smallest_timespan = params.nPowTargetTimespan/4;
+-        int64_t largest_timespan = params.nPowTargetTimespan*4;
++        const int64_t target_timespan = params.PowTargetTimespan(height);
++        int64_t smallest_timespan = target_timespan/4;
++        int64_t largest_timespan = target_timespan*4;
+ 
+         const arith_uint256 pow_limit = UintToArith256(params.powLimit);
+         arith_uint256 observed_new_target;
+@@ -102,7 +107,7 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
+         arith_uint256 largest_difficulty_target;
+         largest_difficulty_target.SetCompact(old_nbits);
+         largest_difficulty_target *= largest_timespan;
+-        largest_difficulty_target /= params.nPowTargetTimespan;
++        largest_difficulty_target /= target_timespan;
+ 
+         if (largest_difficulty_target > pow_limit) {
+             largest_difficulty_target = pow_limit;
+@@ -118,7 +123,7 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
+         arith_uint256 smallest_difficulty_target;
+         smallest_difficulty_target.SetCompact(old_nbits);
+         smallest_difficulty_target *= smallest_timespan;
+-        smallest_difficulty_target /= params.nPowTargetTimespan;
++        smallest_difficulty_target /= target_timespan;
+ 
+         if (smallest_difficulty_target > pow_limit) {
+             smallest_difficulty_target = pow_limit;
+@@ -135,6 +140,16 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
+     return true;
+ }
+ 
++bool RetargetConflicts(const CBlockIndex& index, const Consensus::Params& params)
++{
++    // Without min-difficulty blocks, nBits between retargets has to equal the
++    // parent's under any retarget rule, and the header's first acceptance
++    // checked that, so only a retarget can differ.
++    if (index.pprev == nullptr || index.nHeight % params.DifficultyAdjustmentInterval() != 0) return false;
++    const CBlockHeader header{index.GetBlockHeader()};
++    return index.nBits != GetNextWorkRequired(index.pprev, &header, params);
++}
++
+ // Bypasses the actual proof of work check during fuzz testing with a simplified validation checking whether
+ // the most significant bit of the last byte of the hash is set.
+ bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params& params)
+diff --git a/src/pow.h b/src/pow.h
+index 26004c4..e138f6c 100644
+--- a/src/pow.h
++++ b/src/pow.h
+@@ -47,4 +47,14 @@ bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Par
+  */
+ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits);
+ 
++/**
++ * Return true if `index` is a retarget whose nBits differs from the one the
++ * retarget rule in `params` gives it. A header is checked when it is first
++ * accepted and not again when the block index is loaded, and on a signet the
++ * rule can change between two runs of the same node (-signetpowtargetspacing
++ * added, removed or changed), so this has to be asked at startup. Meant for
++ * chains without min-difficulty blocks, as every signet is.
++ */
++bool RetargetConflicts(const CBlockIndex& index, const Consensus::Params& params);
++
+ #endif // BITCOIN_POW_H
+diff --git a/src/test/pow_tests.cpp b/src/test/pow_tests.cpp
+index f612340..34fa5c6 100644
+--- a/src/test/pow_tests.cpp
++++ b/src/test/pow_tests.cpp
+@@ -2,6 +2,7 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++#include <arith_uint256.h>
+ #include <chain.h>
+ #include <chainparams.h>
+ #include <pow.h>
+@@ -209,4 +210,169 @@ BOOST_AUTO_TEST_CASE(ChainParams_SIGNET_sanity)
+     sanity_check_chainparams(*m_node.args, ChainType::SIGNET);
+ }
+ 
++/** A custom signet (OP_TRUE challenge) whose retargets use `spacing` seconds per block from `height` on */
++static std::unique_ptr<const CChainParams> SigNetWithTargetSpacing(int height, int64_t spacing)
++{
++    CChainParams::SigNetOptions options;
++    options.challenge.emplace(std::vector<uint8_t>{0x51});
++    options.pow_target_spacing_change.emplace(Consensus::PowTargetSpacingChange{.height = height, .spacing = spacing});
++    return CChainParams::SigNet(options);
++}
++
++/* A signet with its own challenge may retarget against a shorter target spacing from a height on */
++BOOST_AUTO_TEST_CASE(get_next_work_signet_target_spacing_change)
++{
++    // No chain has the change by default, so every retarget measures against nPowTargetTimespan.
++    for (const auto chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET, ChainType::REGTEST}) {
++        const auto params = CreateChainParams(*m_node.args, chain);
++        const auto& consensus = params->GetConsensus();
++        BOOST_CHECK(!consensus.pow_target_spacing_change);
++        BOOST_CHECK_EQUAL(consensus.PowTargetTimespan(0), consensus.nPowTargetTimespan);
++        BOOST_CHECK_EQUAL(consensus.PowTargetTimespan(std::numeric_limits<int>::max()), consensus.nPowTargetTimespan);
++    }
++
++    const auto chainParams = SigNetWithTargetSpacing(8064, 90);
++    const auto& consensus = chainParams->GetConsensus();
++    BOOST_CHECK_EQUAL(consensus.DifficultyAdjustmentInterval(), 2016);
++    BOOST_CHECK_EQUAL(consensus.PowTargetTimespan(8063), 14 * 24 * 60 * 60);
++    BOOST_CHECK_EQUAL(consensus.PowTargetTimespan(8064), 90 * 2016);
++
++    // The largest spacing the option accepts leaves room for the retarget's 256-bit product,
++    // powLimit times four times the timespan (as sanity_check_chainparams checks for every
++    // chain), and one second more would not.
++    {
++        const arith_uint256 pow_limit{UintToArith256(consensus.powLimit)};
++        arith_uint256 room{~arith_uint256{}};
++        room /= SigNetWithTargetSpacing(0, 600)->GetConsensus().PowTargetTimespan(0) * 4;
++        BOOST_CHECK(pow_limit < room);
++        arith_uint256 too_little{~arith_uint256{}};
++        too_little /= int64_t{601} * 2016 * 4;
++        BOOST_CHECK(!(pow_limit < too_little));
++    }
++
++    // Ark-0's retarget at 6048: blocks 4032..6047 took 234,329 s. Below the change height the
++    // retarget measures against two weeks, clamps the period to a quarter of that, and shrinks
++    // the target by four.
++    CBlockIndex pindexLast;
++    pindexLast.nHeight = 6047;
++    pindexLast.nTime = 1790051219;
++    pindexLast.nBits = 0x1e00ddeb;
++    const int64_t nFirstBlockTime = 1789816890;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, consensus), 0x1d377ac0U);
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 6048, 0x1e00ddeb, 0x1d377ac0U));
++
++    // The same period at the change height measures against 2016 * 90 s = 181,440 s. It took
++    // longer than that and less than four times as long, so the target grows by
++    // 234,329 / 181,440: 0xddeb * 234,329 / 181,440 = 0x11e9b.2b..., in compact form 0x1e011e9b.
++    pindexLast.nHeight = 8063;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, consensus), 0x1e011e9bU);
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 8064, 0x1e00ddeb, 0x1e011e9bU));
++
++    // A period under a quarter of 181,440 s is clamped to it: the target shrinks by four and a
++    // smaller one is not a permitted transition.
++    pindexLast.nTime = nFirstBlockTime + 45360 - 1;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, consensus), 0x1d377ac0U);
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 8064, 0x1e00ddeb, 0x1d377ac0U));
++    BOOST_CHECK(!PermittedDifficultyTransition(consensus, 8064, 0x1e00ddeb, 0x1d377abfU));
++
++    // A period over four times 181,440 s is clamped the other way: the target grows by four,
++    // and a larger one is not a permitted transition even though it is still below powLimit
++    // (0x1e0377ae).
++    pindexLast.nTime = nFirstBlockTime + 2016 * 1000;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, consensus), 0x1e0377acU);
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 8064, 0x1e00ddeb, 0x1e0377acU));
++    BOOST_CHECK(!PermittedDifficultyTransition(consensus, 8064, 0x1e00ddeb, 0x1e0377adU));
++
++    // At powLimit the target cannot grow, however long the period took.
++    pindexLast.nTime = nFirstBlockTime + 234329;
++    pindexLast.nBits = 0x1e0377ae;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, consensus), 0x1e0377aeU);
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 8064, 0x1e0377ae, 0x1e0377aeU));
++
++    // A change height inside a retarget period takes effect at the next retarget: with 90@8065
++    // the retarget at 8064 still measures against two weeks, the one at 10080 against 181,440 s.
++    const auto late = SigNetWithTargetSpacing(8065, 90);
++    pindexLast.nTime = 1790051219;
++    pindexLast.nBits = 0x1e00ddeb;
++    pindexLast.nHeight = 8063;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, late->GetConsensus()), 0x1d377ac0U);
++    pindexLast.nHeight = 10079;
++    BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nFirstBlockTime, late->GetConsensus()), 0x1e011e9bU);
++
++    // Between retargets the target does not move, before or after the change height.
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 8065, 0x1e011e9bU, 0x1e011e9bU));
++    BOOST_CHECK(!PermittedDifficultyTransition(consensus, 8065, 0x1e011e9bU, 0x1e00ddebU));
++    BOOST_CHECK(PermittedDifficultyTransition(consensus, 6049, 0x1d377ac0U, 0x1d377ac0U));
++    BOOST_CHECK(!PermittedDifficultyTransition(consensus, 6049, 0x1d377ac0U, 0x1e00ddebU));
++}
++
++/**
++ * Fill `blocks` with a signet chain: a genesis block years before the rest, then one block every
++ * 90 s, each with the nBits GetNextWorkRequired gives it under `params`.
++ */
++static void BuildSigNetChain(std::vector<CBlockIndex>& blocks, std::vector<uint256>& hashes, const Consensus::Params& params)
++{
++    for (size_t i = 0; i < blocks.size(); i++) {
++        hashes[i] = ArithToUint256(arith_uint256{i + 1}); // distinct, and never looked up
++        blocks[i].phashBlock = &hashes[i];
++        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
++        blocks[i].nHeight = i;
++        blocks[i].nTime = i ? 1789391179 + i * 90 : 1598918400;
++        blocks[i].BuildSkip();
++        if (i == 0) {
++            blocks[i].nBits = UintToArith256(params.powLimit).GetCompact();
++        } else {
++            const CBlockHeader header{blocks[i].GetBlockHeader()};
++            blocks[i].nBits = GetNextWorkRequired(&blocks[i - 1], &header, params);
++        }
++    }
++}
++
++/* A signet node started under a different retarget rule from the one it accepted headers under finds them */
++BOOST_AUTO_TEST_CASE(retarget_conflicts_after_target_spacing_change)
++{
++    CChainParams::SigNetOptions options;
++    options.challenge.emplace(std::vector<uint8_t>{0x51});
++    const auto old_rule = CChainParams::SigNet(options);
++    const auto new_rule = SigNetWithTargetSpacing(4032, 90);
++    const auto later_rule = SigNetWithTargetSpacing(4033, 90);
++    const auto from_genesis = SigNetWithTargetSpacing(0, 90);
++    const auto conflicts = [](const std::vector<CBlockIndex>& chain, const Consensus::Params& params) {
++        std::vector<int> heights;
++        for (const auto& block : chain) {
++            if (RetargetConflicts(block, params)) heights.push_back(block.nHeight);
++        }
++        return heights;
++    };
++
++    // Built under the old rule, up to and including the retarget at 4032. The retarget at 2016
++    // stays at powLimit (the genesis block is years older); 2015 blocks of 90 s are under a
++    // quarter of two weeks, so the one at 4032 is clamped and quadruples the difficulty.
++    std::vector<uint256> hashes(4033);
++    std::vector<CBlockIndex> blocks(4033);
++    BuildSigNetChain(blocks, hashes, old_rule->GetConsensus());
++    BOOST_CHECK_EQUAL(blocks[2016].nBits, 0x1e0377aeU);
++    BOOST_CHECK_EQUAL(blocks[4032].nBits, 0x1e00ddebU);
++    BOOST_CHECK(conflicts(blocks, old_rule->GetConsensus()).empty());
++    // A node given 90@4032 finds the retarget at 4032 and nothing else. One given 90@0 finds the
++    // same: at 2016 both rules clamp the target to powLimit, so that retarget does not differ.
++    // One given 90@4033 finds nothing, because the first retarget it changes (6048) is not in
++    // this chain.
++    BOOST_CHECK(conflicts(blocks, new_rule->GetConsensus()) == std::vector<int>{4032});
++    BOOST_CHECK(conflicts(blocks, from_genesis->GetConsensus()) == std::vector<int>{4032});
++    BOOST_CHECK(conflicts(blocks, later_rule->GetConsensus()).empty());
++
++    // Built under 90@4032: 2015 blocks of 90 s against 181,440 s shrink powLimit by
++    // 181,350 / 181,440, which is 0x377ae * 181,350 / 181,440 = 0x3773d.47..., compact 0x1e03773d.
++    std::vector<uint256> new_hashes(4033);
++    std::vector<CBlockIndex> new_blocks(4033);
++    BuildSigNetChain(new_blocks, new_hashes, new_rule->GetConsensus());
++    BOOST_CHECK_EQUAL(new_blocks[4032].nBits, 0x1e03773dU);
++    BOOST_CHECK(conflicts(new_blocks, new_rule->GetConsensus()).empty());
++    // A node whose option was removed, or moved to a later height, finds the retarget it
++    // accepted under the option.
++    BOOST_CHECK(conflicts(new_blocks, old_rule->GetConsensus()) == std::vector<int>{4032});
++    BOOST_CHECK(conflicts(new_blocks, later_rule->GetConsensus()) == std::vector<int>{4032});
++}
++
+ BOOST_AUTO_TEST_SUITE_END()
+diff --git a/test/functional/feature_p2mr_signet.py b/test/functional/feature_p2mr_signet.py
+index b5c4ba7..673466e 100755
+--- a/test/functional/feature_p2mr_signet.py
++++ b/test/functional/feature_p2mr_signet.py
+@@ -2,11 +2,13 @@
+ # Copyright (c) 2026 CipherScope
+ # Distributed under the MIT software license, see the accompanying
+ # file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-"""Test the P2MR (BIP 360) activation parameters on signet.
++"""Test the P2MR (BIP 360) activation parameters on signet, and -signetpowtargetspacing.
+ 
+ P2MR is a buried deployment that only activates on custom signets, i.e. when
+ the operator supplies their own -signetchallenge. The default (public) signet
+-keeps it disabled forever.
++keeps it disabled forever. -signetpowtargetspacing, which changes the target
++spacing the difficulty retargets measure against from a height on, is only
++accepted together with -signetchallenge.
+ """
+ 
+ from test_framework.test_framework import BitcoinTestFramework
+@@ -40,6 +42,46 @@ class P2MRSignetTest(BitcoinTestFramework):
+         assert "segwit" in deployments  # sanity: other buried deployments are listed
+         self.log.info("default signet: p2mr never activates")
+ 
++        self.log.info("-signetpowtargetspacing: <seconds>[@<height>], only with a custom challenge")
++        node = self.nodes[0]
++        self.stop_node(0)
++        custom = ["-signetchallenge=51"]
++        node.assert_start_raises_init_error(
++            extra_args=["-signetpowtargetspacing=90"],
++            expected_msg="Error: -signetpowtargetspacing requires -signetchallenge.")
++        for value in ["abc", "", "+90", " 90", "90 ", "90@", "@8064", "90@8064@1", "90@+8064",
++                      "90@2147483648", "99999999999999999999"]:
++            node.assert_start_raises_init_error(
++                extra_args=custom + [f"-signetpowtargetspacing={value}"],
++                expected_msg=f"Error: -signetpowtargetspacing must be <seconds>[@<height>], not '{value}'.")
++        for value, seconds in [("0", 0), ("-90", -90), ("601@8064", 601)]:
++            node.assert_start_raises_init_error(
++                extra_args=custom + [f"-signetpowtargetspacing={value}"],
++                expected_msg=f"Error: -signetpowtargetspacing must be between 1 and 600 seconds, not {seconds}.")
++        node.assert_start_raises_init_error(
++            extra_args=custom + ["-signetpowtargetspacing=90@-1"],
++            expected_msg="Error: -signetpowtargetspacing height must not be negative (90@-1).")
++        node.assert_start_raises_init_error(
++            extra_args=custom + ["-signetpowtargetspacing=90@8064"] * 2,
++            expected_msg="Error: -signetpowtargetspacing cannot be multiple values.")
++        # Given without a value the option reads as empty, not as "1", and is refused like any other
++        # malformed value.
++        node.assert_start_raises_init_error(
++            extra_args=custom + ["-signetpowtargetspacing"],
++            expected_msg="Error: -signetpowtargetspacing must be <seconds>[@<height>], not ''.")
++        node.assert_start_raises_init_error(
++            extra_args=custom + ["-nosignetpowtargetspacing"],
++            expected_msg="Error: Error parsing command line arguments: Negating of -signetpowtargetspacing is meaningless and therefore forbidden")
++        with node.assert_debug_log(["Signet difficulty retargets against 90 s per block from height 8064"]):
++            self.start_node(0, extra_args=custom + ["-signetpowtargetspacing=90@8064"])
++        assert_equal(node.getblockchaininfo()["chain"], "signet")
++        assert_equal(node.getdeploymentinfo()["deployments"]["p2mr"]["height"], 1)
++        # No header at or above a retarget it changes, so the startup check has nothing to refuse,
++        # and a restart with the option is as uneventful as the first start.
++        self.restart_node(0, extra_args=custom + ["-signetpowtargetspacing=90@8064"])
++        assert_equal(node.getblockcount(), 0)
++        self.log.info("custom signet: the target spacing change is accepted and logged")
++
+ 
+ if __name__ == "__main__":
+     P2MRSignetTest(__file__).main()
+-- 
+2.49.0.windows.1
+
