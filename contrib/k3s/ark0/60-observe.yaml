@@ -28,9 +28,10 @@
 # separate claim can be read, rotated or deleted without touching the chain.
 #
 # Each run then hands the log to alert.py, which turns what the newest lines
-# and soak.log say into notifications. It was added on 2026-09-23, after both
-# jobs had failed for 36 hours with nobody told; README.md in this directory
-# lists what it reports and how to connect it.
+# and soak.log say into notifications, and then sends a heartbeat to a monitor
+# outside the cluster. It was added on 2026-09-23, after both jobs had failed
+# for 36 hours with nobody told; README.md in this directory lists what it
+# reports and how to connect it.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -220,6 +221,11 @@ data:
     that cannot take it keeps no state at all. If the evaluation itself fails, a
     line naming the error is posted instead.
 
+    A run that gets to the end, one whose evaluation failed included, then
+    fetches the URL in /alert/heartbeat-url, if there is one. That is a heartbeat
+    for a monitor outside the cluster, which reports when the fetches stop: a
+    host, a cluster or an observe job that is down cannot report itself.
+
     `alert.py --test` posts one line and nothing else, to check the webhook.
     """
 
@@ -236,6 +242,7 @@ data:
     STATE = "/observe/alert-state.json"
     LOCK = "/observe/alert.lock"
     WEBHOOK = "/alert/webhook-url"
+    HEARTBEAT = "/alert/heartbeat-url"
 
     PODS = ("nodea-0", "nodeb-0", "ark0-miner")
     REMIND = 6 * 3600          # repeat a persisting problem this often
@@ -370,26 +377,37 @@ data:
         return found
 
 
+    def secret_url(path):
+        """The https URL held in path: "" when there is none, None when the file cannot be used.
+
+        Both URLs are credentials, so nothing here prints what the file holds.
+        """
+        try:
+            with open(path) as handle:
+                url = handle.read().strip()
+        except FileNotFoundError:
+            return ""
+        except (OSError, ValueError) as error:
+            say("alert: cannot read %s: %s" % (path, type(error).__name__), sys.stderr)
+            return None
+        if url and not url.startswith("https://"):
+            say("alert: %s does not hold an https URL" % path, sys.stderr)
+            return None
+        return url
+
+
     def post(text):
         """True only when the webhook accepted the text. None when there is no webhook to post to.
 
         The URL is a credential, so no path here prints it: errors are reported by
         their class and HTTP status only, since the message of some carries the URL.
         """
-        try:
-            with open(WEBHOOK) as handle:
-                url = handle.read().strip()
-        except FileNotFoundError:
-            url = ""
-        except (OSError, ValueError) as error:
-            say("alert: cannot read %s: %s" % (WEBHOOK, type(error).__name__), sys.stderr)
+        url = secret_url(WEBHOOK)
+        if url is None:
             return False
         if not url:
             say("alert, no webhook configured:\n" + text)
             return None
-        if not url.startswith("https://"):
-            say("alert: %s does not hold an https URL; not posting" % WEBHOOK, sys.stderr)
-            return False
         try:
             req = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
                                          headers={"Content-Type": "application/json"})
@@ -401,6 +419,25 @@ data:
             return False
         say("alert: posted" if ok else "alert: post refused")
         return ok
+
+
+    def heartbeat():
+        """Fetch the heartbeat URL, if there is one. Never raises; like post(), never prints the URL.
+
+        The timeout bounds each network step, not the fetch, so what bounds the
+        fetch is the Job's deadline. It comes after everything else the run does,
+        so a fetch cut off there costs only its own ping.
+        """
+        url = secret_url(HEARTBEAT)
+        if not url:
+            return
+        try:
+            urllib.request.urlopen(url, timeout=10).close()
+        except Exception as error:  # noqa: BLE001
+            say("alert: heartbeat failed: %s %s" % (type(error).__name__, getattr(error, "code", "")),
+                sys.stderr)
+        else:
+            say("alert: heartbeat sent")
 
 
     def load_state(now):
@@ -474,13 +511,16 @@ data:
                 say("alert: evaluation failed: %s" % type(error).__name__, sys.stderr)
                 post("*[ark0] alert.py failed*: %s while evaluating the logs; this may repeat every "
                      "ten minutes" % type(error).__name__)
-                return 0
+                plan = None
             if plan is not None:
                 deliver(plan[0], plan[1], locked)
-            return 0
         finally:
             if lock is not None:
                 lock.close()
+        # Last, and only from a run that got here, so that an error while
+        # delivering, which propagates, stops the heartbeat as well.
+        heartbeat()
+        return 0
 
 
     def open_lock():
@@ -615,13 +655,15 @@ spec:
             - name: observe
               persistentVolumeClaim:
                 claimName: ark0-observe
-            # The webhook alert.py posts to, created by hand (README.md,
-            # "Alerts"). Optional, so the job runs, and alert.py only prints,
-            # on a cluster where it does not exist.
+            # The webhook alert.py posts to and the heartbeat URL it fetches,
+            # created by hand (README.md, "Alerts"). Optional, so the job runs,
+            # and alert.py only prints, on a cluster where it does not exist;
+            # a key the Secret lacks is left out of the volume.
             - name: alert
               secret:
                 secretName: ark0-alert
                 optional: true
                 items:
                   - { key: webhook-url, path: webhook-url }
+                  - { key: heartbeat-url, path: heartbeat-url }
                 defaultMode: 0440

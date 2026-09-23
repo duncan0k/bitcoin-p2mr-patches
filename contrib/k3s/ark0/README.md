@@ -17,7 +17,7 @@ says what each manifest is and what has to be filled in first.
 | `40-statefulset-nodea.yaml` | node A, the block producing node |
 | `41-statefulset-nodeb.yaml` | node B, the verifying node |
 | `50-miner.yaml` | `ark0-miner`, the block producer |
-| `60-observe.yaml` | `ark0-observe`: the ten minute observation probe, its 1Gi volume, its script, `alert.py`, which reports problems in the logs to a webhook, and the ServiceAccount that lets it read the three pod phases |
+| `60-observe.yaml` | `ark0-observe`: the ten minute observation probe, its 1Gi volume, its script, `alert.py`, which reports problems in the logs to a webhook and sends a heartbeat out of the cluster, and the ServiceAccount that lets it read the three pod phases |
 | `70-soak.yaml` | `ark0-soak`: the six hourly M0.5 wallet round trip and its script; it writes `soak.log` to the observation volume |
 
 The numbers are the order to apply them in. Do not apply the directory in one
@@ -204,8 +204,30 @@ kubectl -n ark0 create job alert-test --from=cronjob/ark0-observe --dry-run=clie
 
 What this cannot report is its own absence: with the host or the cluster
 down, or the observe CronJob not running at all, nothing runs `alert.py`.
-Covering that takes something outside the cluster, such as a heartbeat
-service that alerts when the pings stop.
+That takes a monitor outside the cluster. A run that gets to the end, one
+whose evaluation failed included, then fetches the URL in the Secret's
+`heartbeat-url` key, and a heartbeat service alerts when the fetches stop. On
+this cluster that is a check on healthchecks.io which expects a fetch every
+ten minutes and allows 30 minutes' grace, so a stop is reported about 40
+minutes after the last fetch that arrived, through a Slack webhook of its
+own. The heartbeat
+says only that the job runs to the end; that the webhook works is what
+`alert.py --test` checks. The key is optional like the Secret, and a Secret
+without it leaves the job as it was. Its URL is a credential too: it is
+fetched with a plain GET and never printed, and a failed fetch is logged by
+its error class and HTTP status only and made again by the next run. Each
+network step of the fetch may take ten seconds, and it comes after
+everything else the run does, so a fetch slow enough to meet the Job's
+two-minute deadline costs only its own ping and marks that Job failed; a Job
+past its deadline is not retried, so no line is written twice. To add the key
+to the Secret created above, from a file:
+
+```bash
+kubectl -n ark0 patch secret ark0-alert --type merge --patch-file <file holding {"stringData": {"heartbeat-url": "<URL>"}}>
+```
+
+Work that stops the observe CronJob on purpose should pause the heartbeat
+check first, or the check reports it.
 
 ## Network isolation, and whether your cluster enforces it
 

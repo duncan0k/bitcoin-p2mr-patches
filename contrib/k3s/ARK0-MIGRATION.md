@@ -2310,3 +2310,44 @@ observe job still runs `alert.py`, whose posts would then fail certificate
 verification and be retried every run, so if alerts are not wanted either,
 revert `60-observe.yaml` as well, or delete the Secret, which leaves
 `alert.py` printing rather than posting.
+
+## Executed on 2026-09-23 (a heartbeat from outside the cluster)
+
+The alerts of the previous record cannot report their own absence: with the
+host or the cluster down, or the observe CronJob not running, nothing runs
+`alert.py`. A run that gets to the end now fetches a heartbeat URL, and a
+check on healthchecks.io, which expects a fetch every ten minutes and allows
+30 minutes' grace, reports through a Slack webhook of its own when the
+fetches stop (`ark0/README.md`, "Alerts"). A test notification through that
+webhook was delivered before anything in the cluster changed.
+
+The scenario tests, eleven of them new for the heartbeat, pass on Windows
+with a stand-in for `fcntl` (64) and on Linux in the producer image with the
+real one (63), where they also read the current logs: 394 observations, no
+problems.
+
+1. **`kubectl diff -k` of the ordinary overlay** showed two objects: `alert.py`
+   in `ark0-observe-script`, and the `heartbeat-url` item on the `alert`
+   volume of `ark0-observe`. Applied at 04:30:10Z. The two StatefulSets
+   printed `configured`, and the node and producer pods kept their start
+   times and zero restarts.
+2. **Before the Secret had the key**, the scheduled run at 04:40Z started
+   without a mount error, wrote a well-formed line at 6559 and printed no
+   heartbeat line: an item naming a key that an optional Secret lacks is left
+   out of the volume.
+3. **The key was added** to `ark0-alert` at 04:42:00Z with `kubectl patch`,
+   the patch read from standard input, so the URL was on no command line and
+   in no file on the host. The stored value was compared by its hash with the
+   copy it came from.
+4. **The scheduled run at 04:50Z** printed `alert: heartbeat sent`, and the
+   check went from `new` to `up`, with its one ping at 04:50:02Z.
+5. **Review** asked that what bounds the fetch be stated: the timeout bounds
+   each network step, the Job's deadline the whole fetch. The ConfigMap with
+   that docstring was applied at 04:50:29Z, again that object alone, with
+   the pods unchanged. The scheduled run at 05:00Z, the first to use it,
+   sent the check its second ping.
+
+### Rolling back
+
+Remove the `heartbeat-url` key from the Secret, or revert `60-observe.yaml`.
+Pause the check first, or it reports the silence about 40 minutes later.
