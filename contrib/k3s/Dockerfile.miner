@@ -1,7 +1,9 @@
 # Block producer image for the Ark-0 experimental signet.
 #
-# Contents: the same runtime as Dockerfile.node, plus python3, plus the four
-# pieces the producer needs, which stage-miner.sh puts into the build context:
+# Contents: the same runtime as Dockerfile.node, plus python3, plus the CA
+# certificates that alert.py (ark0/60-observe.yaml) needs to post to an HTTPS
+# webhook, plus the four pieces the producer needs, which stage-miner.sh puts
+# into the build context:
 #
 #   bin/                      bitcoin-cli and bitcoin-util from the built tree
 #   bitcoin/contrib/signet/   the upstream signet miner module
@@ -34,6 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         libevent-2.1-7t64 \
         libevent-extra-2.1-7t64 \
         libevent-pthreads-2.1-7t64 \
@@ -61,7 +64,8 @@ RUN set -eux; \
         fi; \
     done; \
     /usr/local/bin/bitcoin-cli -version | head -1; \
-    python3 -c "import sys; print(sys.version.split()[0])"
+    python3 -c "import sys; print(sys.version.split()[0])"; \
+    test -s /etc/ssl/certs/ca-certificates.crt
 
 # Defaults for the pod layout. The entry point reads these, and ark0.py and
 # miner_loop.sh read them through the substitutions above. Everything a

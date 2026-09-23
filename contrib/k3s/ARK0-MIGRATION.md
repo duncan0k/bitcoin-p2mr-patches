@@ -80,9 +80,7 @@ Those are names without tags. The tag each one runs is in one place,
 the `images:` block of `ark0/kustomization.yaml`, and it is always an
 immutable tag such as `p2mr-node:v31.1-p2mr-m05-spacing-<head12>`, where the
 suffix is the first twelve hex digits of the commit the build's
-`PROVENANCE.txt` records; the producer's tag, made on 2026-09-16 by aliasing
-the image that was then running, ends in that image's manifest digest instead.
-`build-image.sh` writes such a tag once and never
+`PROVENANCE.txt` records. `build-image.sh` writes such a tag once and never
 moves it, so a tag names one build for good and what a workload runs is a fact
 about that file. The consequence for these commands is that the workload files
 are applied through kustomize; a `kubectl apply -f` on one of them alone asks
@@ -90,8 +88,8 @@ for an image with no tag and gets `p2mr-node-m0:latest`, which does not exist.
 `README.md` in this directory carries the rule; rolling and rolling back are
 below under [Maintenance](#maintenance-every-apply-is-a-producer-start).
 
-The three tags committed in that block are this network's: the producer's
-from 2026-09-16, the two nodes' from 2026-09-22.
+The three tags committed in that block are this network's: the two nodes'
+from 2026-09-22, the producer's from 2026-09-23.
 They are not defaults: a bootstrap elsewhere replaces them with the references
 its own builds print, in step 2 below, before step 5 starts anything.
 
@@ -201,8 +199,8 @@ the network has a problem that migrating will only hide.
 
 ### 2. Build the three images, in this order
 
-The producer image the manifests name was built and imported on 2026-09-16
-and the two node images on 2026-09-22, so on this network the step is a check
+The two node images the manifests name were built and imported on 2026-09-22
+and the producer image on 2026-09-23, so on this network the step is a check
 rather than work. Both node images carry the retarget spacing patch, because
 the chain above height 8063 needs it (`ark0/NETWORK.md`), so the two node
 builds below name `spacing` too; the roll that moved the network onto them is
@@ -2227,3 +2225,88 @@ that syncs the chain rejects block 8064, and one rolled back onto an existing
 block index keeps the blocks it has but rejects the next retarget whose
 difficulty the two rules set differently. The option has to stay on both
 nodes.
+
+## Executed on 2026-09-23 (the producer image gains CA certificates, for alerts)
+
+On 2026-09-21 a reboot left the observe and soak jobs failing for 36 hours
+before anyone noticed. `ark0/README.md`, "Alerts", describes what reports such
+a failure now: `alert.py`, run by the observe job, posts to an HTTPS webhook.
+The observe job runs the producer image, and that image had no CA
+certificates, so every HTTPS request from it that relied on the system's trust
+store failed certificate verification. (The probe's call to the API server
+names its own CA and was not affected.)
+`Dockerfile.miner` now installs `ca-certificates`, and the producer, the probe
+and the soak job moved onto the rebuilt image. Carried out between 02:12Z and
+02:15Z, following the maintenance sequence above; the two nodes were not
+touched.
+
+### The build
+
+`stage-miner.sh` staged the binaries of `fresh-m05s-0922`, the last passing
+build on the volume (`master m05 spacing`, see the 2026-09-22 record), and
+`build-image.sh miner` built and imported the image:
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-d3ac79467cea`, new | `sha256:e5001ed79a525e3e5dc6676709f9fcc42f515d9ac2dbeb9fca4229915ee98841` | `sha256:4e68de3905cfc1190a8d29b49e698aacbd2dff5d0d0ab7685d9b9956fd3eb19f` |
+| nothing | `p2mr-miner:v31.1-p2mr-ed54f802502c`, kept | — | the producer's way back |
+
+Checked in a throwaway pod before any workload used it: `bitcoin-cli` and
+`bitcoin-util` answer v31.1.0, and `/etc/ssl/certs/ca-certificates.crt` is
+there. `ark0.py`, `miner_loop.sh` and the entry point hash the same as in the
+image it replaces, and so do the upstream miner and `test_framework` taken as
+a set, so the only change to what the producer runs is its two CLI binaries,
+now from the spacing build. The `ARK0_*` environment is unchanged, and an
+HTTPS request to the webhook's host succeeds.
+
+### The sequence
+
+1. **`kubectl diff -k` of the maintenance overlay** showed four objects: the
+   producer's `replicas` from 1 to 0 and its image, the image of both
+   CronJobs, the `alert` volume on `ark0-observe`, and `alert.py` with the
+   corrected `observe.sh` in `ark0-observe-script`.
+2. **The producer was scaled to zero on its own** at 02:13:03Z and was gone at
+   02:13:34Z. Both nodes held 6506,
+   `00000010fa63e007f047fbdbe3f00f27909b84774c0c7d5e5aa11c3c002f020a`.
+3. **The maintenance overlay** at 02:13:46Z. The two StatefulSets printed
+   `configured`, as they do for a rewritten annotation; their generation and
+   revision did not move, and both node pods kept their start times of
+   2026-09-22 20:15Z and zero restarts.
+4. **The ordinary overlay** at 02:14:01Z started the producer on the new
+   image. Its first `getblocktemplate` was refused, as a new pod's connections
+   are for about two seconds until the policy sets list its address
+   (`ark0/README.md`, "Network isolation"); the loop retried after 15 s, and
+   block 6507,
+   `0000001d16f9a5a2cae66c056bd2f33b85f418c48a2499dea4346746bc8b5fec`, has a
+   header time of 02:14:18Z. Node B carried the same tip.
+
+### Checks after the roll
+
+A manual observe run at 02:14:52Z wrote a well-formed line: 6507 on both
+nodes, the same tip, both RPC checks `ok`, three pods ready. `alert.py`, with
+nothing to report, sent nothing. The Secret `ark0-alert` was created by hand
+from an existing Slack incoming webhook, and a Job running `alert.py --test`
+at 02:14:56Z posted its one line. The first scheduled soak on the new image
+is the one at 06:00Z.
+
+Review then changed `alert.py` six times: no path prints the webhook, only
+a post that went through is recorded and the state it leaves is written before
+the post, a missing `soak.log` is reported, the state file is validated before
+use, runs take a lock so that a Job made by hand cannot interleave with a
+scheduled one, a run that cannot take the lock keeps no state, a volume that
+cannot be written no longer stops the alert, a failure of the evaluation
+itself is posted, and a diagnostic that cannot be written changes nothing.
+The ConfigMap was re-applied at 02:45Z, 03:01:49Z, 03:19:26Z, 03:26:41Z,
+03:34:35Z and 03:41:41Z; each time `kubectl diff` showed that object alone,
+and the nodes and the producer kept their pods. Two manual observe runs
+started together at 03:19:27Z both wrote a well-formed line, 6530 on both
+nodes, and sent nothing, and so did one at 03:41:46Z, at 6537.
+
+### Rolling back this roll
+
+Set `p2mr-miner` back to `p2mr-miner:v31.1-p2mr-ed54f802502c` and follow the
+maintenance sequence. The producer and the soak job then run as before. The
+observe job still runs `alert.py`, whose posts would then fail certificate
+verification and be retried every run, so if alerts are not wanted either,
+revert `60-observe.yaml` as well, or delete the Secret, which leaves
+`alert.py` printing rather than posting.

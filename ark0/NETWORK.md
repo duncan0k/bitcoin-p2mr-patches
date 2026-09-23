@@ -179,9 +179,10 @@ the active chain, so a height-ordered export cannot contain them; they ship
 separately as raw hex under `evidence/`, and `REPRODUCE.md` shows how to feed
 them back to a node and read the rejection.
 
-Note that the live chain keeps advancing at 90-second intervals. The snapshot
-is a point-in-time export, not the current tip, and a node restored from it
-will sit at height 1264 with no peers.
+Note that the live chain keeps advancing, with the producer pausing 90 s
+between blocks and the spacing following the difficulty (see "Parameters").
+The snapshot is a point-in-time export, not the current tip, and a node
+restored from it will sit at height 1264 with no peers.
 
 ## Contents of this directory
 

@@ -17,7 +17,7 @@ says what each manifest is and what has to be filled in first.
 | `40-statefulset-nodea.yaml` | node A, the block producing node |
 | `41-statefulset-nodeb.yaml` | node B, the verifying node |
 | `50-miner.yaml` | `ark0-miner`, the block producer |
-| `60-observe.yaml` | `ark0-observe`: the ten minute observation probe, its 1Gi volume, its script, and the ServiceAccount that lets it read the three pod phases |
+| `60-observe.yaml` | `ark0-observe`: the ten minute observation probe, its 1Gi volume, its script, `alert.py`, which reports problems in the logs to a webhook, and the ServiceAccount that lets it read the three pod phases |
 | `70-soak.yaml` | `ark0-soak`: the six hourly M0.5 wallet round trip and its script; it writes `soak.log` to the observation volume |
 
 The numbers are the order to apply them in. Do not apply the directory in one
@@ -135,6 +135,77 @@ is also where the rest of what M0.5 promises is pinned down.
 
 Nothing about that wallet is written down here, because the job reads the
 descriptor back out of it with `listdescriptors` at run time.
+
+## Alerts
+
+Each observe run ends by handing both logs to `alert.py`, from the same
+ConfigMap. It posts the problems it finds in the newest lines to a webhook,
+and says so again when they clear:
+
+| Key | Reported when |
+|---|---|
+| `rpc-A`, `rpc-B` | observe could not read the node, its `uptime` call or its height, in the last two samples |
+| `pod-<name>` | a node or the producer was not Running and ready in the last two samples |
+| `restart-<name>` | its restart count went up within the last hour |
+| `stall` | node A's height has not moved for 30 minutes |
+| `split` | the two nodes were on different tips in the last two samples |
+| `tips` | node A lists more chain tips than an hour earlier: a fork or a rejected block |
+| `soak` | the last line of `soak.log` is a failure, `dims FAIL` included |
+| `soak-stale` | `soak.log` has had no line for ten hours; the job runs every six and may take 3 h 20 min. A missing or empty `soak.log` counts once `observe.log` goes back further than that: the soak job derives its address index from the lines in `soak.log`, so the file is never rotated, and missing or empty means a new volume or a lost log |
+| `observe` | the newest observe line is more than 20 minutes old |
+
+A problem is posted when it appears, again every six hours while any lasts,
+and once more when the last one clears; `/observe/alert-state.json` holds what
+was last delivered, and nothing that was not delivered is recorded. The new
+state is written beside it before each post and put in place only after the
+post went through; if even that cannot be written, the post still goes out
+and says that it may repeat every ten minutes, rather than repeating without
+a word or not going out at all. Delivery is therefore at least once: a run
+that dies between a post and its record, or cannot rename the record into
+place, can repeat that post. Runs take a lock on `/observe/alert.lock`, so a
+Job made by hand from the CronJob waits for a scheduled run instead of
+interleaving with it. On a volume that cannot be written the lock is taken
+through a read-only handle. A run that cannot take the lock at all keeps no
+state: it posts, with the warning that the post may repeat, and records
+nothing. If the evaluation itself fails, for instance because a log cannot be
+read, a line naming the error is posted instead. The two-sample rules ride out a single bad sample, such as a
+pod restarting during planned maintenance. A post that fails is retried by
+the next run, and a failure of `alert.py` never fails the observe run, whose
+retry would append a second line for the same ten minutes.
+
+Replayed against the observe log of 2026-09-21, when a reboot left both jobs
+failing for 36 hours with nobody told, these rules report the three restarts
+from the first run after the host came back, and `rpc-A` and `rpc-B` from the
+second, ten minutes later. The replay reads the log as it was written. Three
+records of that period, all on 2026-09-22, were split in two by the tip-count
+bug this change fixes in `observe.sh`; they are skipped, and the records around
+them carry the same readings.
+
+The webhook is optional; without it `alert.py` prints what it would have sent
+and records nothing, so the first run after the Secret appears posts whatever
+is still wrong. A value that is not an `https://` URL is refused without being
+printed; no path prints the URL.
+It posts one JSON body, `{"text": ...}`, which a Slack incoming webhook takes
+as it is. The URL is a credential, so it lives in a Secret created by hand,
+from a file rather than the command line:
+
+```bash
+kubectl -n ark0 create secret generic ark0-alert --from-file=webhook-url=<file holding the URL>
+```
+
+Check the channel once with a Job made from the CronJob that runs
+`alert.py --test` instead of the probe, which posts one line:
+
+```bash
+kubectl -n ark0 create job alert-test --from=cronjob/ark0-observe --dry-run=client -o json \
+  | python3 -c 'import json, sys; j = json.load(sys.stdin); c = j["spec"]["template"]["spec"]["containers"][0]; c["command"] = ["python3", "/script/alert.py", "--test"]; print(json.dumps(j))' \
+  | kubectl apply -f -
+```
+
+What this cannot report is its own absence: with the host or the cluster
+down, or the observe CronJob not running at all, nothing runs `alert.py`.
+Covering that takes something outside the cluster, such as a heartbeat
+service that alerts when the pings stop.
 
 ## Network isolation, and whether your cluster enforces it
 

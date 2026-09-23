@@ -70,16 +70,15 @@ namespace: ark0
 #
 # The three `newTag` values below are not defaults and are not examples. They
 # are the Ark-0 network's, and they name builds that exist only in that
-# cluster's containerd. The producer's was recorded on 2026-09-16, when the
-# network moved off shared tags, by aliasing the image that was already
-# running, so it ends in the first twelve characters of that image's manifest
-# digest. The two node tags were moved on 2026-09-22 to builds that also carry
-# patches-spacing/, which the chain needs from height 8064 on; they end in the
-# first twelve characters of the commit their builds' PROVENANCE.txt records,
-# and the roll is recorded at the end of ../ARK0-MIGRATION.md, with the tags it
-# moved off. A bootstrap anywhere else replaces all three with the references
-# its own builds printed, before it starts a workload -- step 2 of
-# ../ARK0-MIGRATION.md says where to read them.
+# cluster's containerd. The two node tags were moved on 2026-09-22 to builds
+# that also carry patches-spacing/, which the chain needs from height 8064 on,
+# and the producer's on 2026-09-23 to a build that adds the CA certificates
+# alert.py needs; both rolls are recorded at the end of ../ARK0-MIGRATION.md,
+# with the tags they moved off. Every tag here ends in the first twelve
+# characters of the commit its build's PROVENANCE.txt records. A bootstrap
+# anywhere else replaces all three with the references its own builds printed,
+# before it starts a workload -- step 2 of ../ARK0-MIGRATION.md says where to
+# read them.
 images:
   - name: p2mr-node-m0
     newName: p2mr-node
@@ -89,7 +88,7 @@ images:
     newTag: v31.1-p2mr-m05-spacing-b0cf3ef36747
   - name: p2mr-miner
     newName: p2mr-miner
-    newTag: v31.1-p2mr-ed54f802502c
+    newTag: v31.1-p2mr-d3ac79467cea
 
 resources:
   - 00-namespace.yaml

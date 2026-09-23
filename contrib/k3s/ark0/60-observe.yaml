@@ -26,6 +26,11 @@
 # The log lives on its own 1Gi volume rather than in node A's data directory:
 # a second writer inside a running bitcoind's datadir buys nothing, and a
 # separate claim can be read, rotated or deleted without touching the chain.
+#
+# Each run then hands the log to alert.py, which turns what the newest lines
+# and soak.log say into notifications. It was added on 2026-09-23, after both
+# jobs had failed for 36 hours with nobody told; README.md in this directory
+# lists what it reports and how to connect it.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -119,11 +124,16 @@ data:
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     hA="$($A getblockcount 2>/dev/null || echo ERR)"
     hB="$($B getblockcount 2>/dev/null || echo ERR)"
-    tA="$($A getbestblockhash 2>/dev/null | cut -c1-16 || echo ERR)"
-    tB="$($B getbestblockhash 2>/dev/null | cut -c1-16 || echo ERR)"
+    # Each call's own status decides ERR. A pipeline's status is its last
+    # command's, so `call | cut || echo ERR` wrote an empty field when the call
+    # failed, and `grep -c`, which exits 1 on a count of 0, turned tipsA into
+    # "0", a newline and "ERR", splitting the line in two. Both happened on
+    # 2026-09-21.
+    tA="$($A getbestblockhash 2>/dev/null)" && tA="$(printf '%s' "$tA" | cut -c1-16)" || tA=ERR
+    tB="$($B getbestblockhash 2>/dev/null)" && tB="$(printf '%s' "$tB" | cut -c1-16)" || tB=ERR
     pA="$($A getconnectioncount 2>/dev/null || echo ERR)"
     pB="$($B getconnectioncount 2>/dev/null || echo ERR)"
-    tipsA="$($A getchaintips 2>/dev/null | grep -c '"hash"' || echo ERR)"
+    tipsA="$($A getchaintips 2>/dev/null)" && tipsA="$(printf '%s' "$tipsA" | grep -c '"hash"')" || tipsA=ERR
     mA="$($A getmempoolinfo 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["size"])' 2>/dev/null || echo ERR)"
 
     # An explicit RPC health result for each node, rather than leaving it to be
@@ -187,6 +197,345 @@ data:
     line="$ts | $hA | $hB | $tA | $tB | $pA | $pB | $tipsA | $mA | $phases | $rpcA | $rpcB | $health"
     echo "$line" >> /observe/observe.log
     echo "$line"
+
+    # Its own failure must not fail this run: the Job would be retried and
+    # append a second line for the same ten minutes.
+    python3 /script/alert.py || echo "alert.py exited $?" >&2
+
+  alert.py: |
+    #!/usr/bin/env python3
+    """Turn what observe.log and soak.log say into notifications.
+
+    Runs at the end of every observe run. It reads the last lines of both logs,
+    works out which problems are present now, and posts to the webhook in
+    /alert/webhook-url when that set changes: once when a problem appears, once
+    when the last one clears, and again every six hours while any persists. What
+    it last sent is kept in /observe/alert-state.json, so an unchanged problem is
+    not repeated every ten minutes. Only a post that went through is recorded:
+    without the Secret it prints what it would have sent and records nothing, and a
+    failed post is retried by the next run. Delivery is at least once: a run that
+    dies between a post and its record, or cannot rename the record into place,
+    can repeat that post. Runs take a lock on /observe/alert.lock, so a manual
+    observe Job overlapping the scheduled one waits instead of interleaving; a run
+    that cannot take it keeps no state at all. If the evaluation itself fails, a
+    line naming the error is posted instead.
+
+    `alert.py --test` posts one line and nothing else, to check the webhook.
+    """
+
+    import datetime
+    import fcntl
+    import json
+    import math
+    import os
+    import sys
+    import urllib.request
+
+    OBSERVE_LOG = "/observe/observe.log"
+    SOAK_LOG = "/observe/soak.log"
+    STATE = "/observe/alert-state.json"
+    LOCK = "/observe/alert.lock"
+    WEBHOOK = "/alert/webhook-url"
+
+    PODS = ("nodea-0", "nodeb-0", "ark0-miner")
+    REMIND = 6 * 3600          # repeat a persisting problem this often
+    STALL = 30 * 60            # node A without a new block for this long
+    OBSERVE_STALE = 20 * 60    # the newest observe line older than this
+    SOAK_STALE = 10 * 3600     # soak runs every six hours and may take 3 h 20 min
+    WINDOW = 3600              # restarts and chain tips are compared with an hour ago
+
+
+    def say(message, stream=None):
+        """Write one diagnostic. Failing to write it must not change what is decided or delivered."""
+        try:
+            print(message, file=stream if stream is not None else sys.stdout)
+        except (OSError, ValueError):
+            return
+
+
+    def parse_ts(text):
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+
+
+    def iso(ts):
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+    def tail(path, size=65536):
+        """The last lines of a file, None if it does not exist. A line cut by the seek is dropped."""
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, 2)
+                start = max(0, handle.tell() - size)
+                handle.seek(start)
+                lines = handle.read().decode("utf-8", "replace").splitlines()
+        except FileNotFoundError:
+            return None
+        return lines[1:] if start else lines
+
+
+    def number(text):
+        return int(text) if text.isascii() and text.isdigit() and len(text) < 20 else None
+
+
+    def observations(lines):
+        """The 17-field observe lines, oldest first; shorter or garbled lines are skipped."""
+        out = []
+        for raw in lines:
+            f = [x.strip() for x in raw.split(" | ")]
+            if len(f) < 17:
+                continue
+            try:
+                ts = parse_ts(f[0])
+            except ValueError:
+                continue
+            out.append({
+                "raw": raw, "ts": ts, "hA": number(f[1]), "hB": number(f[2]), "tA": f[3], "tB": f[4],
+                "tips": number(f[7]), "rpc": {"A": f[12], "B": f[13]},
+                "phase": dict(zip(PODS, f[9:12])), "health": dict(zip(PODS, f[14:17])),
+            })
+        return out
+
+
+    def restarts(obs, pod):
+        word = obs["health"][pod].rpartition("restarts:")[2]
+        return number(word)
+
+
+    def at_or_before(obs, ts):
+        """The newest observation taken at or before ts, or None."""
+        older = [o for o in obs if o["ts"] <= ts]
+        return older[-1] if older else None
+
+
+    def problems(obs, soak, now):
+        """{key: message} for everything wrong now. Two-sample rules ride out a single bad sample."""
+        found = {}
+        if not obs:
+            return {"observe": "observe.log has no readable line"}
+        cur = obs[-1]
+        if now - cur["ts"] > OBSERVE_STALE:
+            found["observe"] = "observe.log has had no new line since " + iso(cur["ts"])
+        last2 = obs[-2:] if len(obs) >= 2 else []
+
+        # A node counts as unreadable when its uptime call failed or its height did
+        # not come back. On 2026-09-21 the heights read ERR while uptime, called a
+        # moment later, read ok, so uptime alone would have missed exactly that.
+        for node, height in (("A", "hA"), ("B", "hB")):
+            if last2 and all(o["rpc"][node] != "ok" or o[height] is None for o in last2):
+                found["rpc-" + node] = "observe could not read node %s in the last two samples (rpc %s, height %s)" % (
+                    node, cur["rpc"][node], "ERR" if cur[height] is None else cur[height])
+        for pod in PODS:
+            if last2 and all(o["phase"][pod] != "Running" or not o["health"][pod].startswith("ready:yes")
+                             for o in last2):
+                found["pod-" + pod] = "%s is %s, %s, in the last two samples" % (
+                    pod, cur["phase"][pod], cur["health"][pod])
+        then = at_or_before(obs, cur["ts"] - WINDOW)
+        if then is not None:
+            for pod in PODS:
+                before, after = restarts(then, pod), restarts(cur, pod)
+                if before is not None and after is not None and after > before:
+                    found["restart-" + pod] = "%s restarted %d time(s) since %s" % (
+                        pod, after - before, iso(then["ts"]))
+            if then["tips"] is not None and cur["tips"] is not None and cur["tips"] > then["tips"]:
+                found["tips"] = "node A lists %d chain tips, %d an hour earlier: a fork or a rejected block" % (
+                    cur["tips"], then["tips"])
+
+        ref = at_or_before(obs, cur["ts"] - STALL)
+        if ref is not None and cur["hA"] is not None and ref["hA"] is not None and cur["hA"] <= ref["hA"]:
+            found["stall"] = "node A has been at height %d since %s or earlier" % (cur["hA"], iso(ref["ts"]))
+        if last2 and all(o["hA"] is not None and o["hB"] is not None and o["tA"] != o["tB"] for o in last2):
+            found["split"] = "the nodes are on different tips in the last two samples: A %d %s, B %d %s" % (
+                cur["hA"], cur["tA"], cur["hB"], cur["tB"])
+
+        if soak:
+            f = [x.strip() for x in soak[-1].split(" | ")]
+            try:
+                soak_ts = parse_ts(f[0])
+            except ValueError:
+                soak_ts = None
+            result = " | ".join(f[4:]) if len(f) >= 5 else soak[-1]
+            if len(f) < 5 or soak_ts is None or not result.startswith("ok") or "dims FAIL" in result:
+                found["soak"] = "the last soak round trip failed: " + soak[-1][:200]
+            elif now - soak_ts > SOAK_STALE:
+                found["soak-stale"] = "no soak round trip since " + iso(soak_ts)
+        elif now - obs[0]["ts"] > SOAK_STALE:
+            # No soak line at all, while observe has been writing for longer than
+            # a soak run may take. soak.log is never rotated: the soak job takes
+            # its address index from the number of lines in it, so rotating it
+            # would reuse addresses. A missing or empty soak.log is therefore a
+            # new volume whose soak job has never written, or a lost log.
+            found["soak-stale"] = "soak.log has no line, and observe.log goes back to " + iso(obs[0]["ts"])
+        return found
+
+
+    def post(text):
+        """True only when the webhook accepted the text. None when there is no webhook to post to.
+
+        The URL is a credential, so no path here prints it: errors are reported by
+        their class and HTTP status only, since the message of some carries the URL.
+        """
+        try:
+            with open(WEBHOOK) as handle:
+                url = handle.read().strip()
+        except FileNotFoundError:
+            url = ""
+        except (OSError, ValueError) as error:
+            say("alert: cannot read %s: %s" % (WEBHOOK, type(error).__name__), sys.stderr)
+            return False
+        if not url:
+            say("alert, no webhook configured:\n" + text)
+            return None
+        if not url.startswith("https://"):
+            say("alert: %s does not hold an https URL; not posting" % WEBHOOK, sys.stderr)
+            return False
+        try:
+            req = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                ok = 200 <= response.status < 300
+        except Exception as error:  # noqa: BLE001
+            say("alert: post failed: %s %s" % (type(error).__name__, getattr(error, "code", "")),
+                sys.stderr)
+            return False
+        say("alert: posted" if ok else "alert: post refused")
+        return ok
+
+
+    def load_state(now):
+        try:
+            with open(STATE) as handle:
+                state = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(state, dict):
+            return {}
+        firing = state.get("firing")
+        return {
+            "firing": {str(k): str(v) for k, v in firing.items()} if isinstance(firing, dict) else {},
+            "sent": timestamp(state.get("sent"), now),
+        }
+
+
+    def timestamp(value, now):
+        """A finite Unix time no later than this run (five minutes of clock skew allowed), or 0."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        try:
+            value = float(value)
+        except OverflowError:
+            return 0
+        return value if math.isfinite(value) and 0 <= value <= now + 300 else 0
+
+
+    def stage_state(state):
+        """Write the state a delivery would leave behind, before posting. False if it cannot be written."""
+        try:
+            with open(STATE + ".next", "w") as handle:
+                json.dump(state, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return True
+        except OSError as error:
+            say("alert: cannot write %s.next: %s" % (STATE, type(error).__name__), sys.stderr)
+            return False
+
+
+    def main(argv, now=None):
+        if argv[1:] == ["--test"]:
+            return 0 if post("*[ark0] alert channel test*: posted by hand to check the webhook") else 1
+        if now is None:
+            now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        # From reading the state to recording the post, one run at a time.
+        # Scheduled runs never overlap (the CronJob forbids it), but a Job made
+        # by hand from the CronJob can. A volume that cannot be written must not
+        # stop the alert that says so: the lock is then taken through a read-only
+        # handle, or skipped, and staging, which fails on such a volume, adds the
+        # warning that the post may repeat.
+        # A run without the lock keeps no state: it may not stage or promote, or
+        # it could record another run's undelivered state as its own.
+        lock = open_lock()
+        try:
+            locked = False
+            if lock is not None:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    locked = True
+                except OSError as error:
+                    say("alert: cannot lock %s: %s; keeping no state" % (LOCK, type(error).__name__),
+                        sys.stderr)
+            try:
+                plan = decide(now)
+            except Exception as error:  # noqa: BLE001
+                # Alerting that breaks has to say so where the alerts go. This covers
+                # the decision only, so nothing after a post can be reported as a
+                # failed evaluation. The class only: a message can carry a path.
+                say("alert: evaluation failed: %s" % type(error).__name__, sys.stderr)
+                post("*[ark0] alert.py failed*: %s while evaluating the logs; this may repeat every "
+                     "ten minutes" % type(error).__name__)
+                return 0
+            if plan is not None:
+                deliver(plan[0], plan[1], locked)
+            return 0
+        finally:
+            if lock is not None:
+                lock.close()
+
+
+    def open_lock():
+        """The lock file, opened for flock, which needs no write access. None if it cannot be opened."""
+        failure = None
+        for mode in ("a", "r"):
+            try:
+                return open(LOCK, mode)
+            except OSError as error:
+                failure = error
+        say("alert: cannot open %s: %s; keeping no state" % (LOCK, type(failure).__name__), sys.stderr)
+        return None
+
+
+    def decide(now):
+        """The lines to post and the state that posting them leaves, or None when nothing changed."""
+        obs = observations(tail(OBSERVE_LOG) or [])
+        found = problems(obs, tail(SOAK_LOG), now)
+        state = load_state(now)
+        firing = state.get("firing", {})
+        new = sorted(k for k in found if k not in firing)
+        gone = sorted(k for k in firing if k not in found)
+        due = bool(found) and now - state.get("sent", 0) >= REMIND
+        if not new and not gone and not due:
+            return None
+        if found:
+            lines = ["*[ark0] %d problem%s*" % (len(found), "" if len(found) == 1 else "s")]
+            lines += ["- %s%s: %s" % ("NEW " if k in new else "", k, found[k]) for k in sorted(found)]
+        else:
+            lines = ["*[ark0] all clear*"]
+        if gone:
+            lines.append("resolved: " + ", ".join(gone))
+        if obs:
+            lines.append("latest: `" + obs[-1]["raw"] + "`")
+        return lines, {"firing": {k: firing.get(k, iso(now)) for k in found}, "sent": now if found else 0}
+
+
+    def deliver(lines, state, locked):
+        """Post the lines and, holding the lock, record the state they leave."""
+        # Staged first, so that when the state cannot be written the post says it
+        # may repeat, instead of going out every ten minutes with no explanation.
+        # A rename that fails after the post, or a run that dies between the two,
+        # can still repeat it once more: delivery is at least once.
+        staged = locked and stage_state(state)
+        if not staged:
+            lines.append("(alert.py cannot keep its state, so this may repeat every ten minutes)")
+        if post("\n".join(lines)) is True and staged:
+            try:
+                os.replace(STATE + ".next", STATE)
+            except OSError as error:
+                say("alert: cannot replace %s: %s" % (STATE, type(error).__name__), sys.stderr)
+
+
+    if __name__ == "__main__":
+        sys.exit(main(sys.argv))
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -247,6 +596,7 @@ spec:
                 - { name: script, mountPath: /script, readOnly: true }
                 - { name: secrets, mountPath: /secrets, readOnly: true }
                 - { name: observe, mountPath: /observe }
+                - { name: alert, mountPath: /alert, readOnly: true }
           volumes:
             - name: script
               configMap:
@@ -265,3 +615,13 @@ spec:
             - name: observe
               persistentVolumeClaim:
                 claimName: ark0-observe
+            # The webhook alert.py posts to, created by hand (README.md,
+            # "Alerts"). Optional, so the job runs, and alert.py only prints,
+            # on a cluster where it does not exist.
+            - name: alert
+              secret:
+                secretName: ark0-alert
+                optional: true
+                items:
+                  - { key: webhook-url, path: webhook-url }
+                defaultMode: 0440
