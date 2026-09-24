@@ -3,8 +3,8 @@
 This walks an outside reader from an unmodified machine to a node that has
 replayed the whole Ark-0 chain, decoded the P2MR spend at height 123, and
 watched its own node reject the three malformed blocks. No network access to
-Ark-0 is needed, and none is offered: everything comes from the snapshot and
-the evidence files in this directory.
+Ark-0 is needed: everything comes from the snapshot and the evidence files in
+this directory. To follow the live chain instead, see `JOIN.md`.
 
 Every expected value below was produced by running these exact steps against
 `snapshot/ark0-blocks-1264.dat` on a freshly built node with an empty data

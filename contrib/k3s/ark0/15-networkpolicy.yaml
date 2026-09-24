@@ -30,10 +30,12 @@
 # them correctly unreachable and no allow rule names them.
 #
 # Egress is deliberately unrestricted, and this is the one loosening worth
-# stating plainly. Closing it would need rules for DNS, for the API server that
-# the observation probe reads pod phases from, and for the node ports above,
-# and would buy little while ingress is already closed: these pods initiate
-# nothing but RPC to each other and one HTTPS call to the API server. If that
+# stating plainly. Closing it would need rules for DNS, for the API server
+# that the observation probe reads pod phases from, and for the node ports
+# above, and would buy little while ingress is already closed: these pods
+# initiate P2P and RPC to each other, an HTTPS call to the API server, the
+# observation job's alert webhook and heartbeat over HTTPS, and, from both
+# nodes, a P2P connection to the network's public node (ark0/JOIN.md). If that
 # changes, egress is the next thing to close.
 #
 # Two things a NetworkPolicy does not cover, so that nobody reads more into it:

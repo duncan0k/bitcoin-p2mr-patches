@@ -1,15 +1,18 @@
 # Ark-0
 
-Ark-0 is a private, experimental **custom signet** whose nodes run the BIP-360
+Ark-0 is an experimental **custom signet** whose nodes run the BIP-360
 Pay-to-Merkle-Root (P2MR) spending rules, enforced in block validation, on
-Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Since
-2026-09-22 both nodes also run the one patch in `patches-spacing/`, which
-sets how the chain retargets from height 8064 on; see "Parameters" below.
+Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Every
+node the operator runs also carries the one patch in `patches-spacing/` (the
+first two since 2026-09-22), which sets how the chain retargets from height
+8064 on; see "Parameters" below.
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
 anyone rebuild the node, replay the chain offline and re-derive every claim
-below without contacting the network.
+below without contacting the network. Since 2026-09-24 the network also has
+one public node, and [`JOIN.md`](JOIN.md) describes how to follow the live
+chain with a node of your own.
 
 ## What it is
 
@@ -26,9 +29,10 @@ below without contacting the network.
 - **Not mainnet and not the public signet.** The patch series sets `P2MRHeight`
   to `INT_MAX` on mainnet, testnet3, testnet4 and the default signet, so the
   deployment never activates there and `getdeploymentinfo` does not list it.
-- **Not a public network.** There is no published endpoint, seed node, faucet
-  or explorer at this stage. The snapshot in `snapshot/` is the only
-  distribution channel for its blocks.
+- **Not an open network in the usual sense.** Anyone can run a node and follow
+  it (`JOIN.md`), but every block is produced by one party, the operator, who
+  holds the key of the 1-of-1 challenge. There is one public node, and no
+  faucet or explorer. The chain may be reset, and its coins are worthless.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
   signed with Schnorr over secp256k1. No post-quantum signature scheme is
@@ -182,7 +186,8 @@ them back to a node and read the rejection.
 Note that the live chain keeps advancing, with the producer pausing 90 s
 between blocks and the spacing following the difficulty (see "Parameters").
 The snapshot is a point-in-time export, not the current tip, and a node
-restored from it will sit at height 1264 with no peers.
+restored from it will sit at height 1264 with no peers. To follow the live
+chain instead, see `JOIN.md`.
 
 ## Contents of this directory
 
@@ -190,6 +195,7 @@ restored from it will sit at height 1264 with no peers.
 |---|---|
 | `NETWORK.md` | this file |
 | `REPRODUCE.md` | step-by-step reproduction, with the output each step produced |
+| `JOIN.md` | how to build a node, connect it to the public node and follow the live chain |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
 | `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks |

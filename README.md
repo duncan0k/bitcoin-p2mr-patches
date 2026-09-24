@@ -20,7 +20,7 @@ SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
-ark0/               evidence pack for the experimental custom signet (see below)
+ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
 ```
 
@@ -94,8 +94,9 @@ validation only after activation.
 `ark0/` holds what an outside reader needs to check the custom-signet claims offline: the network
 parameters (`NETWORK.md`); the confirmed P2MR spend and the three rejected blocks as raw hex, with the
 node responses they produced (`evidence/`); a block file covering genesis to height 1264 that a fresh
-patched node replays with `-loadblock` (`snapshot/`); and the step-by-step `REPRODUCE.md`. The network
-itself has no public endpoint; the pack is the way to verify it.
+patched node replays with `-loadblock` (`snapshot/`); and the step-by-step `REPRODUCE.md`. Since
+2026-09-24 the network also has one public node: `ark0/JOIN.md` says how to build a node, connect
+it and follow the live chain. Every block is still produced by the operator alone.
 
 ## Follow-up series: M0.5 wallet support (`patches-m05/`)
 
@@ -156,9 +157,9 @@ One patch, applied on top of `patches/`, with or without `patches-m05/`. It is n
 adds `-signetpowtargetspacing=<seconds>[@<height>]`, which makes a custom signet's difficulty
 retargets at or above `<height>` measure each 2016-block period against `<seconds>` per block instead
 of 600. Ark-0's producer pauses 90 s between blocks, and signet's own retarget had been raising the
-difficulty since height 4032, which `ark0/NETWORK.md` records with the numbers. Both Ark-0 nodes run
-the patch with `-signetpowtargetspacing=90@8064`, so the retargets from height 8064 on aim at 90 s
-per block. It is a consensus rule of that network: a node without the patch and the option follows
+difficulty since height 4032, which `ark0/NETWORK.md` records with the numbers. Every Ark-0 node the
+operator runs, the public one included, carries the patch with `-signetpowtargetspacing=90@8064`, so
+the retargets from height 8064 on aim at 90 s per block. It is a consensus rule of that network: a node without the patch and the option follows
 Ark-0 up to height 8063 and rejects the block at 8064.
 
 The patch also makes every signet node check at startup that each retarget header in its block index

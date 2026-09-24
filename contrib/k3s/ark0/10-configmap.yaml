@@ -15,10 +15,11 @@
 # The configurations differ from the host's only where a pod forces them to:
 # bind and rpcbind move off the loopback, because another pod cannot reach a
 # pod's loopback, and the peer addresses become Service names. The ports, the
-# challenge, txindex and the debug category are unchanged. The one line the
-# host never had is signetpowtargetspacing, added on 2026-09-22 for the
-# retargets from height 8064 on; it needs a node image built with
-# patches-spacing/, and an older bitcoind would ignore it with only a warning.
+# challenge, txindex and the debug category are unchanged. Two lines the host
+# never had: signetpowtargetspacing, added on 2026-09-22 for the retargets from
+# height 8064 on (it needs a node image built with patches-spacing/, and an
+# older bitcoind would ignore it with only a warning), and, since 2026-09-24,
+# the addnode line for the network's public node (ark0/JOIN.md).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -49,6 +50,8 @@ data:
     rpcbind=0.0.0.0
     rpcallowip=10.42.0.0/16
     addnode=ark0-nodeb:38443
+    # The public node (ark0/JOIN.md), which this node keeps a connection to.
+    addnode=ark0-node.cipherscope.io:38433
     fallbackfee=0.0001
 
   nodeb.conf: |
@@ -73,6 +76,8 @@ data:
     rpcbind=0.0.0.0
     rpcallowip=10.42.0.0/16
     connect=ark0-nodea:38433
+    # The public node (ark0/JOIN.md), too; -connect leaves added nodes alone.
+    addnode=ark0-node.cipherscope.io:38433
     fallbackfee=0.0001
 
   # ark0.py reads the coinbase destination from $ARK0_HOME/reward_address.txt;
