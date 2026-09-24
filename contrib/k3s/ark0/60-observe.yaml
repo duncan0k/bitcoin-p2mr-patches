@@ -586,8 +586,11 @@ metadata:
     app.kubernetes.io/part-of: ark0
     app.kubernetes.io/component: observe
 spec:
-  # Every ten minutes, as the host crontab line did.
-  schedule: "*/10 * * * *"
+  # Every ten minutes, as the host crontab line did, but at five past rather
+  # than on the ten-minute mark. A run lasts a few seconds; anything else on the
+  # cluster that lists pods on the mark would catch this one starting or
+  # finishing, running but not yet or no longer ready, and report it.
+  schedule: "5-59/10 * * * *"
   # A run that overruns must not be joined by the next one: the log is appended
   # to by one writer at a time.
   concurrencyPolicy: Forbid

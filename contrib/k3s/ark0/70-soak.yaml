@@ -330,8 +330,10 @@ metadata:
     app.kubernetes.io/component: soak
 spec:
   # Every six hours. More often would not find more: what is being watched is a
-  # build, not a race, and each run costs two blocks of waiting.
-  schedule: "0 */6 * * *"
+  # build, not a race, and each run costs two blocks of waiting. At seven past
+  # the hour, so that the run at least starts off the ten-minute mark (see
+  # 60-observe.yaml); it ends whenever its blocks arrive.
+  schedule: "7 */6 * * *"
   # One writer to soak.log at a time, and never two round trips funding from
   # the same wallet at once.
   concurrencyPolicy: Forbid
