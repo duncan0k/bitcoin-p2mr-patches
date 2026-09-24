@@ -32,8 +32,8 @@ chain with a node of your own.
 - **Not an open network in the usual sense.** Anyone can run a node and follow
   it (`JOIN.md`), but every block is produced by one party, the operator, who
   holds the key of the 1-of-1 challenge. There is one public node, and a block
-  explorer and a faucet, all run by the operator. The chain may be reset, and its
-  coins are worthless.
+  explorer and a faucet, all run by the operator. It is a test network for
+  trying things out, and it may be reset at any time.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
   signed with Schnorr over secp256k1. No post-quantum signature scheme is

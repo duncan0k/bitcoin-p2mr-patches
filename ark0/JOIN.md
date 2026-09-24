@@ -9,8 +9,7 @@ Before you start:
 - **One party produces every block.** The signet challenge is a 1-of-1 multisig and only the
   operator holds the key. Your node verifies every block but cannot produce one. Ark-0 is not
   a decentralized network.
-- **The coins are worthless, and the chain may be reset.** The operator does not redeem,
-  exchange or reward them, and joining earns nothing.
+- **It is a test network for trying things out.** It may be reset at any time.
 - **The explorer and the faucet are the operator's too.** A block explorer at
   <https://ark0-explorer.cipherscope.io> shows blocks and transactions, with P2MR spends taken
   apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
