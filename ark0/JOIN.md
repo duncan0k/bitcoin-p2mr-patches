@@ -118,10 +118,11 @@ chain.
 This needs a node built with `patches-m05/` as well (section 1). If yours was built without it,
 rebuild it in the `bitcoin/` clone from section 1: run `git am --abort` if an earlier `git am`
 stopped halfway, then `git reset --hard v31.1` (it discards any change of your own in that clone),
-check `patches-m05/` as section 1 shows, and run the `git am` line with all three sets and
-`cmake --build build -j"$(nproc)"`. Then stop the node with `./build/bin/bitcoin-cli stop`, wait
-until it has exited, and start it again with `./build/bin/bitcoind -daemonwait` (both with your
-`-datadir`, if you use one); it keeps its chain.
+check `patches-m05/` from there with
+`(cd ../bitcoin-p2mr-patches/patches-m05 && sha256sum -c ../SHA256SUMS-m05)`, and run the `git am`
+line with all three sets and `cmake --build build -j"$(nproc)"`. Then stop the node with
+`./build/bin/bitcoin-cli stop`, wait until it has exited, and start it again with
+`./build/bin/bitcoind -daemonwait` (both with your `-datadir`, if you use one); it keeps its chain.
 
 BIP 360 defines no descriptor, so the wallet series adds a provisional one, `tmr()`: the tree
 syntax of `tr()` without an internal key (`doc/p2mr.md` in the patched tree has the details). The
@@ -184,8 +185,11 @@ could see it: keep this wallet for Ark-0 test coins.
   give the same addresses.
 - **`listdescriptors` shows `xprv` rather than `tprv`, or the wallet never sees the faucet's
   coin:** `cli` may be talking to another Bitcoin Core on this machine. Use the `-datadir` form of
-  `cli()`; on the other node, `unloadwallet p2mr false` unloads the wallet created there and keeps it
-  from loading at startup.
+  `cli()` and run section 4 again from `createwallet` on. The wallet made on the other node keeps
+  its keys there, and the new wallet has other addresses: a coin the faucet already sent can only be
+  spent with the old keys, so claim again for the new address once 24 hours have passed. On the
+  other node, `unloadwallet p2mr false` unloads the wallet created there and keeps it from loading
+  at startup.
 - **`sendtoaddress` says `Insufficient funds`:** check `cli -rpcwallet=p2mr getbalances`. If the
   coin is still `untrusted_pending`, wait for the next block.
 - Report problems as issues on this repository.
