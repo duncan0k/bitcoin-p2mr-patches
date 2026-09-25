@@ -79,7 +79,8 @@ validation only after activation.
 ## Out of scope / wording
 
 - No post-quantum signatures, and no activation on mainnet or the public signet. These two hold for
-  everything in this repository.
+  everything in this repository. The Ark-0 network adds one experimental post-quantum signature check
+  from height 8600, whose series is not in this repository yet (`ark0/NETWORK.md`).
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
   is a separate series applying on top.

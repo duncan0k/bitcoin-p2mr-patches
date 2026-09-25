@@ -13,10 +13,12 @@ Before you start:
 - **The explorer and the faucet are the operator's too.** A block explorer at
   <https://ark0-explorer.cipherscope.io> shows blocks and transactions, with P2MR spends taken
   apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
-  (section 4). You need neither of them to follow the chain or to check its rules.
-- **Rule changes are announced in this repository before they apply.** The next one planned
-  (milestone M1) is a soft fork: a node without it keeps following the chain but does not
-  enforce the new rule. A new challenge would be a new network, and everyone would start again.
+  (section 4). You need neither of them to follow the chain or to check its P2MR rules.
+- **Rule changes are announced in this repository before they apply.** The next one, milestone
+  M1, applies from height 8600 ("Rule change at height 8600 (M1)" in `NETWORK.md`). It is a soft
+  fork: a node built from this repository keeps following the chain past that height, but does
+  not enforce the new rule and does not relay the spends that use it. A new challenge would be a
+  new network, and everyone would start again.
 
 ## 1. Build the node
 

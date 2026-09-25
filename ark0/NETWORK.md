@@ -10,9 +10,10 @@ first two since 2026-09-22), which sets how the chain retargets from height
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
 anyone rebuild the node, replay the chain offline and re-derive every claim
-below without contacting the network. Since 2026-09-24 the network also has
-one public node, and [`JOIN.md`](JOIN.md) describes how to follow the live
-chain with a node of your own.
+below without contacting the network, apart from the rule change at height
+8600, whose patch series is not in this repository yet. Since 2026-09-24 the
+network also has one public node, and [`JOIN.md`](JOIN.md) describes how to
+follow the live chain with a node of your own.
 
 ## What it is
 
@@ -38,6 +39,11 @@ chain with a node of your own.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
   signed with Schnorr over secp256k1. No post-quantum signature scheme is
   implemented, used, or validated anywhere in this series.
+- **One experimental exception from height 8600 (M1).** From that height the
+  operator's nodes also check one post-quantum signature scheme, ML-DSA-44,
+  in outputs that opt into it. Blocks are still authorized by the classical
+  signet challenge, and outputs that do not opt in are unchanged. See "Rule
+  change at height 8600 (M1)" below.
 
 ### What the evidence does not prove
 
@@ -55,6 +61,51 @@ Running chain or not, this material does **not** establish that Ark-0 is:
 Describe it as: an experimental signet implementing the BIP-360 v0.12.1 P2MR
 spending rules on Bitcoin Core v31.1, enforced at block validation,
 independently reproducible.
+
+## Rule change at height 8600 (M1)
+
+From height 8600 the operator's nodes enforce one more rule, an experimental
+one, called milestone M1 here. In a P2MR leaf that is executed (leaf version
+`0xc0`, at depth one or more), byte `0xf0` becomes `OP_CHECKMLDSA44`. It takes
+eight stack elements: a 1312-byte ML-DSA-44 public key (FIPS 204) in three,
+which the two standard leaf scripts push from the leaf itself, and a 2420-byte
+signature (2421 with an explicit hash type) in five, from the witness. It
+checks the signature over the BIP-341 tapscript signature message computed
+with `key_version` 1, with the context string `P2MR/MLDSA44/EXP0`. A non-empty
+signature that does not verify makes the script fail, so a spend that carries
+one is invalid, and so is any block that contains it. An empty signature
+makes the opcode push false, as `OP_CHECKSIG` does.
+
+- **Below height 8600, and outside such leaves, nothing changes.** In tapscript
+  the byte is `OP_SUCCESS240`, which makes a script succeed without running
+  it. Until the rule applies, an output whose leaf uses the opcode can be
+  spent without the ML-DSA-44 signature by anyone who knows that leaf and its
+  path in the tree.
+- **It is a soft fork.** A node without M1 keeps following the chain, but it
+  does not check these signatures, and it does not relay spends that use the
+  opcode: to such a node they are non-standard.
+- **Once the rule applies, of the leaves that are executed, only two scripts
+  with the opcode are relayed:** the public key followed by `OP_CHECKMLDSA44`
+  (S1), and S1 followed by `OP_VERIFY <x-only key> OP_CHECKSIG` (S2). Other
+  scripts with the opcode are not relayed, but a block may still contain them,
+  and some of them pass without a valid signature: with an empty one, where
+  the script accepts a false result, or with a key taken from the witness.
+- **The tree decides the rest, and a node cannot see it.** A spend reveals one
+  leaf, and every other leaf of the tree is another way to spend the output.
+  An S1 or S2 leaf protects the output only if every other leaf can only fail,
+  as in a tree of exactly two leaves, both at depth one and both of leaf
+  version `0xc0`, the other being `OP_RETURN`. At another leaf version an
+  `OP_RETURN` leaf is not executed, and a spend through it needs no
+  signature; a single leaf sits at depth zero and is spent without being
+  executed. Once the rule applies, an executed S1 or S2 leaf protects the
+  spending path of its own output and nothing more.
+- **It is not part of BIP-360**, which defines no post-quantum signature check,
+  and it is not a proposal for Bitcoin. Blocks on Ark-0 are still authorized
+  by the classical signet challenge.
+- **The height is a rule of this network and will not change.** The patch
+  series will be published in this repository after the rule has run on the
+  network. Until then only the operator's nodes enforce it, and what this
+  section says cannot be checked with the material here.
 
 ## Parameters
 
@@ -74,6 +125,7 @@ independently reproducible.
 | Node version | `/Satoshi:31.1.0/` (v31.1.0) |
 | Address prefix | `tb1z` (bech32m, witness v2, 32-byte program) |
 | Output type name | `witness_v2_p2mr` |
+| `OP_CHECKMLDSA44` (M1) | from height 8600, see "Rule change at height 8600 (M1)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -83,8 +135,9 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is the one consensus change on this
-network besides P2MR. Producing blocks faster than ten minutes is what a
+by the patch in `patches-spacing/`, is one of two consensus changes on this
+network besides P2MR; the other is M1 ("Rule change at height 8600 (M1)"
+above). Producing blocks faster than ten minutes is what a
 signet is for: the signet solution decides who may produce a block, while
 proof of work still paces how fast, as the next paragraphs record.
 
