@@ -1,0 +1,224 @@
+From ea3dd5d8a1be299279604f132f0330c822f0bd1d Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 08:33:15 -0600
+Subject: [PATCH 47/48] doc: describe OP_CHECKMLDSA44
+
+doc/p2mr-mldsa44.md states where the opcode executes and where it does
+not, its encoding, rules and validation weight, the activation and why
+there is no option for it, the policy, what a wallet has to do so that
+an output is protected, and what the experiment does not show.
+doc/p2mr.md no longer says that nothing in this build checks a
+post-quantum signature.
+---
+ doc/p2mr-mldsa44.md | 171 ++++++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr.md         |   9 ++-
+ 2 files changed, 177 insertions(+), 3 deletions(-)
+ create mode 100644 doc/p2mr-mldsa44.md
+
+diff --git a/doc/p2mr-mldsa44.md b/doc/p2mr-mldsa44.md
+new file mode 100644
+index 0000000..cad7ac9
+--- /dev/null
++++ b/doc/p2mr-mldsa44.md
+@@ -0,0 +1,171 @@
++# OP_CHECKMLDSA44: an experimental ML-DSA-44 check in P2MR leaves
++
++This build adds one opcode, `OP_CHECKMLDSA44`, that verifies an ML-DSA-44 signature
++([FIPS 204](https://doi.org/10.6028/NIST.FIPS.204)) inside a P2MR script leaf (see
++[p2mr.md](p2mr.md)). It is an experiment for the Ark-0 test signet. It is not part of
++BIP 360, which defines no post-quantum signature check, and it is not proposed for mainnet.
++
++What it shows is narrow: a node running these rules refuses, at the block level, any spend
++through one of the two leaf templates below (S1 and S2) that lacks a valid ML-DSA-44 signature.
++Other scripts can use the opcode in ways that need no signature at all (five empty signature
++chunks push false, which `OP_NOT` turns into true), so only the templates are relayed, and only
++they should be used. It says nothing about the rest of the network: blocks on the signet are
++still authorized by its classical signet challenge.
++
++## Where the opcode executes
++
++`OP_CHECKMLDSA44` is byte `0xf0`, which BIP 342 defines as `OP_SUCCESS240`. The byte executes
++as `OP_CHECKMLDSA44` only when all of these hold:
++
++- the script is a P2MR leaf that is executed: leaf version `0xc0`, at depth one or more
++  (a leaf at depth zero is not executed at all);
++- `SCRIPT_VERIFY_P2MR_MLDSA44` applies, i.e. the rules are active for the block (see
++  [Activation](#activation)).
++
++Everywhere else the byte keeps its current meaning: a bad opcode in legacy and witness v0
++scripts, and `OP_SUCCESS240` in P2TR tapscript leaves and in P2MR leaves before activation. An
++`OP_SUCCESSx` makes the whole script succeed without executing it. **A leaf using the opcode
++therefore protects nothing in a P2TR output, or in a P2MR output spent before activation.**
++
++## Encoding
++
++No stack element may exceed 520 bytes, and this opcode does not change that. The 1312-byte
++public key and the 2420-byte signature (2421 bytes with an explicit hash type) are split into
++chunks of fixed sizes, so that each key and signature has exactly one encoding:
++
++- the public key: three elements of 520, 520 and 272 bytes, pushed by the leaf itself;
++- the signature: five witness elements of 520, 520, 520, 520 and 340 bytes (341 when the last
++  one ends in a hash type).
++
++The two leaf templates that policy knows (see [Policy](#policy)):
++
++```
++S1:  4d0802 <520 bytes> 4d0802 <520 bytes> 4d1001 <272 bytes> f0
++     = <pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44
++S2:  S1 69 20 <32 bytes> ac
++     = S1 OP_VERIFY <x-only key> OP_CHECKSIG
++```
++
++The witness for S1 is `<sig[0]> <sig[1]> <sig[2]> <sig[3]> <sig[4]> <leaf> <control block>`;
++for S2 a Schnorr signature comes first, below the five chunks.
++
++## Execution
++
++In this order, which decides the error reported when several rules are broken:
++
++1. The stack must hold at least eight elements (`INVALID_STACK_OPERATION`). The opcode takes
++   `pk[2]`, `pk[1]`, `pk[0]` from the top, then `sig[4]` down to `sig[0]`.
++2. If any signature chunk is non-empty, 250 units of the BIP 342 validation weight budget are
++   used up (`TAPSCRIPT_VALIDATION_WEIGHT` when the budget goes below zero). A BIP 340 check uses 50.
++3. The public key chunks must be 520, 520 and 272 bytes (`MLDSA44_PUBKEY_SIZE`), even when the
++   signature is empty. There are no upgradable key types.
++4. Five empty signature chunks are an empty signature: an empty element (false) is pushed and
++   execution continues.
++5. Otherwise the chunks must be 520, 520, 520, 520 and 340 or 341 bytes (`MLDSA44_SIG_SIZE`).
++6. With 341 bytes the last byte is the hash type, with the rules of BIP 341: an explicit `0x00`,
++   a value other than `0x01`-`0x03` and `0x81`-`0x83`, and `SIGHASH_SINGLE` without an output of
++   the same index all fail (`MLDSA44_SIG_HASHTYPE`).
++7. The signed message is the 32-byte BIP 341 signature message of a tapscript spend
++   (`TaggedHash("TapSighash", ...)` with `ext_flag` 1), computed with **`key_version` 1**. It commits
++   to the leaf, the annex if present and the last executed `OP_CODESEPARATOR`, like a BIP 342
++   signature, and never equals the message of a BIP 342 signature, which uses `key_version` 0.
++8. The signature is checked with ML-DSA.Verify of FIPS 204: pure ML-DSA, the external interface,
++   with the context string `"P2MR/MLDSA44/EXP0"`. Not HashML-DSA, and not the external-mu
++   interface. An invalid signature fails the script (`MLDSA44_SIG`); a valid one pushes `0x01`.
++
++A signature chunk over 520 bytes fails before execution, like any stack element
++(`PUSH_SIZE`).
++
++The verification uses [mldsa-native](https://github.com/pq-code-package/mldsa-native) v2.0.0,
++built from its portable C code only and for verification only, in `src/crypto/mldsa44/` (see
++the README there). No platform-specific backend is compiled, so every build runs the same code.
++
++Verified signatures are cached like Schnorr signatures, with their own salted hasher (padding
++`'M'`), so an entry can never match an ECDSA or Schnorr entry.
++
++## Validation weight
++
++The weight of 250 per check is a constant of the code. It aims to keep a block that uses up its
++whole budget on ML-DSA-44 checks from taking longer to validate than one that uses it up on
++BIP 340 checks. It was set as 50, the weight of a BIP 342 signature check, times 4, the high end
++of the 2 to 4 that public benchmarks suggested for the ratio of one ML-DSA-44 verification to
++one BIP 340 verification, times 1.25 as a margin. On the build machine that ratio is about 1.9
++(`bench_bitcoin -filter='Verify(MLDSA44|SchnorrBIP340)'`). The ratio differs between machines;
++all the measurements here come from the build machine.
++
++Two measurements on the build machine (AMD Ryzen Threadripper PRO 3975WX, release build):
++
++- One check over its whole path, from the stack elements to the result through the caching
++  checker with a cache that misses (`bench_bitcoin -filter='VerifyScriptP2MR.*'`): 76 us for
++  ML-DSA-44 against 40 us for BIP 340, as medians of 10,000 single checks.
++- Two blocks built to use up their budget, one repeating ML-DSA-44 checks and one repeating
++  BIP 340 checks, both 910 inputs at a weight of 3,972,130, each connected by a freshly started
++  node with `-maxsigcachesize=0`. These runs used a separate build with verification counters
++  added; the counters are not in this source tree. Taking the worst of three runs of each,
++  15,470 ML-DSA-44 verifications took 0.38 times as long as 77,350 BIP 340 verifications on one
++  script verification thread, and 0.46 times as long with 15.
++
++The budget still allows ordinary spends: a single-signature spend has a witness of about 3.8 KB,
++enough for about 15 checks.
++
++## Activation
++
++The rules are a buried deployment, `p2mr_mldsa44` in `getdeploymentinfo`. They require P2MR.
++
++- On the Ark-0 signet (challenge
++  `5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`) they apply from
++  the height `ARK0_MLDSA44_HEIGHT` in `src/kernel/chainparams.h`, which is **8600**. The height
++  is a rule of that network, so there is no option to change it; once a build that carries a
++  height has been published, the height and the validation weight above do not change on that
++  network.
++- On any other signet, the default signet, testnet3, testnet4 and mainnet they never activate.
++- On regtest they apply from genesis, or from `-testactivationheight=p2mr_mldsa44@<height>`.
++
++When the rules are enabled, the node logs `P2MR ML-DSA-44 rules active from height <height>` at
++startup.
++
++The change is a soft fork. A node without it treats the byte as `OP_SUCCESS240`, accepts every
++block that a node with it accepts, and keeps following the chain; it only does not enforce the
++signature check.
++
++## Policy
++
++- **Before activation** the mempool refuses every spend that executes the opcode, even with a
++  valid signature: while the next block is below the activation height the byte is still an
++  `OP_SUCCESSx`, which `DISCOURAGE_OP_SUCCESS` makes non-standard. From the block before the
++  activation height on, the mempool checks such spends by the new rules.
++- **Reorganizations**: when the chain goes back so that the next block is below the activation
++  height, transactions that execute the opcode in a P2MR leaf are removed from the mempool,
++  together with their descendants.
++- **Templates only**: in a leaf at depth one or more, a script that has `OP_CHECKMLDSA44` among its
++  opcodes is standard only if it is S1 or S2, byte for byte. P2MR leaves follow the tapscript
++  limit of 80 bytes per witness element; the five signature chunks of S1 and S2 are exempt from
++  it, and only at their exact sizes.
++
++## Wallets
++
++Bitcoin Core's wallet does not create or sign `OP_CHECKMLDSA44` leaves (`tmr()` leaves are
++miniscript, which cannot express the opcode). A wallet that does should:
++
++- put the template leaf in a tree of exactly two leaves, both at depth one and both leaf version
++  `0xc0`, the other leaf being `OP_RETURN` (`6a`). A tree with a single leaf has depth zero and is
++  spent without executing it; a second leaf with another leaf version, or any other `OP_SUCCESSx`
++  in the leaf, is spent without a signature;
++- hand out addresses only once the tip it has observed is at least six blocks past the
++  activation height. On transactions it builds to fund them, set `nLockTime` to the activation
++  height and the `nSequence` of at least one input below `0xffffffff`: the lock time only
++  applies to a transaction with such an input, and then keeps it out of every block up to and
++  including the activation height, even after a reorganization;
++- count an output as protected only when its tree is exactly as above and it confirmed at or
++  above the activation height.
++
++## Tests
++
++- `src/test/mldsa44_tests.cpp`: the verifier against the NIST ACVP and Wycheproof vectors.
++- `src/test/data/script_tests.json`, block `P2MR OP_CHECKMLDSA44 tests`, and
++  `src/test/data/p2mr_mldsa44_sighash.json` (checked by `src/test/p2mr_mldsa44_tests.cpp`), both
++  written by `test/util/generate_p2mr_mldsa44_script_tests.py`.
++- `test/functional/feature_p2mr_mldsa44.py`: activation, policy, reorganization and blocks.
++- `src/test/fuzz/p2mr_mldsa44.cpp`: the execution rules against a model of them.
++- `test/functional/test_framework/crypto/fips204.py`: the ML-DSA implementation the tests sign
++  with, vendored from py-acvp-pqc. It is test code and not constant time.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index 8473045..3e30e01 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -5,7 +5,9 @@ This build implements the Pay-to-Merkle-Root (P2MR) spending rules of
+ (draft v0.12.1, bips commit `620871a7a442e276a058b487cd8743775fb499a4`) on top of Bitcoin Core v31.1.
+ 
+ The scope is the consensus and policy treatment of witness v2 outputs, plus the wallet support
+-needed to receive and spend such outputs. No post-quantum signature algorithm is implemented.
++needed to receive and spend such outputs. P2MR itself adds no post-quantum signature algorithm;
++the experimental `OP_CHECKMLDSA44` described in [p2mr-mldsa44.md](p2mr-mldsa44.md) checks ML-DSA-44
++signatures in P2MR leaves.
+ 
+ ## Output format
+ 
+@@ -197,8 +199,9 @@ All other failures reuse existing script errors: `SCRIPT_ERR_WITNESS_PROGRAM_WIT
+ 
+ - BIP 360 is a draft. This build follows one specific draft revision and is not compatible with
+   other revisions or with other implementations that pin a different one.
+-- No post-quantum signature algorithm is implemented. A P2MR leaf script can only use the opcodes
+-  that BIP 342 already defines.
++- BIP 360 defines no post-quantum signature check, and apart from the experimental
++  `OP_CHECKMLDSA44` ([p2mr-mldsa44.md](p2mr-mldsa44.md)) a P2MR leaf script can only use the
++  opcodes that BIP 342 already defines.
+ - The `tmr()` descriptor is provisional and unspecified, as is the reuse of the BIP 371 PSBT fields
+   for P2MR inputs. Neither is interoperable with anything outside this build.
+ - The wallet never generates P2MR addresses or change, because P2MR has no output type. It can only
+-- 
+2.49.0.windows.1
+

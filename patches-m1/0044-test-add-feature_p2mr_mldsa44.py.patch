@@ -1,0 +1,396 @@
+From 2431eb3adcd2e69b6bb19af02d3bf890067db76b Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 08:33:15 -0600
+Subject: [PATCH 44/48] test: add feature_p2mr_mldsa44.py
+
+On regtest with -testactivationheight=p2mr_mldsa44@N, with a second node
+that runs -acceptnonstdtxn=1:
+
+- the mempool refuses a validly signed S1 spend while the next block is
+  N-1 and takes it once the next block is N;
+- a block below N takes a spend with an invalid signature;
+- a reorganization back below N removes the template spend, a
+  non-template spend the second node took, and their children;
+- after activation S1 and S2 spends relay and confirm, and eight kinds
+  of invalid spend fail both in the mempool and in a block, including
+  SIGHASH_SINGLE without an output and a public key one byte short;
+- only the templates at depth one or more may carry signature chunks
+  over 80 bytes, and a single leaf tree is spent without a signature;
+- one transaction spends P2MR ML-DSA-44, P2MR Schnorr and P2TR inputs.
+---
+ test/functional/feature_p2mr_mldsa44.py | 350 ++++++++++++++++++++++++
+ test/functional/test_runner.py          |   1 +
+ 2 files changed, 351 insertions(+)
+ create mode 100644 test/functional/feature_p2mr_mldsa44.py
+
+diff --git a/test/functional/feature_p2mr_mldsa44.py b/test/functional/feature_p2mr_mldsa44.py
+new file mode 100644
+index 0000000..72cf171
+--- /dev/null
++++ b/test/functional/feature_p2mr_mldsa44.py
+@@ -0,0 +1,350 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md) around its activation.
++
++On regtest with -testactivationheight=p2mr_mldsa44@N (P2MR itself is active from
++genesis), node 0 with the default policy and node 1 with -acceptnonstdtxn=1:
++
++  * while the next block is below N the mempool treats byte 0xf0 as the
++    OP_SUCCESSx it still is there, and refuses even a validly signed spend; once
++    the next block is N it checks the signature and takes the spend;
++  * a block below N takes a spend with an invalid ML-DSA-44 signature, a block
++    from N on rejects it;
++  * a reorg that puts the next block back below N removes the ML-DSA-44 spends
++    both mempools took, the template one and the non-template one node 1 took,
++    together with their children;
++  * after activation, templates S1 and S2 relay and confirm, and each kind of
++    invalid spend is refused by the mempool and in a block;
++  * only the two templates, in a leaf at depth one or more, may carry their
++    signature chunks over the 80-byte stack item limit of policy;
++  * one transaction spending P2MR ML-DSA-44, P2MR Schnorr and P2TR inputs.
++"""
++
++import hashlib
++
++from test_framework.blocktools import (
++    add_witness_commitment,
++    create_block,
++    create_coinbase,
++)
++from test_framework.key import compute_xonly_pubkey, sign_schnorr, tweak_add_privkey
++from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_mldsa44 import (
++    MLDSA44_PUBKEY_CHUNK_SIZES,
++    NO_CODESEPARATOR,
++    OP_CHECKMLDSA44,
++    mldsa44_keygen,
++    mldsa44_leaf,
++    mldsa44_sig_chunks,
++    mldsa44_sign_input,
++    mldsa44_tree,
++    split_chunks,
++)
++from test_framework.script import (
++    CScript,
++    LEAF_VERSION_TAPSCRIPT,
++    OP_1,
++    OP_CHECKSIG,
++    OP_DROP,
++    OP_NOT,
++    OP_RETURN,
++    SIGHASH_ALL,
++    SIGHASH_DEFAULT,
++    SIGHASH_SINGLE,
++    TaprootSignatureHash,
++    taproot_construct,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++ACTIVATION_HEIGHT = 200
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++
++PQ_PUB, PQ_SEC = mldsa44_keygen(hashlib.sha256(b"feature_p2mr_mldsa44 key a").digest())
++PQ_PUB_B, PQ_SEC_B = mldsa44_keygen(hashlib.sha256(b"feature_p2mr_mldsa44 key b").digest())
++SEC_A = bytes(range(1, 33))
++PUB_A = compute_xonly_pubkey(SEC_A)[0]
++
++LEAF_S1 = mldsa44_leaf(PQ_PUB)
++LEAF_S2 = mldsa44_leaf(PQ_PUB, PUB_A)
++TREE_S1 = mldsa44_tree(LEAF_S1)
++TREE_S2 = mldsa44_tree(LEAF_S2)
++# Uses the opcode but is neither template.
++LEAF_OTHER = CScript([OP_1, OP_DROP] + split_chunks(PQ_PUB, MLDSA44_PUBKEY_CHUNK_SIZES) + [OP_CHECKMLDSA44])
++TREE_OTHER = mldsa44_tree(LEAF_OTHER)
++# Needs no signature at all: five empty chunks push false, and OP_NOT turns it into true.
++LEAF_NOT = CScript(split_chunks(PQ_PUB, MLDSA44_PUBKEY_CHUNK_SIZES) + [OP_CHECKMLDSA44, OP_NOT])
++TREE_NOT = mldsa44_tree(LEAF_NOT)
++# A public key one byte short.
++LEAF_SHORT_KEY = CScript(split_chunks(PQ_PUB[:1311], (520, 520, 271)) + [OP_CHECKMLDSA44])
++TREE_SHORT_KEY = mldsa44_tree(LEAF_SHORT_KEY)
++# A single leaf tree has m=0: the leaf is not executed at all.
++TREE_LONE = p2mr_construct([("pq", LEAF_S1)])
++LEAF_CSIG = CScript([PUB_A, OP_CHECKSIG])
++TREE_CSIG = p2mr_construct([("csig", LEAF_CSIG), ("ret", CScript([OP_RETURN]))])
++TAP = taproot_construct(PUB_A, [])
++
++MEMPOOL_OP_SUCCESS = "mempool-script-verify-flag-failed (OP_SUCCESSx reserved for soft-fork upgrades)"
++NONSTANDARD_WITNESS = "bad-witness-nonstandard"
++
++
++def pq_witness(tree, leaf_name="pq", *, seckey=PQ_SEC, hash_type=SIGHASH_DEFAULT, key_ver=1,
++               context=b"P2MR/MLDSA44/EXP0", mutate=None, schnorr=False):
++    """A witness function for an input spending an ML-DSA-44 leaf; mutate edits the signature chunks."""
++    leaf = tree.leaves[leaf_name]
++
++    def make(tx, spent, index):
++        sig = mldsa44_sign_input(seckey, tx, spent, index, leaf.script, hash_type=hash_type,
++                                 key_ver=key_ver, context=context)
++        chunks = mldsa44_sig_chunks(sig)
++        if mutate is not None:
++            chunks = mutate(chunks)
++        stack = chunks + [bytes(leaf.script), leaf.control_block]
++        if schnorr:
++            msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index, scriptpath=True, leaf_script=leaf.script,
++                                       leaf_ver=LEAF_VERSION_TAPSCRIPT, codeseparator_pos=NO_CODESEPARATOR)
++            stack = [sign_schnorr(SEC_A, msg)] + stack
++        return stack
++    return make
++
++
++def flip_bit(chunks):
++    chunks = list(chunks)
++    chunks[2] = bytes([chunks[2][0] ^ 1]) + chunks[2][1:]
++    return chunks
++
++
++def csig_witness(tx, spent, index):
++    leaf = TREE_CSIG.leaves["csig"]
++    msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index, scriptpath=True, leaf_script=leaf.script,
++                               leaf_ver=LEAF_VERSION_TAPSCRIPT, codeseparator_pos=NO_CODESEPARATOR)
++    return [sign_schnorr(SEC_A, msg), bytes(leaf.script), leaf.control_block]
++
++
++def keypath_witness(tx, spent, index):
++    msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index)
++    return [sign_schnorr(tweak_add_privkey(SEC_A, TAP.tweak), msg)]
++
++
++class P2MRMLDSA44Test(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        activation = f"-testactivationheight=p2mr_mldsa44@{ACTIVATION_HEIGHT}"
++        self.extra_args = [[activation], [activation, "-acceptnonstdtxn=1"]]
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def fund(self, script_pubkeys):
++        """Create one confirmed output for each scriptPubKey."""
++        sent = [self.wallet.send_to(from_node=self.nodes[0], scriptPubKey=spk, amount=FUND_SATS)
++                for spk in script_pubkeys]
++        self.generate(self.wallet, 1)
++        return [{"txid": int(s["txid"], 16), "vout": s["sent_vout"], "value": FUND_SATS, "script_pubkey": spk}
++                for s, spk in zip(sent, script_pubkeys)]
++
++    def spend(self, inputs, *, outputs=None):
++        """Build a transaction from (utxo, witness function) pairs; one output to the wallet by default."""
++        tx = CTransaction()
++        tx.version = 2
++        tx.nLockTime = 0
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]), b"", 0xfffffffd) for u, _ in inputs]
++        total = sum(u["value"] for u, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(u["value"], u["script_pubkey"]) for u, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for index, (_, make) in enumerate(inputs):
++            tx.wit.vtxinwit[index].scriptWitness.stack = make(tx, spent, index)
++        return tx
++
++    def child_of(self, parent):
++        """Spend output 0 of a transaction that pays the wallet."""
++        child = CTransaction()
++        child.version = 2
++        child.vin = [CTxIn(COutPoint(parent.txid_int, 0), b"", 0xfffffffd)]
++        child.vout = [CTxOut(parent.vout[0].nValue - FEE_SATS, self.wallet.get_output_script())]
++        self.wallet.sign_tx(child)
++        return child
++
++    def build_block(self, txs):
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        block = create_block(int(tip, 16), create_coinbase(node.getblockcount() + 1),
++                             node.getblock(tip)["mediantime"] + 1, txlist=txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def assert_block_accepts(self, tx, note):
++        block = self.build_block([tx])
++        result = self.nodes[0].submitblock(block.serialize().hex())
++        assert result is None, f"{note}: block rejected with {result}"
++        self.sync_blocks()
++        self.log.info(f"  block accepts: {note}")
++        return block
++
++    def assert_block_rejects(self, tx, error, note):
++        tip = self.nodes[0].getbestblockhash()
++        result = self.nodes[0].submitblock(self.build_block([tx]).serialize().hex())
++        assert_equal(result, f"block-script-verify-flag-failed ({error})")
++        assert_equal(self.nodes[0].getbestblockhash(), tip)
++        self.log.info(f"  block rejects: {note}")
++
++    def assert_mempool_rejects(self, tx, reason, note, node=0):
++        assert_raises_rpc_error(-26, reason, self.nodes[node].sendrawtransaction, tx.serialize().hex(), 0)
++        self.log.info(f"  mempool rejects: {note}")
++
++    def assert_mempool_accepts(self, tx, note, node=0):
++        self.nodes[node].sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in self.nodes[node].getrawmempool(), note
++        self.log.info(f"  mempool accepts: {note}")
++
++    def assert_active_next(self, expected):
++        for node in self.nodes:
++            assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_mldsa44"]["active"], expected)
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        self.wallet = MiniWallet(self.nodes[0])
++        self.generate(self.wallet, 120)
++        info = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr_mldsa44"]
++        assert_equal((info["type"], info["height"]), ("buried", ACTIVATION_HEIGHT))
++
++        self.log.info("Fund the outputs every part spends")
++        s1 = self.fund([TREE_S1.scriptPubKey] * 8)
++        (s2, other, short_key, lone_signed, lone_unsigned, csig, tap, unsigned_other) = self.fund(
++            [TREE_S2.scriptPubKey, TREE_OTHER.scriptPubKey, TREE_SHORT_KEY.scriptPubKey,
++             TREE_LONE.scriptPubKey, TREE_LONE.scriptPubKey, TREE_CSIG.scriptPubKey, TAP.scriptPubKey,
++             TREE_NOT.scriptPubKey])
++
++        # getdeploymentinfo, the mempool and GetBlockScriptFlags all look at the next block.
++        self.generate(self.wallet, ACTIVATION_HEIGHT - 2 - self.nodes[0].getblockcount())
++        self.assert_active_next(False)
++        spend_s1 = self.spend([(s1[0], pq_witness(TREE_S1))])
++        self.log.info("Before activation the mempool refuses even a valid ML-DSA-44 spend")
++        self.assert_mempool_rejects(spend_s1, MEMPOOL_OP_SUCCESS, "valid S1 spend, next block N-1")
++
++        self.log.info("A block below the activation height takes an invalid signature")
++        invalid_early = self.spend([(s1[1], pq_witness(TREE_S1, mutate=flip_bit))])
++        early_block = self.assert_block_accepts(invalid_early, "invalid S1 signature at height N-1")
++        self.assert_active_next(True)
++
++        self.log.info("From the block before activation on, the mempool checks the signature")
++        self.assert_mempool_accepts(spend_s1, "valid S1 spend, next block N")
++        child = self.child_of(spend_s1)
++        self.assert_mempool_accepts(child, "child of the S1 spend")
++        spend_other = self.spend([(other, pq_witness(TREE_OTHER))])
++        self.assert_mempool_rejects(spend_other, NONSTANDARD_WITNESS, "a leaf that is not a template")
++        self.assert_mempool_accepts(spend_other, "a leaf that is not a template, -acceptnonstdtxn=1", node=1)
++        other_child = self.child_of(spend_other)
++        self.assert_mempool_accepts(other_child, "child of the non-template spend", node=1)
++
++        self.log.info("A reorg that puts the next block below N empties both mempools of these spends")
++        for node in self.nodes:
++            node.invalidateblock(early_block.hash_hex)
++        self.assert_active_next(False)
++        for node, txs in ((self.nodes[0], (spend_s1, child)), (self.nodes[1], (spend_other, other_child))):
++            mempool = node.getrawmempool()
++            for tx in txs:
++                assert tx.txid_hex not in mempool, f"{tx.txid_hex} survived the reorg"
++        assert invalid_early.txid_hex not in self.nodes[0].getrawmempool()
++        for node in self.nodes:
++            node.reconsiderblock(early_block.hash_hex)
++        assert_equal(self.nodes[0].getbestblockhash(), early_block.hash_hex)
++        self.assert_active_next(True)
++
++        self.log.info("The activation block confirms the spend")
++        self.assert_mempool_accepts(spend_s1, "valid S1 spend again")
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert_equal(self.nodes[0].getblock(blockhash)["height"], ACTIVATION_HEIGHT)
++        assert spend_s1.txid_hex in self.nodes[0].getblock(blockhash)["tx"]
++
++        self.test_after_activation(s1, s2, short_key)
++        self.test_policy(s1, lone_signed, lone_unsigned, unsigned_other)
++        self.test_mixed_inputs(s1[7], csig, tap)
++
++    def test_after_activation(self, s1, s2, short_key):
++        self.log.info("After activation: valid spends relay and confirm")
++        valid = [self.spend([(s1[2], pq_witness(TREE_S1, hash_type=SIGHASH_ALL))]),
++                 self.spend([(s2, pq_witness(TREE_S2, schnorr=True))])]
++        for tx, note in zip(valid, ("S1 with SIGHASH_ALL", "S2")):
++            self.assert_mempool_accepts(tx, note)
++        blockhash = self.generate(self.wallet, 1)[0]
++        for tx in valid:
++            assert tx.txid_hex in self.nodes[0].getblock(blockhash)["tx"]
++
++        self.log.info("After activation: every kind of invalid spend fails in the mempool and in a block")
++        utxo = s1[3]
++        cases = [
++            (self.spend([(utxo, pq_witness(TREE_S1, mutate=flip_bit))]), "Invalid ML-DSA-44 signature",
++             "one bit of the signature flipped"),
++            (self.spend([(utxo, pq_witness(TREE_S1, seckey=PQ_SEC_B))]), "Invalid ML-DSA-44 signature",
++             "signed by another key"),
++            (self.spend([(utxo, pq_witness(TREE_S1, key_ver=0))]), "Invalid ML-DSA-44 signature",
++             "signed over the key_version 0 message"),
++            (self.spend([(utxo, pq_witness(TREE_S1, context=b"P2MR/MLDSA44/EXP1"))]), "Invalid ML-DSA-44 signature",
++             "signed with another context string"),
++            (self.spend([(utxo, pq_witness(TREE_S1, mutate=lambda c: c[:4] + [c[4] + b"\x00"]))]),
++             "Invalid ML-DSA-44 signature hash type", "an explicit 0x00 hash type"),
++        ]
++        for tx, error, note in cases:
++            self.assert_mempool_rejects(tx, f"mempool-script-verify-flag-failed ({error})", note)
++            self.assert_block_rejects(tx, error, note)
++
++        # SIGHASH_SINGLE without an output of the same index has no signature message.
++        no_output = self.spend([(s1[4], pq_witness(TREE_S1)), (s1[5], pq_witness(TREE_S1, hash_type=SIGHASH_SINGLE))],
++                               outputs=[CTxOut(2 * FUND_SATS - FEE_SATS, self.wallet.get_output_script())])
++        self.assert_mempool_rejects(no_output, "mempool-script-verify-flag-failed (Invalid ML-DSA-44 signature hash type)",
++                                    "SIGHASH_SINGLE on the second input of a one output transaction")
++        self.assert_block_rejects(no_output, "Invalid ML-DSA-44 signature hash type",
++                                  "SIGHASH_SINGLE on the second input of a one output transaction")
++
++        # Sizes the policy does not exempt are refused before the script runs; a block runs it.
++        short_chunk = self.spend([(utxo, pq_witness(TREE_S1, mutate=lambda c: c[:4] + [c[4][:339]]))])
++        self.assert_mempool_rejects(short_chunk, NONSTANDARD_WITNESS, "a 339-byte last signature chunk")
++        self.assert_block_rejects(short_chunk, "Invalid ML-DSA-44 signature chunk size", "a 339-byte last signature chunk")
++        short_pubkey = self.spend([(short_key, pq_witness(TREE_SHORT_KEY))])
++        self.assert_mempool_rejects(short_pubkey, NONSTANDARD_WITNESS, "a public key one byte short")
++        self.assert_block_rejects(short_pubkey, "Invalid ML-DSA-44 public key chunk size", "a public key one byte short")
++
++    def test_policy(self, s1, lone_signed, lone_unsigned, unsigned_other):
++        self.log.info("Policy: only the two templates may use the opcode in an executed leaf")
++        # Valid by consensus without any signature, and not standard even though no element is large.
++        leaf = TREE_NOT.leaves["pq"]
++        no_signature = self.spend([(unsigned_other, lambda tx, spent, index: [b""] * 5 + [bytes(leaf.script), leaf.control_block])])
++        self.assert_mempool_rejects(no_signature, NONSTANDARD_WITNESS, "a non-template leaf spent with five empty chunks")
++        self.assert_block_accepts(no_signature, "a non-template leaf spent with five empty chunks")
++
++        self.log.info("Policy: the 80-byte limit is lifted only for the templates' signature chunks at m >= 1")
++        # A leaf at depth zero is not executed; signature chunks there are just large stack items.
++        lone = TREE_LONE.leaves["pq"]
++        signed = self.spend([(lone_signed, pq_witness(TREE_LONE))])
++        self.assert_mempool_rejects(signed, NONSTANDARD_WITNESS, "signature chunks under an m=0 leaf")
++        # ...and it is spent without any signature, which is why wallets never make such a tree.
++        unsigned = self.spend([(lone_unsigned, lambda tx, spent, index: [bytes(lone.script), lone.control_block])])
++        self.assert_mempool_accepts(unsigned, "an m=0 ML-DSA-44 leaf spent without a signature")
++        # An extra element under the S1 signature chunks is not a template stack.
++        extra = self.spend([(s1[6], pq_witness(TREE_S1, mutate=lambda c: [b"\x01"] + c))])
++        self.assert_mempool_rejects(extra, NONSTANDARD_WITNESS, "S1 with an element below the signature chunks")
++        self.generate(self.wallet, 1)
++
++    def test_mixed_inputs(self, s1, csig, tap):
++        self.log.info("One transaction spending P2MR ML-DSA-44, P2MR Schnorr and P2TR inputs")
++        tx = self.spend([(s1, pq_witness(TREE_S1)), (csig, csig_witness), (tap, keypath_witness)])
++        self.assert_mempool_accepts(tx, "three kinds of input")
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in self.nodes[0].getblock(blockhash)["tx"]
++
++
++if __name__ == '__main__':
++    P2MRMLDSA44Test(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 6242037..6dcc268 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -286,6 +286,7 @@ BASE_SCRIPTS = [
+     'p2p_initial_headers_sync.py',
+     'feature_nulldummy.py',
+     'feature_p2mr.py',
++    'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
+     'wallet_p2mr.py',
+     'wallet_p2mr_multisig.py',
+-- 
+2.49.0.windows.1
+

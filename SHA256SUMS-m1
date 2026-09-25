@@ -1,0 +1,13 @@
+ce47775b5658e8867ad703b5953892017d374ecce34c9fbe2b65c3115dd14119 *0036-crypto-vendor-mldsa-native-v2.0.0-for-ML-DSA-44-sign.patch
+500e07bad1dcdc297fbfc99233746e805b364687c465aedfcf3c792a5782d3b3 *0037-test-check-ML-DSA-44-verification-against-the-ACVP-a.patch
+a8635e07d51e74480416ef1fd1cc4657d4f39d5bae326ee8109d3d560878f2a4 *0038-bench-time-ML-DSA-44-verification-next-to-BIP-340-ve.patch
+140bcd3ce99e6aa4624be14ee5f245db80e8d2d163c3e60df137b591cbcee2a3 *0039-script-add-OP_CHECKMLDSA44-for-ML-DSA-44-checks-in-P.patch
+b311299487c4125fb9a8c4918865c82803789e9b68ac1c42502de555fbc5828f *0040-consensus-activate-OP_CHECKMLDSA44-at-a-height-fixed.patch
+bc7b7b40a8efa852eaf4101ea8b5e1b1dd4408eb0ec40eb6cd8703b734902dcf *0041-policy-relay-OP_CHECKMLDSA44-spends-only-once-active.patch
+ea46f486ffd6efd32aa4b61d63a907fa2a5d2a1043926349374f4ac8560c1f33 *0042-test-sign-and-verify-ML-DSA-44-in-the-functional-tes.patch
+20fe8f1de0356475504159796dcc195da1b583afb66ff916a869aab4c40df2e1 *0043-test-add-OP_CHECKMLDSA44-script-tests-and-signature-.patch
+1b634d989e20319e191a5131b598ffe89212b635e91630db39933780146e8bec *0044-test-add-feature_p2mr_mldsa44.py.patch
+9e29e26452806b0ed5d1fee048fd6954d0279e3a369ec63c8172d6dab8eaa51e *0045-test-add-a-fuzz-target-for-OP_CHECKMLDSA44.patch
+209882d291f9d6d17550c19b4a2cf656ca47267181ad00fcd16b67b6b2ef0dbd *0046-bench-time-the-whole-path-of-P2MR-ML-DSA-44-and-Schn.patch
+0da28543335bcf8927ac3bbd4217d0f75f55e5fcd54aacd11ac4be5869e1cd16 *0047-doc-describe-OP_CHECKMLDSA44.patch
+8d769b6ac50ae12b2be771f0721b8271342bdbfbc85f1341687dbf9b57420e81 *0048-test-add-OP_CHECKMLDSA44-script-test-rows-signed-by-.patch

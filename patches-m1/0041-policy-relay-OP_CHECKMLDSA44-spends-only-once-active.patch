@@ -1,0 +1,226 @@
+From 73b30bb6f1ba34094285e1df83ad91d3c7ffcc85 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 08:33:14 -0600
+Subject: [PATCH 41/48] policy: relay OP_CHECKMLDSA44 spends only once active,
+ and in two templates
+
+- SCRIPT_VERIFY_P2MR_MLDSA44 joins the mandatory, and so the standard,
+  script verification flags, but the mempool leaves it out while the
+  next block is below the activation height. There the byte is still an
+  OP_SUCCESSx, and DISCOURAGE_OP_SUCCESS keeps every spend that executes
+  it out of the mempool, validly signed or not: an output that is not
+  protected yet is not relayed as if it were.
+- A reorganization that puts the next block back below the activation
+  height removes the transactions that execute the opcode in a P2MR
+  leaf, with their descendants. removeForReorg does not check scripts
+  again, and a block below the activation height would otherwise include
+  them without the check they were accepted under. A node with
+  -acceptnonstdtxn=1 can hold spends of other scripts than the
+  templates, so the test is any executed P2MR leaf whose opcodes include
+  OP_CHECKMLDSA44.
+- P2MR leaves keep the 80-byte limit on witness elements, except for the
+  five signature chunks of two leaf templates, byte for byte:
+  S1 <pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44, and
+  S2 S1 OP_VERIFY <x-only key> OP_CHECKSIG.
+  The chunks must have their exact sizes and the leaf must be at depth
+  one or more. Other scripts that use the opcode are not standard.
+---
+ src/policy/policy.cpp | 62 ++++++++++++++++++++++++++++++++++++++++---
+ src/policy/policy.h   |  6 ++++-
+ src/validation.cpp    | 34 +++++++++++++++++++++++-
+ 3 files changed, 97 insertions(+), 5 deletions(-)
+
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index a5cd8a0..c948c5c 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include <algorithm>
+ #include <cstddef>
++#include <optional>
+ #include <vector>
+ 
+ CAmount GetDustThreshold(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
+@@ -248,6 +249,52 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+     return true;
+ }
+ 
++/**
++ * Match a P2MR leaf script against the two OP_CHECKMLDSA44 templates of doc/p2mr-mldsa44.md,
++ * byte for byte apart from the key data:
++ *   S1: <pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44, each public key chunk pushed with OP_PUSHDATA2;
++ *   S2: S1 OP_VERIFY <32-byte x-only public key> OP_CHECKSIG.
++ * Returns how many elements of the initial stack lie below the five signature chunks: none for
++ * S1, and for S2 the Schnorr signature. Returns nullopt for any other script.
++ */
++static std::optional<size_t> MatchMLDSA44Template(std::span<const unsigned char> script)
++{
++    size_t pos{0};
++    for (const size_t chunk_size : MLDSA44_PUBKEY_CHUNK_SIZES) {
++        if (script.size() < pos + 3 + chunk_size || script[pos] != OP_PUSHDATA2 ||
++            script[pos + 1] != (chunk_size & 0xff) || script[pos + 2] != (chunk_size >> 8)) {
++            return std::nullopt;
++        }
++        pos += 3 + chunk_size;
++    }
++    if (script.size() <= pos || script[pos] != OP_CHECKMLDSA44) return std::nullopt;
++    ++pos;
++    if (script.size() == pos) return 0; // S1
++    if (script.size() == pos + 35 && script[pos] == OP_VERIFY && script[pos + 1] == 32 && script[pos + 34] == OP_CHECKSIG) {
++        return 1; // S2
++    }
++    return std::nullopt;
++}
++
++bool HasMLDSA44Opcode(std::span<const unsigned char> script)
++{
++    const CScript leaf{script.begin(), script.end()};
++    opcodetype opcode;
++    for (CScript::const_iterator pc{leaf.begin()}; leaf.GetOp(pc, opcode);) {
++        if (opcode == OP_CHECKMLDSA44) return true;
++    }
++    return false;
++}
++
++/** Whether a size is that of the signature chunk at index `index` (0 to 4) of OP_CHECKMLDSA44. */
++static bool IsMLDSA44SigChunkSize(size_t index, size_t size)
++{
++    if (index >= MLDSA44_SIG_CHUNK_SIZES.size()) return false;
++    // The last chunk may end in an explicit hash type.
++    const bool last{index + 1 == MLDSA44_SIG_CHUNK_SIZES.size()};
++    return size == MLDSA44_SIG_CHUNK_SIZES[index] || (last && size == MLDSA44_SIG_CHUNK_SIZES[index] + 1);
++}
++
+ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+ {
+     if (tx.IsCoinBase())
+@@ -351,7 +398,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+             }
+             // Script path spend is the only spend type (2 or more stack elements)
+             const auto& control_block = SpanPopBack(stack);
+-            SpanPopBack(stack); // Ignore script
++            const auto& script = SpanPopBack(stack);
+             if (control_block.empty()) return false; // Empty control block is invalid
+             if (control_block.size() > P2MR_CONTROL_MAX_SIZE ||
+                 (control_block.size() - P2MR_CONTROL_BASE_SIZE) % P2MR_CONTROL_NODE_SIZE != 0) {
+@@ -360,8 +407,17 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+             }
+             if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
+                 // Leaf version 0xc0 (aka Tapscript, see BIP 342)
+-                for (const auto& item : stack) {
+-                    if (item.size() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) return false;
++                // A leaf that is executed (m >= 1) may use OP_CHECKMLDSA44 only as one of its two templates,
++                // whose ML-DSA-44 signature chunks may then have their sizes (doc/p2mr-mldsa44.md).
++                std::optional<size_t> sig_chunks_at;
++                if (control_block.size() > P2MR_CONTROL_BASE_SIZE) {
++                    sig_chunks_at = MatchMLDSA44Template(script);
++                    if (!sig_chunks_at && HasMLDSA44Opcode(script)) return false;
++                }
++                if (sig_chunks_at && stack.size() != *sig_chunks_at + MLDSA44_SIG_CHUNK_SIZES.size()) sig_chunks_at.reset();
++                for (size_t j = 0; j < stack.size(); ++j) {
++                    if (sig_chunks_at && j >= *sig_chunks_at && IsMLDSA44SigChunkSize(j - *sig_chunks_at, stack[j].size())) continue;
++                    if (stack[j].size() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) return false;
+                 }
+             }
+         }
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index d76d6d7..4aa8dcc 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -14,6 +14,7 @@
+ #include <util/feefrac.h>
+ 
+ #include <cstdint>
++#include <span>
+ #include <string>
+ 
+ class CCoinsViewCache;
+@@ -108,7 +109,8 @@ static constexpr script_verify_flags MANDATORY_SCRIPT_VERIFY_FLAGS{SCRIPT_VERIFY
+                                                              SCRIPT_VERIFY_CHECKSEQUENCEVERIFY |
+                                                              SCRIPT_VERIFY_WITNESS |
+                                                              SCRIPT_VERIFY_TAPROOT |
+-                                                             SCRIPT_VERIFY_P2MR};
++                                                             SCRIPT_VERIFY_P2MR |
++                                                             SCRIPT_VERIFY_P2MR_MLDSA44};
+ 
+ /**
+  * Standard script verification flags that standard transactions will comply
+@@ -171,6 +173,8 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+ * Also enforce a maximum stack item size limit and no annexes for tapscript spends.
+ */
+ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
++/** Whether a script has OP_CHECKMLDSA44 among its opcodes; a 0xf0 byte inside pushed data does not count. */
++bool HasMLDSA44Opcode(std::span<const unsigned char> script);
+ /**
+  * Check whether this transaction spends any witness program but P2A, including not-yet-defined ones.
+  * May return `false` early for consensus-invalid transactions.
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 4ca6be9..47b384e 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -298,6 +298,23 @@ static bool IsCurrentForFeeEstimation(Chainstate& active_chainstate) EXCLUSIVE_L
+     return true;
+ }
+ 
++/** Whether an input of the transaction executes a P2MR leaf (leaf version 0xc0, depth one or
++ *  more) that has OP_CHECKMLDSA44 among its opcodes (doc/p2mr-mldsa44.md). */
++static bool SpendsP2MRMLDSA44Leaf(const CTransaction& tx, const CCoinsView& view)
++{
++    for (const CTxIn& txin : tx.vin) {
++        std::span<const std::vector<unsigned char>> stack{txin.scriptWitness.stack};
++        if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) stack = stack.first(stack.size() - 1);
++        if (stack.size() < 2) continue;
++        const std::vector<unsigned char>& control{stack.back()};
++        if (control.size() <= P2MR_CONTROL_BASE_SIZE || (control[0] & TAPROOT_LEAF_MASK) != TAPROOT_LEAF_TAPSCRIPT) continue;
++        if (!HasMLDSA44Opcode(stack[stack.size() - 2])) continue;
++        const std::optional<Coin> coin{view.GetCoin(txin.prevout)};
++        if (coin && coin->out.scriptPubKey.IsPayToMerkleRoot()) return true;
++    }
++    return false;
++}
++
+ void Chainstate::MaybeUpdateMempoolForReorg(
+     DisconnectedBlockTransactions& disconnectpool,
+     bool fAddToMempool)
+@@ -338,6 +355,13 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // the disconnectpool that were added back and cleans up the mempool state.
+     m_mempool->UpdateTransactionsFromBlock(vHashUpdate);
+ 
++    // Below its activation height OP_CHECKMLDSA44 is OP_SUCCESS240 again (doc/p2mr-mldsa44.md). The
++    // mempool only takes its spends while it is active for the next block, so once the reorganized
++    // chain puts the next block below that height, the spends accepted before are removed: a block
++    // there would include them without the protection they were accepted under.
++    const bool remove_mldsa44_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44) &&
++                                     !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)};
++
+     // Predicate to use for filtering transactions in removeForReorg.
+     // Checks whether the transaction is still final and, if it spends a coinbase output, mature.
+     // Also updates valid entries' cached LockPoints if needed.
+@@ -351,6 +375,8 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+         AssertLockHeld(::cs_main);
+         const CTransaction& tx = it->GetTx();
+ 
++        if (remove_mldsa44_spends && SpendsP2MRMLDSA44Leaf(tx, CCoinsViewMemPool{&CoinsTip(), *m_mempool})) return true;
++
+         // The transaction must be final.
+         if (!CheckFinalTxAtTip(*Assert(m_chain.Tip()), tx)) return true;
+ 
+@@ -1143,7 +1169,13 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
+     const CTransaction& tx = *ws.m_ptx;
+     TxValidationState& state = ws.m_state;
+ 
+-    constexpr script_verify_flags scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
++    script_verify_flags scriptVerifyFlags{STANDARD_SCRIPT_VERIFY_FLAGS};
++    // Until OP_CHECKMLDSA44 is active for the next block, its byte stays the OP_SUCCESSx that
++    // DISCOURAGE_OP_SUCCESS keeps out of the mempool, whatever the signature
++    // (doc/p2mr-mldsa44.md): a P2MR leaf that is not yet protected is not relayed as if it were.
++    if (!DeploymentActiveAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
++        scriptVerifyFlags &= ~SCRIPT_VERIFY_P2MR_MLDSA44;
++    }
+ 
+     // Check input scripts and signatures.
+     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+-- 
+2.49.0.windows.1
+

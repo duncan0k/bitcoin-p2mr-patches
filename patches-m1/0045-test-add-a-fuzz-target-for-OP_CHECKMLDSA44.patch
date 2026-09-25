@@ -1,0 +1,208 @@
+From 6d5471370b80d1b693a064e08f3f47a1bd247b72 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 08:33:15 -0600
+Subject: [PATCH 45/48] test: add a fuzz target for OP_CHECKMLDSA44
+
+The target builds a P2MR spend of a leaf <pk[0]> <pk[1]> <pk[2]>
+OP_CHECKMLDSA44 with chunk sizes, stack depth, hash type, leaf version,
+leaf depth and flags from the input, mostly well formed so that the
+later rules are reached, and compares the script error with the one a
+separate model of the rules, in their order, predicts. Only the
+ML-DSA-44 verification itself is replaced, by a result the input picks;
+splitting off the hash type and computing the signature message run as
+in consensus. It also requires a DeferringSignatureChecker to give the
+same result and error.
+---
+ src/test/fuzz/CMakeLists.txt   |   1 +
+ src/test/fuzz/p2mr_mldsa44.cpp | 167 +++++++++++++++++++++++++++++++++
+ 2 files changed, 168 insertions(+)
+ create mode 100644 src/test/fuzz/p2mr_mldsa44.cpp
+
+diff --git a/src/test/fuzz/CMakeLists.txt b/src/test/fuzz/CMakeLists.txt
+index 13b93b8..0bdbcd3 100644
+--- a/src/test/fuzz/CMakeLists.txt
++++ b/src/test/fuzz/CMakeLists.txt
+@@ -76,6 +76,7 @@ add_executable(fuzz
+   node_eviction.cpp
+   overflow.cpp
+   p2mr.cpp
++  p2mr_mldsa44.cpp
+   p2p_handshake.cpp
+   p2p_headers_presync.cpp
+   p2p_transport_serialization.cpp
+diff --git a/src/test/fuzz/p2mr_mldsa44.cpp b/src/test/fuzz/p2mr_mldsa44.cpp
+new file mode 100644
+index 0000000..b77ec5f
+--- /dev/null
++++ b/src/test/fuzz/p2mr_mldsa44.cpp
+@@ -0,0 +1,167 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <consensus/amount.h>
++#include <crypto/mldsa44.h>
++#include <primitives/transaction.h>
++#include <script/interpreter.h>
++#include <script/script.h>
++#include <serialize.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/fuzz/util.h>
++#include <uint256.h>
++
++#include <algorithm>
++#include <array>
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++namespace {
++/** Stands in for ML-DSA-44 verification with a result the fuzzer picks, so that both outcomes are
++ *  reached. Everything before it is the real code: splitting off the hash type, and computing the
++ *  signature message. */
++class FuzzedMLDSA44Checker : public MutableTransactionSignatureChecker
++{
++    const bool m_valid;
++
++public:
++    FuzzedMLDSA44Checker(const CMutableTransaction* tx, const CAmount& amount, const PrecomputedTransactionData& txdata, bool valid)
++        : MutableTransactionSignatureChecker(tx, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL), m_valid{valid} {}
++
++protected:
++    bool VerifyMLDSA44Signature(std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE>, std::span<const unsigned char, MLDSA44_PUBKEY_SIZE>, const uint256&) const override
++    {
++        return m_valid;
++    }
++};
++
++/** Sizes around every boundary the opcode checks. */
++constexpr std::array<size_t, 12> CHUNK_SIZES{0, 1, 80, 81, 271, 272, 273, 339, 340, 341, 519, 520};
++/** Hash types around the valid ones. */
++constexpr std::array<uint8_t, 10> HASH_TYPES{0x00, 0x01, 0x02, 0x03, 0x04, 0x80, 0x81, 0x82, 0x83, 0x84};
++
++/** The outcome of an executed OP_CHECKMLDSA44 leaf `<pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44`, from the
++ *  rules of doc/p2mr-mldsa44.md in their order, written independently of the interpreter. */
++ScriptError ExpectedError(const std::vector<std::vector<unsigned char>>& items, const std::array<size_t, 3>& pubkey_sizes,
++                          int64_t budget, bool valid)
++{
++    // The initial stack may not hold elements over 520 bytes.
++    for (const auto& item : items) {
++        if (item.size() > MAX_SCRIPT_ELEMENT_SIZE) return SCRIPT_ERR_PUSH_SIZE;
++    }
++    if (items.size() + 3 < 8) return SCRIPT_ERR_INVALID_STACK_OPERATION;
++    const std::vector<std::vector<unsigned char>> sig_chunks{items.end() - 5, items.end()};
++    const bool signed_check{std::ranges::any_of(sig_chunks, [](const auto& chunk) { return !chunk.empty(); })};
++    if (signed_check && budget - VALIDATION_WEIGHT_PER_MLDSA44_CHECK < 0) return SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT;
++    if (pubkey_sizes != std::array<size_t, 3>{520, 520, 272}) return SCRIPT_ERR_MLDSA44_PUBKEY_SIZE;
++    // What is left on the stack below the eight elements the opcode takes.
++    const size_t left_below{items.size() - 5};
++    if (!signed_check) return left_below == 0 ? SCRIPT_ERR_EVAL_FALSE : SCRIPT_ERR_CLEANSTACK;
++    for (size_t i = 0; i < 4; ++i) {
++        if (sig_chunks[i].size() != 520) return SCRIPT_ERR_MLDSA44_SIG_SIZE;
++    }
++    if (sig_chunks[4].size() != 340 && sig_chunks[4].size() != 341) return SCRIPT_ERR_MLDSA44_SIG_SIZE;
++    if (sig_chunks[4].size() == 341) {
++        const uint8_t hash_type{sig_chunks[4].back()};
++        // The spending transaction has an output for input 0, so SIGHASH_SINGLE has a message.
++        if (!(hash_type == 0x01 || hash_type == 0x02 || hash_type == 0x03 || hash_type == 0x81 || hash_type == 0x82 || hash_type == 0x83)) {
++            return SCRIPT_ERR_MLDSA44_SIG_HASHTYPE;
++        }
++    }
++    if (!valid) return SCRIPT_ERR_MLDSA44_SIG;
++    return left_below == 0 ? SCRIPT_ERR_OK : SCRIPT_ERR_CLEANSTACK;
++}
++} // namespace
++
++FUZZ_TARGET(p2mr_mldsa44)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    // Mostly the sizes the rules accept, so that the later rules are reached; now and then another.
++    const auto size_or_other{[&](size_t size) {
++        return provider.ConsumeIntegralInRange<int>(0, 3) == 0 ? PickValue(provider, CHUNK_SIZES) : size;
++    }};
++
++    // The leaf: three pushes of up to 520 bytes, then byte 0xf0.
++    std::array<size_t, 3> pubkey_sizes;
++    CScript leaf;
++    for (size_t i = 0; i < pubkey_sizes.size(); ++i) {
++        pubkey_sizes[i] = size_or_other(MLDSA44_PUBKEY_CHUNK_SIZES[i]);
++        leaf << std::vector<unsigned char>(pubkey_sizes[i], provider.ConsumeIntegral<uint8_t>());
++    }
++    leaf << OP_CHECKMLDSA44;
++    const uint8_t leaf_version{provider.ConsumeIntegralInRange<int>(0, 3) != 0 ? TAPROOT_LEAF_TAPSCRIPT : static_cast<uint8_t>(provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK)};
++    // Depth one (a sibling hash in the control block) or depth zero.
++    const bool depth_one{provider.ConsumeIntegralInRange<int>(0, 3) != 0};
++    std::vector<unsigned char> control{static_cast<unsigned char>(leaf_version | 1)};
++    if (depth_one) control.resize(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE, 0x5a);
++    const uint256 root{ComputeP2MRMerkleRoot(control, ComputeTapleafHash(leaf_version, leaf))};
++    const CScript script_pubkey{CScript{} << OP_2 << ToByteVector(root)};
++
++    // The initial stack: up to two other elements, then five signature chunks; or an arbitrary count.
++    const size_t below{provider.ConsumeIntegralInRange<size_t>(0, 2)};
++    const size_t count{provider.ConsumeIntegralInRange<int>(0, 3) == 0 ? provider.ConsumeIntegralInRange<size_t>(0, 7) : below + 5};
++    const bool empty_signature{provider.ConsumeIntegralInRange<int>(0, 7) == 0};
++    std::vector<std::vector<unsigned char>> items(count);
++    for (size_t i = 0; i < count; ++i) {
++        const size_t chunk{i + std::min<size_t>(5, count) - count}; // index among the last five, if one of them
++        size_t size;
++        if (i + 5 < count) {
++            size = PickValue(provider, CHUNK_SIZES);
++        } else if (empty_signature) {
++            size = 0;
++        } else if (chunk < 4) {
++            size = provider.ConsumeIntegralInRange<int>(0, 7) == 0 ? provider.ConsumeIntegralInRange<size_t>(519, 522) : size_or_other(520);
++        } else {
++            size = size_or_other(provider.ConsumeBool() ? 340 : 341);
++        }
++        items[i].assign(size, 0x33);
++        // A 341-byte last chunk ends in the hash type.
++        if (!items[i].empty()) items[i].back() = provider.ConsumeBool() ? PickValue(provider, HASH_TYPES) : provider.ConsumeIntegral<uint8_t>();
++    }
++    CScriptWitness witness;
++    witness.stack = items;
++    witness.stack.emplace_back(leaf.begin(), leaf.end());
++    witness.stack.push_back(control);
++
++    CMutableTransaction tx;
++    tx.version = 2;
++    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
++    tx.vin[0].scriptWitness = witness;
++    tx.vout.emplace_back(1000, CScript{} << OP_TRUE);
++    const CTxOut spent{2000, script_pubkey};
++    PrecomputedTransactionData txdata;
++    txdata.Init(tx, {spent}, /*force=*/true);
++
++    const bool active{provider.ConsumeBool()};
++    const bool discourage{provider.ConsumeBool()};
++    script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR};
++    if (active) flags |= SCRIPT_VERIFY_P2MR_MLDSA44;
++    if (discourage) flags |= SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS;
++
++    const bool valid{provider.ConsumeBool()};
++    const FuzzedMLDSA44Checker checker{&tx, spent.nValue, txdata, valid};
++    ScriptError serror;
++    const bool ret{VerifyScript(CScript{}, script_pubkey, &witness, flags, checker, &serror)};
++    assert(ret == (serror == SCRIPT_ERR_OK));
++
++    ScriptError expected;
++    if (!depth_one || leaf_version != TAPROOT_LEAF_TAPSCRIPT) {
++        // A leaf at depth zero is not executed, and a leaf version other than 0xc0 is an upgradable one.
++        expected = SCRIPT_ERR_OK;
++    } else if (!active) {
++        // Without the rules the byte is an OP_SUCCESSx, which overrides everything else.
++        expected = discourage ? SCRIPT_ERR_DISCOURAGE_OP_SUCCESS : SCRIPT_ERR_OK;
++    } else {
++        const int64_t budget{static_cast<int64_t>(::GetSerializeSize(witness.stack)) + VALIDATION_WEIGHT_OFFSET};
++        expected = ExpectedError(items, pubkey_sizes, budget, valid);
++    }
++    assert(serror == expected);
++
++    // A signing wrapper passes every check through unchanged.
++    ScriptError deferred_serror;
++    assert(VerifyScript(CScript{}, script_pubkey, &witness, flags, DeferringSignatureChecker{checker}, &deferred_serror) == ret);
++    assert(deferred_serror == serror);
++}
+-- 
+2.49.0.windows.1
+

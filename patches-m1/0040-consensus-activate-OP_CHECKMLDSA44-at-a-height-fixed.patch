@@ -1,0 +1,255 @@
+From 7bfb2fb344c86b148b23ce2c52087f0fc03a4422 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 08:33:14 -0600
+Subject: [PATCH 40/48] consensus: activate OP_CHECKMLDSA44 at a height fixed
+ for the Ark-0 signet
+
+A buried deployment, p2mr_mldsa44, sets SCRIPT_VERIFY_P2MR_MLDSA44 on
+blocks at or above its height where P2MR is active too.
+
+The height is a rule of the network it applies to, so it is not an
+option: two nodes of one signet could otherwise enforce different rules
+under the same challenge, and split. It is ARK0_MLDSA44_HEIGHT, a
+constant that applies only to the signet whose challenge is Ark-0's,
+set to 8600 for the rollout of 2026-09-25. Any other signet, the default
+signet, testnet3, testnet4 and mainnet never activate the rules.
+
+Regtest activates at genesis unless -testactivationheight=p2mr_mldsa44@N
+says otherwise. getdeploymentinfo reports the deployment, and a node
+where it is enabled logs the height at startup.
+---
+ src/chainparamsbase.cpp           |  2 +-
+ src/consensus/params.h            |  8 +++++++-
+ src/deploymentinfo.cpp            |  4 ++++
+ src/init.cpp                      |  4 ++++
+ src/kernel/chainparams.cpp        | 13 +++++++++++++
+ src/kernel/chainparams.h          | 10 ++++++++++
+ src/rpc/blockchain.cpp            |  1 +
+ src/validation.cpp                |  6 ++++++
+ test/functional/rpc_blockchain.py |  3 ++-
+ 9 files changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index c333ef3..621485a 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 5982299..a14c467 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -30,8 +30,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_CSV,
+     DEPLOYMENT_SEGWIT,
+     DEPLOYMENT_P2MR,
++    DEPLOYMENT_P2MR_MLDSA44,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_MLDSA44; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -118,6 +119,9 @@ struct Params {
+     /** Block height at which P2MR (BIP360) becomes active. Set to
+      * std::numeric_limits<int>::max() on chains where it must never activate. */
+     int P2MRHeight;
++    /** Block height at which OP_CHECKMLDSA44 executes in P2MR leaves (doc/p2mr-mldsa44.md).
++     * std::numeric_limits<int>::max() on every chain but the Ark-0 signet and regtest. */
++    int P2MRMLDSA44Height;
+     /** Don't warn about unknown BIP 9 activations below this height.
+      * This prevents us from warning about the CSV and segwit activations. */
+     int MinBIP9WarningHeight;
+@@ -181,6 +185,8 @@ struct Params {
+             return SegwitHeight;
+         case DEPLOYMENT_P2MR:
+             return P2MRHeight;
++        case DEPLOYMENT_P2MR_MLDSA44:
++            return P2MRMLDSA44Height;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index 9567da3..3774498 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -35,6 +35,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "segwit";
+     case Consensus::DEPLOYMENT_P2MR:
+         return "p2mr";
++    case Consensus::DEPLOYMENT_P2MR_MLDSA44:
++        return "p2mr_mldsa44";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -53,6 +55,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_CSV;
+     } else if (name == "p2mr") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR;
++    } else if (name == "p2mr_mldsa44") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_MLDSA44;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index f0d9aa8..a86008c 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -959,6 +959,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+     if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR)) {
+         LogInfo("P2MR consensus rules active from height %d", chainparams.GetConsensus().P2MRHeight);
+     }
++    // OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md) is only enabled on the Ark-0 signet and regtest.
++    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
++        LogInfo("P2MR ML-DSA-44 rules active from height %d", chainparams.GetConsensus().P2MRMLDSA44Height);
++    }
+ 
+     // Warn if unrecognized section name are present in the config file.
+     bilingual_str warnings;
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 31c1ed6..e30843c 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -34,6 +34,9 @@
+ 
+ using namespace util::hex_literals;
+ 
++//! The signet challenge of Ark-0, the network ARK0_MLDSA44_HEIGHT is for.
++static constexpr auto ARK0_SIGNET_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"_hex_u8};
++
+ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+ {
+     CMutableTransaction txNew;
+@@ -94,6 +97,7 @@ public:
+         consensus.CSVHeight = 419328; // 000000000000000004a1b34462cb8aeebd5799177f7a29cf28f2d1961716b5b5
+         consensus.SegwitHeight = 481824; // 0000000000000000001c8018d9cb3b742ef25114f27563e3fc4a1902167f9893
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on mainnet
++        consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -226,6 +230,7 @@ public:
+         consensus.CSVHeight = 770112; // 00000000025e930139bac5c6c31a403776da130831ab85be56578f3fa75369bb
+         consensus.SegwitHeight = 834624; // 00000000002b980fcd729daaa248fd9316a5200e9b367f4ff2c42453e84201ca
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet3
++        consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -334,6 +339,7 @@ public:
+         consensus.CSVHeight = 1;
+         consensus.SegwitHeight = 1;
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet4
++        consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -489,6 +495,9 @@ public:
+         // P2MR (BIP360) is only activated on custom signets, i.e. when the operator supplies their
+         // own challenge. The default (public) signet keeps it disabled.
+         consensus.P2MRHeight = options.challenge ? 1 : std::numeric_limits<int>::max();
++        // OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md) only activates on the Ark-0 signet,
++        // from the height this code fixes for that network. There is no option for it.
++        consensus.P2MRMLDSA44Height = std::ranges::equal(bin, ARK0_SIGNET_CHALLENGE) ? ARK0_MLDSA44_HEIGHT : std::numeric_limits<int>::max();
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         // A different target spacing for the retargets from a height on.
+@@ -587,6 +596,7 @@ public:
+         consensus.CSVHeight = 1;    // Always active unless overridden
+         consensus.SegwitHeight = 0; // Always active unless overridden
+         consensus.P2MRHeight = 0;   // Always active unless overridden
++        consensus.P2MRMLDSA44Height = 0; // Always active unless overridden
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -641,6 +651,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_P2MR:
+                 consensus.P2MRHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_MLDSA44:
++                consensus.P2MRMLDSA44Height = int{height};
++                break;
+             }
+         }
+ 
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 0858fbc..3d52eaf 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -22,6 +22,16 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++/**
++ * Height from which the Ark-0 signet, the P2MR test network whose challenge is
++ * 5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae,
++ * executes OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md). It is a rule of
++ * that network, so it is fixed here rather than given by an option that two of its
++ * nodes could set differently. Set once, for the rollout of 2026-09-25; it does not
++ * change after a build carrying it has left the network's own nodes.
++ */
++inline constexpr int ARK0_MLDSA44_HEIGHT{8600};
++
+ struct AssumeutxoHash : public BaseHash<uint256> {
+     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+ };
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 5edf4d5..06aea5b 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1481,6 +1481,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_CSV);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 96a69c7..4ca6be9 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2294,6 +2294,12 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_P2MR;
+     }
+ 
++    // Enforce OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md), which needs P2MR
++    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR) &&
++        DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
++        flags |= SCRIPT_VERIFY_P2MR_MLDSA44;
++    }
++
+     return flags;
+ }
+ 
+diff --git a/test/functional/rpc_blockchain.py b/test/functional/rpc_blockchain.py
+index ab9acbd..63e8280 100755
+--- a/test/functional/rpc_blockchain.py
++++ b/test/functional/rpc_blockchain.py
+@@ -213,7 +213,7 @@ class BlockchainTest(BitcoinTestFramework):
+         assert_equal(gdi_result, {
+           "hash": blockhash,
+           "height": height,
+-          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2SH","TAPROOT","WITNESS"],
++          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2MR_MLDSA44","P2SH","TAPROOT","WITNESS"],
+           "deployments": {
+             'bip34': {'type': 'buried', 'active': True, 'height': 2},
+             'bip66': {'type': 'buried', 'active': True, 'height': 3},
+@@ -221,6 +221,7 @@ class BlockchainTest(BitcoinTestFramework):
+             'csv': {'type': 'buried', 'active': True, 'height': 5},
+             'segwit': {'type': 'buried', 'active': True, 'height': 6},
+             'p2mr': {'type': 'buried', 'active': True, 'height': 0},
++            'p2mr_mldsa44': {'type': 'buried', 'active': True, 'height': 0},
+             'testdummy': {
+                 'type': 'bip9',
+                 'bip9': {
+-- 
+2.49.0.windows.1
+

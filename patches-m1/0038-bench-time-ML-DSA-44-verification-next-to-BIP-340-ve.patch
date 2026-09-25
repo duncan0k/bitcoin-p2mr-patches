@@ -1,0 +1,100 @@
+From a23158f3cbc4b84c85b06bf00d0ef0138f353d9c Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Wed, 23 Sep 2026 06:39:35 -0600
+Subject: [PATCH 38/48] bench: time ML-DSA-44 verification next to BIP-340
+ verification
+
+M1 charges an ML-DSA-44 check against the BIP 342 validation budget,
+where a BIP-340 check costs 50. VerifyMLDSA44 and VerifySchnorrBIP340
+run the two verifications in one process, so their ratio on a given
+machine is read off one run. The Schnorr case includes parsing the
+x-only key, as every tapscript signature check does.
+---
+ src/bench/CMakeLists.txt |  1 +
+ src/bench/mldsa44.cpp    | 62 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 63 insertions(+)
+ create mode 100644 src/bench/mldsa44.cpp
+
+diff --git a/src/bench/CMakeLists.txt b/src/bench/CMakeLists.txt
+index 50b29a1..2a6ab64 100644
+--- a/src/bench/CMakeLists.txt
++++ b/src/bench/CMakeLists.txt
+@@ -36,6 +36,7 @@ add_executable(bench_bitcoin
+   mempool_eviction.cpp
+   mempool_stress.cpp
+   merkle_root.cpp
++  mldsa44.cpp
+   obfuscation.cpp
+   parse_hex.cpp
+   peer_eviction.cpp
+diff --git a/src/bench/mldsa44.cpp b/src/bench/mldsa44.cpp
+new file mode 100644
+index 0000000..27e6c63
+--- /dev/null
++++ b/src/bench/mldsa44.cpp
+@@ -0,0 +1,62 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <bench/bench.h>
++#include <crypto/mldsa44.h>
++#include <key.h>
++#include <pubkey.h>
++#include <test/util/mldsa44_fixture.h>
++#include <uint256.h>
++#include <util/strencodings.h>
++
++#include <array>
++#include <cassert>
++#include <vector>
++
++// The two verifications M1 weighs against each other when it fixes the
++// validation weight of an ML-DSA-44 check against that of a BIP-340 check
++// (50 per check in BIP 342). Run them together, in one process on one
++// machine, and compare the two per-verification times.
++
++static void VerifyMLDSA44(benchmark::Bench& bench)
++{
++    const std::vector<unsigned char> pubkey{ParseHex(MLDSA44_FIXTURE_PUBKEY_HEX)};
++    const std::vector<unsigned char> msg{ParseHex(MLDSA44_FIXTURE_MSG_HEX)};
++    const std::vector<unsigned char> ctx{MLDSA44_FIXTURE_CONTEXT.begin(), MLDSA44_FIXTURE_CONTEXT.end()};
++    const std::vector<unsigned char> sig{ParseHex(MLDSA44_FIXTURE_SIG_HEX)};
++    const std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey_span{pubkey.data(), MLDSA44_PUBKEY_SIZE};
++    const std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE> sig_span{sig.data(), MLDSA44_SIGNATURE_SIZE};
++    assert(MLDSA44Verify(pubkey_span, msg, ctx, sig_span));
++
++    bench.unit("verification").run([&] {
++        const bool ok{MLDSA44Verify(pubkey_span, msg, ctx, sig_span)};
++        assert(ok);
++    });
++}
++
++static void VerifySchnorrBIP340(benchmark::Bench& bench)
++{
++    ECC_Context ecc_context{};
++    CKey key;
++    const std::array<unsigned char, 32> secret{
++        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
++        17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
++    key.Set(secret.begin(), secret.end(), /*fCompressedIn=*/true);
++    const XOnlyPubKey pubkey{key.GetPubKey()};
++    const uint256 msg{uint256::ONE};
++    std::array<unsigned char, 64> sig;
++    const bool signed_ok{key.SignSchnorr(msg, sig, /*merkle_root=*/nullptr, /*aux=*/uint256::ZERO)};
++    assert(signed_ok);
++    assert(pubkey.VerifySchnorr(msg, sig));
++
++    // XOnlyPubKey::VerifySchnorr parses the x-only key and verifies, as
++    // CheckSchnorrSignature does for every tapscript signature check.
++    bench.unit("verification").run([&] {
++        const bool ok{pubkey.VerifySchnorr(msg, sig)};
++        assert(ok);
++    });
++}
++
++BENCHMARK(VerifyMLDSA44);
++BENCHMARK(VerifySchnorrBIP340);
+-- 
+2.49.0.windows.1
+
