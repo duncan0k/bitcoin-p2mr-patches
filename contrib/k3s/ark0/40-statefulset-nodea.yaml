@@ -59,11 +59,15 @@ spec:
       terminationGracePeriodSeconds: 180
       containers:
         - name: bitcoind
-          # The ten consensus patches and nothing else, which is exactly what
-          # the host node A ran: the tree this image was built from hashes to
-          # the same git tree object as ~/bitcoin-p2mr did on the host
-          # (2a416c8befaab7e01762d148b6f0f181f412181f). The block producer must
-          # not run a different consensus build from the chain it extends.
+          # Since 2026-09-25 the same build as node B: the consensus series,
+          # the M0.5 wallet series, the retarget spacing patch and the M1
+          # series (kustomization.yaml). Until then the ten consensus patches,
+          # with the retarget spacing patch on top from 2026-09-22, and no
+          # wallet code. The first image was exactly what the host node A ran:
+          # its tree hashes to the same git tree object as ~/bitcoin-p2mr did
+          # on the host (2a416c8befaab7e01762d148b6f0f181f412181f). The block
+          # producer must not run a different consensus build from the chain it
+          # extends, so a consensus change moves both nodes in one roll.
           image: p2mr-node-m0
           # Built in-cluster and imported into containerd; never pulled.
           imagePullPolicy: IfNotPresent

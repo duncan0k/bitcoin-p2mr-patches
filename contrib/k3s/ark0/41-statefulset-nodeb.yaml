@@ -5,8 +5,10 @@
 # empty one if it does not, which would re-sync the whole chain from node A.
 #
 # Identical to 40-statefulset-nodea.yaml apart from the name, the component
-# label, the configuration key, the two port numbers and the image: node A runs
-# the consensus series alone, node B runs the M0.5 build on top of it.
+# label, the configuration key, the two port numbers and the image label. Until
+# 2026-09-25 node A ran the consensus series without wallet code and node B the
+# M0.5 build on top of it; since then both labels name one build that adds the
+# M1 series.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -45,14 +47,16 @@ spec:
       terminationGracePeriodSeconds: 180
       containers:
         - name: bitcoind
-          # M0.5: the ten consensus patches plus the twenty-four wallet patches.
-          # Running the verifying node on it is deliberate, and it is the soak
-          # this network exists for. M0.5 adds wallet and descriptor code only
-          # and changes no consensus rule, so node B accepts exactly the blocks
-          # node A's m0 build produces; what is being watched for is the
-          # opposite result. If node B ever diverges from node A, that is the
-          # finding, not an accident, and the rollback in ARK0-MIGRATION.md
-          # applies.
+          # Since 2026-09-25 the same build as node A: the consensus series,
+          # the M0.5 wallet series, the retarget spacing patch and the M1
+          # series (kustomization.yaml). Until then it ran M0.5 over the
+          # consensus series, with the retarget spacing patch on top from
+          # 2026-09-22, while node A ran the consensus series without wallet
+          # code, a deliberate soak: M0.5 adds wallet and descriptor
+          # code only and changes no consensus rule, so node B had to accept
+          # exactly the blocks node A's build produced. If node B ever diverges
+          # from node A, that is a finding, not an accident, and the rollback
+          # in ARK0-MIGRATION.md applies.
           image: p2mr-node-m05
           # Built in-cluster and imported into containerd; never pulled.
           imagePullPolicy: IfNotPresent

@@ -72,20 +72,23 @@ namespace: ark0
 # are the Ark-0 network's, and they name builds that exist only in that
 # cluster's containerd. The two node tags were moved on 2026-09-22 to builds
 # that also carry patches-spacing/, which the chain needs from height 8064 on,
-# and the producer's on 2026-09-23 to a build that adds the CA certificates
-# alert.py needs; both rolls are recorded at the end of ../ARK0-MIGRATION.md,
-# with the tags they moved off. Every tag here ends in the first twelve
-# characters of the commit its build's PROVENANCE.txt records. A bootstrap
-# anywhere else replaces all three with the references its own builds printed,
-# before it starts a workload -- step 2 of ../ARK0-MIGRATION.md says where to
-# read them.
+# the producer's on 2026-09-23 to a build that adds the CA certificates
+# alert.py needs, and the two node tags on 2026-09-25 to one build that also
+# carries patches-m1/, whose rule applies from height 8600. From that roll on,
+# node A runs the M0.5 wallet series too, so its label no longer says what it
+# runs; the label is only a key for this block. All three rolls are recorded
+# at the end of ../ARK0-MIGRATION.md, with the tags they moved off. Every tag
+# here ends in the first twelve characters of the commit its build's
+# PROVENANCE.txt records. A bootstrap anywhere else replaces all three with the
+# references its own builds printed, before it starts a workload -- step 2 of
+# ../ARK0-MIGRATION.md says where to read them.
 images:
   - name: p2mr-node-m0
     newName: p2mr-node
-    newTag: v31.1-p2mr-m0-spacing-b366cab55464
+    newTag: v31.1-p2mr-m05-spacing-m1-369f88ce867e
   - name: p2mr-node-m05
     newName: p2mr-node
-    newTag: v31.1-p2mr-m05-spacing-b0cf3ef36747
+    newTag: v31.1-p2mr-m05-spacing-m1-369f88ce867e
   - name: p2mr-miner
     newName: p2mr-miner
     newTag: v31.1-p2mr-d3ac79467cea

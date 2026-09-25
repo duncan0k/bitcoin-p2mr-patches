@@ -22,13 +22,14 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$HERE/../.." && pwd)}"
 BUILDER_IMAGE="${BUILDER_IMAGE:-p2mr-builder:v31.1}"
 MINER_IMAGE="${MINER_IMAGE:-p2mr-miner:v31.1-p2mr}"
 
-# There is no single node image. The two nodes deliberately run different
-# builds -- node A the ten consensus patches, node B those plus the twenty-four
-# M0.5 wallet patches, each with the retarget spacing patch on top since
-# 2026-09-22 -- so one tag cannot name both, and the default used to
-# name neither: it was p2mr-node:v31.1-p2mr while the manifests asked for
-# -m0 and -m05, so following the documented commands produced an image no
-# workload would ever pull.
+# A node image's tag says which patch sets it carries. Until 2026-09-25 the
+# two nodes deliberately ran different builds -- node A the ten consensus
+# patches, node B those plus the twenty-four M0.5 wallet patches, each with the
+# retarget spacing patch on top since 2026-09-22 -- and since then both run one
+# build that also carries the M1 series. One tag cannot name every such build,
+# and the default used to name neither: it was p2mr-node:v31.1-p2mr while the
+# manifests asked for -m0 and -m05, so following the documented commands
+# produced an image no workload would ever pull.
 #
 # The suffix is therefore derived from what was actually built and tested,
 # rather than typed. build.sh records the patch sets in PROVENANCE.txt beside
@@ -143,6 +144,7 @@ node_image_for_patch_sets() {
         "master m05")         printf '%s-m05\n'         "$NODE_IMAGE_BASE" ;;
         "master spacing")     printf '%s-m0-spacing\n'  "$NODE_IMAGE_BASE" ;;
         "master m05 spacing") printf '%s-m05-spacing\n' "$NODE_IMAGE_BASE" ;;
+        "master m05 spacing m1") printf '%s-m05-spacing-m1\n' "$NODE_IMAGE_BASE" ;;
         *) die "no node image tag is defined for patch sets '$1';" \
                "add one to node_image_for_patch_sets in common.sh" ;;
     esac

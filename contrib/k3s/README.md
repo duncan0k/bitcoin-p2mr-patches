@@ -119,7 +119,7 @@ published first; build a new one rather than taking the name away from it.
 patch directories and leaves the source tree, the compiler cache and the logs
 alone.
 
-## Running the two patch sets
+## Running the patch sets
 
 The consensus series alone (the ten patches in `patches/`, the default):
 
@@ -140,8 +140,8 @@ FUNCTIONAL_TESTS="wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py w
 contrib/k3s/run-build.sh
 ```
 
-Either one with the retarget spacing patch on top, which is what both Ark-0
-nodes run since 2026-09-22:
+Either one with the retarget spacing patch on top, which is what the two Ark-0
+nodes ran from 2026-09-22 to 2026-09-25:
 
 ```bash
 KUBECTL="sudo k3s kubectl" \
@@ -158,9 +158,21 @@ FUNCTIONAL_TESTS="wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py w
 contrib/k3s/run-build.sh
 ```
 
+The M1 series (`patches-m1/`, `OP_CHECKMLDSA44`) on top of all three, which is
+what both Ark-0 nodes run since 2026-09-25:
+
+```bash
+KUBECTL="sudo k3s kubectl" \
+PATCH_SETS="master m05 spacing m1" \
+FRESH_CLONE=1 \
+RUN_DEFAULT_FUNCTIONAL=1 \
+FUNCTIONAL_TESTS="feature_p2mr_mldsa44.py feature_p2mr.py feature_p2mr_signet.py p2p_segwit.py wallet_p2mr.py wallet_p2mr_signet.py wallet_p2mr_multisig.py wallet_p2mr_timelock.py feature_taproot.py rpc_blockchain.py mempool_accept.py feature_signet.py tool_signet_miner.py" \
+contrib/k3s/run-build.sh
+```
+
 The patch set names are directories under `/work/patches`, applied in the order
-given. `seed.sh` publishes `patches/` as `master`, `patches-m05/` as `m05` and
-`patches-spacing/` as `spacing`.
+given. `seed.sh` publishes `patches/` as `master`, `patches-m05/` as `m05`,
+`patches-spacing/` as `spacing` and `patches-m1/` as `m1`.
 
 ## Configuration
 
@@ -204,6 +216,7 @@ compiled; the default build leaves it out, as `apply.sh` does.
 /work/patches/master/   the 10 consensus patches + SHA256SUMS
 /work/patches/m05/      the 24 M0.5 wallet patches + SHA256SUMS-m05
 /work/patches/spacing/  the retarget spacing patch + SHA256SUMS-spacing
+/work/patches/m1/       the 13 M1 patches (OP_CHECKMLDSA44) + SHA256SUMS-m1
 /work/imgctx/builder/   kaniko context for Dockerfile.builder
 /work/imgctx/node/      kaniko context for Dockerfile.node, bin/ staged by build.sh
 /work/img/              image tarballs, deleted once imported
@@ -252,11 +265,13 @@ The image contains `bitcoind`, `bitcoin-cli`, `bitcoin-tx`, `bitcoin-util` and
 10000 with `/data` as the data directory, and takes every parameter from the
 pod spec.
 
-The command names no tag, and that is deliberate. There is no single node
-image: Ark-0 runs node A on the ten consensus patches and node B on those plus
-the twenty-four M0.5 wallet patches, each with the retarget spacing patch on top
-since 2026-09-22, so the two need different tags, and getting
-them the wrong way round would put wallet code on the block producing node.
+The command names no tag, and that is deliberate. A tag says which patch sets
+the image carries. Until 2026-09-25 Ark-0 ran node A on the ten consensus
+patches and node B on those plus the twenty-four M0.5 wallet patches, each with
+the retarget spacing patch on top since 2026-09-22, so the two needed different
+tags, and getting them the wrong way round would have put wallet code on the
+block producing node. Since then both run one build that adds the M1 series,
+which puts the wallet code on node A by decision rather than by a mix-up.
 `build-image.sh` therefore reads the patch sets out of the provenance file and
 derives the suffix from what was actually built and tested:
 
@@ -266,6 +281,7 @@ derives the suffix from what was actually built and tested:
 | `master m05` | `p2mr-node:v31.1-p2mr-m05-<head12>` |
 | `master spacing` | `p2mr-node:v31.1-p2mr-m0-spacing-<head12>` |
 | `master m05 spacing` | `p2mr-node:v31.1-p2mr-m05-spacing-<head12>` |
+| `master m05 spacing m1` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-<head12>` |
 
 The `<head12>` suffix is what makes the tag immutable; the next section covers
 it. The series part is what this lookup decides.

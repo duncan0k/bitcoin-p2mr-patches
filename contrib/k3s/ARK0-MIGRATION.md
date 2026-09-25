@@ -2351,3 +2351,132 @@ problems.
 
 Remove the `heartbeat-url` key from the Secret, or revert `60-observe.yaml`.
 Pause the check first, or it reports the silence about 40 minutes later.
+
+## Executed on 2026-09-25 (M1 roll)
+
+Both nodes moved onto one build that also carries `patches-m1/`: `OP_CHECKMLDSA44`, an experimental
+ML-DSA-44 signature check in executed P2MR leaves, a buried deployment `p2mr_mldsa44` that applies
+from height 8600 on this network only (`ARK0_MLDSA44_HEIGHT` in the series, `ark0/NETWORK.md` "Rule
+change at height 8600 (M1)"). Node A now runs the M0.5 wallet series too: both nodes carry the same
+consensus code, all of the series' test evidence is on this build, and M0.5 had run on node B since
+2026-09-16. Both nodes also gained `discover=0` (`10-configmap.yaml`). Carried out between 00:01Z and
+00:18Z, following "Rolling a workload onto a new build" and the maintenance sequence above, with the
+producer stopped once more afterwards for one demonstration block.
+
+### The builds
+
+| Run | Patch sets | Result |
+|---|---|---|
+| `m1-h8600-0924a` | `master m05 spacing m1`, 48 commits, fresh clone | every test passed, `series UNVERIFIED`: see below |
+| `m1-h8600-0924b` | the same, fresh clone | `series ok`, 48 commits; `test_bitcoin` 744 of 750 passed, 1 passed with warnings, 5 skipped; 13 P2MR and neighbouring functional scripts passed (14 runs: `rpc_blockchain.py` with v1 and v2 transport), among them `feature_p2mr_mldsa44`, `feature_p2mr_signet`, `feature_signet`, `tool_signet_miner`, the four `wallet_p2mr*`; the default functional suite passed, 274 tests, 17 skipped |
+
+The first run failed nothing but the series check. Patch 0046 adds a binary file
+(`src/bench/data/p2mr_mldsa44_spends.raw`), and for a binary diff `git patch-id` hashes the object
+ids on the diff's `index` line, which `format-patch` writes in full and a plain `git show` abbreviates,
+so the tree's patch-id of that commit never matched its own file. `build.sh` now takes the tree's
+patch-ids from `git show --binary`; text diffs are unaffected, since patch-id ignores their `index`
+lines. The five binaries of the two runs are byte for byte the same; `bitcoind` hashes to
+`02548ece2c34d69f5f3221cf895049aa67884d42eeb36f0f3ca4c0d5700c95ba`.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-369f88ce867e`, new | `sha256:1f18537509dc35325133f51f78215f484d06ee43643aa6bd40c473638d0a94d8` | `sha256:384ad29c6a3bb524fa0a041bb9525605a7b6c04373c49de255d599b27ffb8e93` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-d3ac79467cea`, unchanged | — | — |
+| nothing | `p2mr-node:v31.1-p2mr-m0-spacing-b366cab55464`, kept | — | node A's way back |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-b0cf3ef36747`, kept | — | node B's way back |
+
+Before the roll the image was started once on an empty data directory with the Ark-0 challenge: it
+logged the three rule lines below and reported `p2mr_mldsa44` buried at 8600, not active.
+
+### The sequence
+
+1. **`render-config.sh --from-live`**: the diff against the live ConfigMap was `discover=0` and its
+   comment, once in each configuration. **`kubectl diff -k` of the maintenance overlay**: the
+   producer's `replicas` from 1 to 0 and the two node images, nothing else.
+2. **The producer was scaled to zero on its own** at 00:01:48Z and was gone at 00:02:21Z. The tip was
+   frozen at 7475 on both nodes.
+3. **The rendered ConfigMap, then the maintenance overlay**, at 00:02:30Z. Both pods started at
+   00:02:35Z and were ready at 00:02:46Z.
+4. **Checks on the frozen tip**, both nodes: `imageID` equal to the image's id above; the log lines
+   `Signet difficulty retargets against 90 s per block from height 8064`, `P2MR consensus rules active
+   from height 1`, `P2MR ML-DSA-44 rules active from height 8600`, `Config file arg: [signet]
+   discover="0"`, and no `Ignoring unknown configuration value`; `getdeploymentinfo` `p2mr` buried,
+   height 1, active, and `p2mr_mldsa44` buried, height 8600, not active; chain tips unchanged (one
+   `active`, three `invalid` at 127); `localaddresses` empty; the public node connected by name; node
+   A's wallet `ark0` loaded.
+5. **The ordinary overlay** started the producer at 00:03:17Z. The node pods did not roll again.
+
+### Before and after
+
+| | 00:01:36Z | 00:02:54Z, both nodes on the new image | after block 7477 |
+|---|---|---|---|
+| block count, both nodes | 7475 | 7475 | 7477 |
+| best hash, both | `000000240b903cdfe0d03266836a40d33bcd47a9bc9aa822f8325a9e1471eac5` | the same | `0000000fa01690cb6936e59daca734200ec0bd930f21138f22d9d9472d08c585` |
+| connections, each node | 3 | 2 | 3 |
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 7475 | `000000240b903cdfe0d03266836a40d33bcd47a9bc9aa822f8325a9e1471eac5` | 23:59:50Z (09-24) | the frozen tip |
+| 7476 | `000000052036c1ed699f57705957cd336ce5d4ded50636901a38aaac37f8fc1d` | 00:03:32Z | the first block node A signed with the M0.5 wallet code |
+| 7477 | `0000000fa01690cb6936e59daca734200ec0bd930f21138f22d9d9472d08c585` | 00:05:33Z | |
+
+Node B carried the same height and hash at every reading.
+
+### The soak
+
+`soak-roll-0925`, funding from node A and spending from node B, both on the new build:
+
+```
+2026-09-25T00:06:17Z | f62d1f496487e7566683af8d8b2cedeab196e0b412b0aa1a5348c3f063dc0d81 | 6430696952ff006965d3c9786a7802445431017050e023dedc0fd80bd1cd6e3d | 7478/7479 | ok (index 143, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)
+```
+
+### The two external nodes
+
+Both moved onto the same `bitcoind` and `bitcoin-cli` (hashes checked against the build, `ldd`
+resolved on Debian 13); the previous binaries are kept beside them as `*.m0-spacing`. The public node
+at 00:13:26Z, the relay at 00:14:17Z: each logged the three rule lines, reported `p2mr_mldsa44` at 8600,
+and followed the tip. The public node's three peers are the two cluster nodes and the relay, all
+inbound with `noban`. The explorer's settings gained `MLDSA44_HEIGHT=8600` after its node had moved.
+
+### A block below the height
+
+A spend that executes the opcode with an invalid signature is valid below 8600, where the byte is still
+`OP_SUCCESS240`, and no node relays it (`mempool-script-verify-flag-failed (OP_SUCCESSx reserved for
+soft-fork upgrades)` on both nodes; before the roll both answered `bad-witness-nonstandard`). To show
+that on the chain, two template outputs of test keys were funded the day before, at 7278
+(`bb7be821d552491aaa89111b22b8e6acbd07c7bb3ceefeeb173d44a000e516b9`, outputs 0 and 2), and with the
+producer stopped from 00:15:54Z to 00:17:20Z a block was assembled from a one-off pod of the producer
+image, holding a spend of output 0 with one bit of its ML-DSA-44 signature flipped:
+
+| height | hash | spend |
+|---|---|---|
+| 7481 | `0000000d5b3e0b1524c593d31bba696c383dd6d19958be2225c430908592e220` | `7cbbe7f3d6d7a0f752b39b8d85fa4f803e3176d4839995df92abf775450dae40` |
+
+Node A accepted it, node B already had it when it was submitted there (`duplicate`), and both external
+nodes hold it at 7481. Output 2 is kept for the other half: from 8600 on, a block holding a spend of it
+with an invalid signature has to be refused by every node, and a spend with a valid one relayed.
+
+### What this roll does not show yet
+
+The rule does nothing until height 8600, expected on 2026-09-26 or early 2026-09-27 (UTC). What to
+check then, on all four nodes: `getdeploymentinfo` shows `p2mr_mldsa44` active; a block with an invalid
+ML-DSA-44 spend is refused for a script failure; a valid spend is relayed and mined. The retarget at
+8064 comes first and is checked as the 2026-09-22 record describes.
+
+### Rolling back this roll
+
+Below height 8600 the roll is fully reversible, because M1 changes nothing there. Stop the producer,
+set the two node pins back to `p2mr-node:v31.1-p2mr-m0-spacing-b366cab55464` and
+`p2mr-node:v31.1-p2mr-m05-spacing-b0cf3ef36747`, apply the maintenance overlay, and start the producer;
+`discover=0` may stay, both old builds know it. The external nodes get their `*.m0-spacing` binaries
+back the same way.
+
+From 8600 on, a node rolled back stops enforcing the rule but keeps following the chain. If it is node
+A, its own policy still keeps every spend that executes the byte out of its mempool and templates, so
+the likely result is that such spends stop being mined; a block the other nodes refuse needs a
+non-standard transaction to reach node A's template. Both results are reasons not to roll node A back
+alone after 8600.

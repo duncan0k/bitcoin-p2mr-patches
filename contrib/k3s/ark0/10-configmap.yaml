@@ -15,11 +15,12 @@
 # The configurations differ from the host's only where a pod forces them to:
 # bind and rpcbind move off the loopback, because another pod cannot reach a
 # pod's loopback, and the peer addresses become Service names. The ports, the
-# challenge, txindex and the debug category are unchanged. Two lines the host
+# challenge, txindex and the debug category are unchanged. Three lines the host
 # never had: signetpowtargetspacing, added on 2026-09-22 for the retargets from
 # height 8064 on (it needs a node image built with patches-spacing/, and an
-# older bitcoind would ignore it with only a warning), and, since 2026-09-24,
-# the addnode line for the network's public node (ark0/JOIN.md).
+# older bitcoind would ignore it with only a warning), since 2026-09-24,
+# the addnode line for the network's public node (ark0/JOIN.md), and, since
+# 2026-09-25, discover=0.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,6 +47,9 @@ data:
     port=38433
     rpcport=38432
     listen=1
+    # The node advertises no address of its own: the public node is the
+    # network's only public face, and would pass on any address it learns.
+    discover=0
     bind=0.0.0.0:38433
     rpcbind=0.0.0.0
     rpcallowip=10.42.0.0/16
@@ -72,6 +76,8 @@ data:
     port=38443
     rpcport=38442
     listen=1
+    # As on node A: no address of its own is advertised.
+    discover=0
     bind=0.0.0.0:38443
     rpcbind=0.0.0.0
     rpcallowip=10.42.0.0/16

@@ -27,6 +27,7 @@
 #                          "master" = the 10 consensus patches
 #                          "master m05" = those plus the 24 M0.5 wallet patches
 #                          either, then "spacing" = the retarget spacing patch
+#                          "master m05 spacing m1" = all three and the M1 series
 #   FRESH_CLONE            1 = delete and re-clone the source tree first
 #   APPLY_PATCHES          1 = reset to the tag and git am the series
 #                          0 = build whatever is already in the tree
@@ -194,10 +195,16 @@ fi
 #
 # This runs whether or not the patches were applied this time. When they were,
 # it is a cheap confirmation that `git am` produced what the files describe.
+#
+# `git show` needs --binary here. For a binary file, patch-id hashes the object
+# ids on the diff's index line; format-patch writes them in full, and a plain
+# `git show` abbreviates them, so a series with a binary file (patches-m1 has
+# one) would never match its own patches. Text diffs are unaffected: patch-id
+# ignores their index lines.
 patch_ids_of_tree() {
     local c
     for c in $(git -C "$SRC" log --format=%H --reverse "$CORE_TAG..HEAD" 2>/dev/null); do
-        git -C "$SRC" show "$c" | git -C "$SRC" patch-id --stable | cut -d' ' -f1
+        git -C "$SRC" show --binary "$c" | git -C "$SRC" patch-id --stable | cut -d' ' -f1
     done
 }
 
@@ -303,6 +310,7 @@ if tree_is_clean; then
     try_series "master m05"
     try_series "master spacing"
     try_series "master m05 spacing"
+    try_series "master m05 spacing m1"
     if [ "$SERIES_VERIFIED" != "yes" ]; then
         SERIES_NOTE="the $TREE_COMMITS commits over $CORE_TAG match no known patch set"
     fi
