@@ -2369,14 +2369,37 @@ producer stopped once more afterwards for one demonstration block.
 |---|---|---|
 | `m1-h8600-0924a` | `master m05 spacing m1`, 48 commits, fresh clone | every test passed, `series UNVERIFIED`: see below |
 | `m1-h8600-0924b` | the same, fresh clone | `series ok`, 48 commits; `test_bitcoin` 744 of 750 passed, 1 passed with warnings, 5 skipped; 13 P2MR and neighbouring functional scripts passed (14 runs: `rpc_blockchain.py` with v1 and v2 transport), among them `feature_p2mr_mldsa44`, `feature_p2mr_signet`, `feature_signet`, `tool_signet_miner`, the four `wallet_p2mr*`; the default functional suite passed, 274 tests, 17 skipped |
+| `m1-repro-cold-0925` | the same, fresh clone, empty compiler cache (2026-09-25, after the roll) | `series ok`, 48 commits; `test_bitcoin` as above; `feature_p2mr_mldsa44` and `feature_p2mr` passed; the five binaries are those of `m1-h8600-0924b`, byte for byte |
+| `m1-pub-cold-0927` | the same from the files published in this repository (patch 0040 reworded, below), fresh clone, empty compiler cache (2026-09-27) | checksums and `series ok`, 48 commits; `test_bitcoin` as above; `feature_p2mr_mldsa44` and `feature_p2mr` passed; the five binaries are those of `m1-h8600-0924b`, byte for byte |
 
 The first run failed nothing but the series check. Patch 0046 adds a binary file
 (`src/bench/data/p2mr_mldsa44_spends.raw`), and for a binary diff `git patch-id` hashes the object
 ids on the diff's `index` line, which `format-patch` writes in full and a plain `git show` abbreviates,
 so the tree's patch-id of that commit never matched its own file. `build.sh` now takes the tree's
 patch-ids from `git show --binary`; text diffs are unaffected, since patch-id ignores their `index`
-lines. The five binaries of the two runs are byte for byte the same; `bitcoind` hashes to
-`02548ece2c34d69f5f3221cf895049aa67884d42eeb36f0f3ca4c0d5700c95ba`.
+lines.
+
+The five binaries of the first two runs are byte for byte the same, but that alone shows little: the
+second run found all 487 of its compilations in the compiler cache that the first had filled. The
+third run repeated the second with `/work/ccache` moved aside, so that every one of the 487 was
+compiled (its cache log shows no hit), and it produced the same five binaries, as did the fourth,
+from the published files and again with no cache hit; `bitcoind` hashes to
+`02548ece2c34d69f5f3221cf895049aa67884d42eeb36f0f3ca4c0d5700c95ba`. `USE_CCACHE=0` would not have
+done this. The Job sets `CCACHE_DIR` in any case, and Core's own build uses ccache whenever it finds
+it; turning that off with `-DWITH_CCACHE=OFF` also drops `-fmacro-prefix-map` from the compiler flags,
+which changes the binaries. The cache was put back afterwards, and so were `/work/out/bin` and
+`/work/imgctx/node`, with the second run's binaries and provenance.
+
+Two things about reproducing these binaries elsewhere. The applied commits differ from run to run,
+since `git am` stamps each with the time it ran, so the `head` in `PROVENANCE.txt` and the suffix of the
+image tag name one run and cannot be reproduced; the binaries do not contain them. And the binaries do
+contain the build path, `/work/src`, in the debug information of libsecp256k1, so a rebuild matches
+byte for byte only at that path.
+
+The `patches-m1/` published in this repository differs from the files these runs applied in the
+message of patch 0040 only. That message still said the height was not set, which stopped being true
+when it was; the reworded commit has the same patch-id and the series the same tree, and the
+checksums in `SHA256SUMS-m1` are those of the published files.
 
 ### Images
 
@@ -2480,3 +2503,63 @@ A, its own policy still keeps every spend that executes the byte out of its memp
 the likely result is that such spends stop being mined; a block the other nodes refuse needs a
 non-standard transaction to reach node A's template. Both results are reasons not to roll node A back
 alone after 8600.
+
+## Executed on 2026-09-26 and 2026-09-27 (the retarget at 8064, M1 active at 8600)
+
+Nothing was rolled; this records what the two earlier sections left to be shown.
+
+### The retarget at 8064
+
+Block 8064, `000000471b85a422db9f1d1be893acb4ca5f3fc594beaa01b739c643effcfee5`, came at
+04:41:49Z on 2026-09-26. Blocks 6048 to 8063 had taken 346,241 s against the 181,440 s of 2016 blocks
+at 90 s, so the rule of 2026-09-22 set its `nBits` to `1d69df08`, from `1d377ac0`: the target 1.91
+times larger, the difficulty from 0.0180 to 0.0094. Both nodes, the public node and the relay hold that
+block with that `nBits`, and none of them then had a tip other than the active one at 8063 or above. The
+same check, run on the retargets at 2016, 4032 and 6048 under the 600 s rule, matched all three. From
+8064 to 8600 blocks came 127.2 s apart on average.
+
+### The host restarted
+
+At 20:10Z on 2026-09-26 the cluster host restarted without shutting down: its journal stops in the
+middle of ordinary activity, and the next boot follows two minutes later. Both nodes and the producer
+started again on their own and went on from the tip; the chain lost nothing. The scratch directory the
+roll had used on the host was gone afterwards, so the demonstrations below ran from copies kept
+elsewhere.
+
+### M1 active at 8600
+
+Block 8600, `0000001d55f182b7fe90f69a6ed37e21169d99607416184d8fffee7a01afff95`, came at 23:38:02Z.
+From then on all four nodes report `p2mr_mldsa44` as buried, active from height 8600, and
+`P2MR_MLDSA44` among the script flags of the next block.
+
+### A block above the height
+
+Output 2 of `bb7be821d552491aaa89111b22b8e6acbd07c7bb3ceefeeb173d44a000e516b9`, kept for this, was
+spent with one bit of its ML-DSA-44 signature flipped, in a block made from a one-off pod of the
+producer image while the producer was stopped with `kubectl scale`:
+
+| height | hash | |
+|---|---|---|
+| 8712 | `00000029f45b9b5714862743e024fbd0956ddfd9717494225aef50a0c79d57b3` | first attempt, refused by nodes A and B |
+| 8714 | `00000054a2b26fd2cfb2d4ab0a271b619ec0ba382c2216ce85e4b88ac1841182` | refused by all four nodes; `ark0/evidence/m1_badblock_mldsa44.hex` |
+
+Every node that validated either block logged `block-script-verify-flag-failed (Invalid ML-DSA-44
+signature)` for input 0 of `467300d5b4bfdcf94c9f2127b59dd5e71829228f3ab9ab9dbdc06de0dcd191db`, and no
+tip moved. The first attempt stopped halfway. Node A relays a block whose proof of work checks out
+before it has validated it (BIP 152 allows that), so node B refused the block from that relay and
+answered the demonstration's own `submitblock` with `duplicate-invalid`; the demonstration expected
+the script failure itself, stopped there, and started the producer again before the block could go to
+the public node and the relay. The second attempt accepted `duplicate-invalid` from a node whose chain
+tips list the block as invalid, and went on: node A and the public node refused it when it was
+submitted, node B and the relay when a peer relayed it to them. The producer was stopped for about one
+minute and about one and a half.
+
+Then the same spend with a valid signature (wtxid
+`f60d33f0e8f35e33f659059266e6f190378c9ee5b0c8ae3e9e63b546295288b7`) was sent to the public node at
+03:38:47Z. It reached the mempools of both nodes and of the relay within 20 seconds and was mined at
+8715, `0000004813f99aa8205b33255208fd9191d989fbe6b2efd9f58aadac17a4e481`. The explorer shows the spend
+as one whose signature the nodes that enforce the rule checked.
+
+A new node, started on an empty data directory in the cluster and synced from the public node, refused
+the block at 8714 the same way once `invalidateblock` had put its tip back at 8713, and returned to the
+tip with `reconsiderblock`. `ark0/NETWORK.md` gives those three commands.
