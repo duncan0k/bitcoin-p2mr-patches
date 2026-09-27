@@ -1,7 +1,7 @@
 # Joining Ark-0
 
 Ark-0 is the experimental custom signet described in [`NETWORK.md`](NETWORK.md). It now has
-one public node, so instead of only replaying the snapshot offline you can build the patched
+one public node, so instead of only replaying the snapshot offline you can run the patched
 node yourself, connect it, and check the P2MR rules against your own copy of the live chain.
 
 Before you start:
@@ -14,26 +14,98 @@ Before you start:
   <https://ark0-explorer.cipherscope.io> shows blocks and transactions, with P2MR spends taken
   apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
-- **Rule changes are announced in this repository before they apply.** The next one, milestone
-  M1, applies from height 8600 ("Rule change at height 8600 (M1)" in `NETWORK.md`). It is a soft
-  fork: a node built from this repository keeps following the chain past that height, but does
-  not enforce the new rule and does not relay the spends that use it. A new challenge would be a
-  new network, and everyone would start again.
+- **Rule changes are announced in this repository before they apply.** The latest one, milestone
+  M1, has applied since height 8600 ("Rule change at height 8600 (M1)" in `NETWORK.md`). It is
+  a soft fork: a node built without `patches-m1/` keeps following the chain, but does not
+  enforce that rule and does not relay the spends that use it. A new challenge would be a new
+  network, and everyone would start again.
 
-## 1. Build the node
+## 1. Get the node
 
 A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
 the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). You need the consensus series in
-`patches/` and the retarget patch in `patches-spacing/`:
+seconds per block (see "Parameters" in `NETWORK.md`). The operator's nodes run four patch sets
+on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series in `patches-m05/`
+(section 4 uses it), the retarget patch in `patches-spacing/`, and the M1 series in
+`patches-m1/`, which applies on top of the other three. You can take that build prebuilt, as
+binaries or as a container image, or build it yourself; the rest of this guide works the same
+with either.
+
+### Prebuilt binaries or image
+
+The release [`ark0-node-m1`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m1)
+has the binaries for x86_64 Linux, `SHA256SUMS` and its signature `SHA256SUMS.asc`. Download the
+three into an empty directory, with the release key from this repository, and check the signature:
+
+```bash
+R=https://github.com/duncan0k/bitcoin-p2mr-patches
+curl -fsSL --remote-name-all $R/releases/download/ark0-node-m1/ark0-node-m1-x86_64-linux-gnu.tar.gz \
+  $R/releases/download/ark0-node-m1/SHA256SUMS $R/releases/download/ark0-node-m1/SHA256SUMS.asc \
+  https://raw.githubusercontent.com/duncan0k/bitcoin-p2mr-patches/ark0-node-m1/ark0/release-signing-key.asc
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+```
+
+`gpg` has to report a good signature from `Ark-0 release signing key (duncan0k) <dev@cipherscope.io>`
+and end with this line:
+
+```
+Primary key fingerprint: 025D 989B 68FF 923F 8EF6  9D4B 28F6 5A19 58A2 361A
+```
+
+The same key is published at <https://github.com/duncan0k.gpg>, with the same fingerprint. The
+warning that the key is not certified with a trusted signature is expected. Then check the
+archive, unpack it, and check the binaries too:
+
+```bash
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf ark0-node-m1-x86_64-linux-gnu.tar.gz
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+The binaries are linked against the system's C and C++ runtimes, libevent and SQLite. They need
+glibc 2.34 or later and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
+both, Ubuntu 22.04 and Debian 12 do not. On Ubuntu 24.04 or Debian 13, install the libraries with
+`sudo apt-get install libevent-core-2.1-7t64 libevent-extra-2.1-7t64 libevent-pthreads-2.1-7t64 libsqlite3-0`.
+Wherever this guide says `./build/bin/`, use `ark0-node-m1/bin/` instead.
+
+The image is `ghcr.io/duncan0k/ark0-node`, also for x86_64, with the libraries in it. Pull it by
+its digest, the hash on the line of `SHA256SUMS` that names `ark0-node-m1-image-manifest.json`, so
+that what you run is what the signature covers:
+
+```bash
+docker pull ghcr.io/duncan0k/ark0-node@sha256:<that hash>
+```
+
+The image runs `bitcoind` and has `bitcoin-cli` too. Give it a directory of your own as `/data`,
+with the `bitcoin.conf` of section 2 in it, and run it as yourself, so that the files it writes
+there stay yours:
+
+```bash
+mkdir ark0-data        # put the bitcoin.conf of section 2 in it first
+docker run -d --name ark0 --user "$(id -u):$(id -g)" -v "$PWD/ark0-data:/data" \
+  ghcr.io/duncan0k/ark0-node@sha256:<that hash> -datadir=/data -printtoconsole
+docker exec ark0 bitcoin-cli -datadir=/data getblockchaininfo    # a few seconds later, once it has started
+```
+
+With the image, the container is the node: skip the `bitcoind` command of section 2, use
+`docker exec ark0 bitcoin-cli -datadir=/data` wherever this guide says `./build/bin/bitcoin-cli`
+(in section 4, `cli() { docker exec ark0 bitcoin-cli -datadir=/data "$@"; }`), and stop and start
+the node with `docker stop -t 60 ark0` and `docker start ark0`. `debug.log` is in
+`ark0-data/signet/`.
+
+### Build from source
 
 ```bash
 git clone https://github.com/duncan0k/bitcoin-p2mr-patches.git
 git clone --branch v31.1 --depth 1 https://github.com/bitcoin/bitcoin.git
 (cd bitcoin-p2mr-patches/patches && sha256sum -c ../SHA256SUMS)
+(cd bitcoin-p2mr-patches/patches-m05 && sha256sum -c ../SHA256SUMS-m05)
 (cd bitcoin-p2mr-patches/patches-spacing && sha256sum -c ../SHA256SUMS-spacing)
+(cd bitcoin-p2mr-patches/patches-m1 && sha256sum -c ../SHA256SUMS-m1)
 cd bitcoin
-git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-spacing/*.patch
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
+       ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DENABLE_WALLET=ON -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF
 cmake --build build -j"$(nproc)"
 ```
@@ -44,14 +116,8 @@ old) or Clang 17 or later, pkgconf, libevent, the Boost headers and SQLite. On D
 `git am` needs a committer identity; if git has none, run it as
 `git -c user.name=you -c user.email=you@example.com am ...`.
 
-For a wallet that can receive on and spend from P2MR (`tb1z`) outputs, which section 4 uses, add
-the wallet series in `patches-m05/`: check it with the other two, before `cd bitcoin`, and apply it
-between them with this `git am` line instead of the one above:
-
-```bash
-(cd bitcoin-p2mr-patches/patches-m05 && sha256sum -c ../SHA256SUMS-m05)
-git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch ../bitcoin-p2mr-patches/patches-spacing/*.patch
-```
+`patches/` and `patches-spacing/` alone, the build this guide described before M1, still follow
+Ark-0, but such a node does not check the M1 signatures, and it has no P2MR wallet for section 4.
 
 ## 2. Configure it
 
@@ -94,16 +160,18 @@ The chain is small, so the first sync takes minutes rather than hours.
   magic means another challenge:
 
   ```
+  Signet difficulty retargets against 90 s per block from height 8064
   Signet derived magic (message start): 40e8e404
   P2MR consensus rules active from height 1
-  Signet difficulty retargets against 90 s per block from height 8064
+  P2MR ML-DSA-44 rules active from height 8600
   ```
 
 - `./build/bin/bitcoin-cli getblockhash 1264` returns
   `00000036e6e81d9884217ca9918e38b9683617b41195a6d4ccc4c4696b31e9d4`, the last block of the
   snapshot in `snapshot/`. The genesis hash is the same on every signet and proves nothing.
 - `./build/bin/bitcoin-cli getdeploymentinfo` lists `p2mr` as a buried deployment, active
-  from height 1, and `P2MR` among the script flags.
+  from height 1, and `p2mr_mldsa44` as a buried deployment, active from height 8600, and
+  `P2MR` and `P2MR_MLDSA44` among the script flags.
 - `./build/bin/bitcoin-cli getpeerinfo` lists the public node, and once `getblockchaininfo`
   shows `blocks` equal to `headers` and `initialblockdownload` false, your node has caught up.
 
@@ -116,13 +184,14 @@ chain.
 
 ## 4. Get coins and spend them from P2MR
 
-This needs a node built with `patches-m05/` as well (section 1). If yours was built without it,
-rebuild it in the `bitcoin/` clone from section 1: run `git am --abort` if an earlier `git am`
+This needs the wallet series in `patches-m05/`, which both ways of getting the node in section 1
+include. A node built from `patches/` and `patches-spacing/` alone, as this guide said before M1,
+lacks it. Rebuild such a node in the `bitcoin/` clone from section 1: update your clone of this
+repository with `git -C ../bitcoin-p2mr-patches pull`, run `git am --abort` if an earlier `git am`
 stopped halfway, then `git reset --hard v31.1` (it discards any change of your own in that clone),
-check `patches-m05/` from there with
-`(cd ../bitcoin-p2mr-patches/patches-m05 && sha256sum -c ../SHA256SUMS-m05)`, and run the `git am`
-line with all three sets and `cmake --build build -j"$(nproc)"`. Then stop the node with
-`./build/bin/bitcoin-cli stop`, wait until it has exited, and start it again with
+check all four sets from there as section 1 does, with `../bitcoin-p2mr-patches/` in place of
+`bitcoin-p2mr-patches/`, and run its `git am` line and `cmake --build build -j"$(nproc)"`. Then stop
+the node with `./build/bin/bitcoin-cli stop`, wait until it has exited, and start it again with
 `./build/bin/bitcoind -daemonwait` (both with your `-datadir`, if you use one); it keeps its chain.
 
 BIP 360 defines no descriptor, so the wallet series adds a provisional one, `tmr()`: the tree
@@ -172,6 +241,13 @@ could see it: keep this wallet for Ark-0 test coins.
    program of the output being spent. Your node checked the same, and the signature, before it
    accepted the transaction.
 
+To try an `OP_CHECKMLDSA44` leaf (M1) instead, the node's wallet cannot help: it neither makes
+nor signs such leaves. [p2mr-ts](https://github.com/duncan0k/p2mr-ts) builds the S1 and S2
+outputs and signs their spends ("Experimental: OP_CHECKMLDSA44 leaves" in its README), and your
+node relays and checks the result like any other transaction. Use only the trees it builds: as
+`NETWORK.md` explains, a leaf with the opcode protects an output only if every other leaf of the
+tree can only fail.
+
 ## 5. If something is wrong
 
 - **Stuck at height 8063**, with the next block rejected for its difficulty: the node lacks
@@ -180,6 +256,12 @@ could see it: keep this wallet for Ark-0 test coins.
   `ark0-node.cipherscope.io` on port 38433.
 - **`getdescriptorinfo` does not know `tmr`:** the node was built without `patches-m05/`, or still
   runs the binary from before; rebuild it and restart it as section 4 says.
+- **`getdeploymentinfo` does not list `p2mr_mldsa44`:** the node was built without `patches-m1/`,
+  or still runs the binary from before. It follows the chain but does not check the M1
+  signatures; rebuild it and restart it as section 4 says.
+- **A prebuilt binary does not start**, saying that `GLIBCXX_3.4.32` is not found or that
+  `libevent_core-2.1.so.7` cannot be opened: the system is older than the binaries need, or the
+  libraries are missing (section 1). Install them, or use the image or a build from source.
 - **`createwallet` says `Database already exists`, or a command says `Requested wallet does not
   exist or is not loaded`:** the wallet is left from an earlier run. In a new shell, define `cli`
   again; run `cli loadwallet p2mr` if the wallet is not loaded, then the lines from `XPRV=` on; they

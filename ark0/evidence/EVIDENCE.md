@@ -1,11 +1,13 @@
 # Evidence files
 
-Eight files: one confirmed P2MR spend, three malformed spends, the three blocks
-that carried them, and the demo script tree. Every response quoted here was
-produced by a node built from this patch series and restored from
-`../snapshot/ark0-blocks-1264.dat` with no network access, except where a
-response is attributed to the live nodes. `../REPRODUCE.md` is the procedure
-that produces them.
+Nine files: one confirmed P2MR spend, three malformed spends, the three blocks
+that carried them, the demo script tree, and one block refused under the rule
+change at height 8600 (M1, the last section). For the first eight, every
+response quoted here was produced by a node built from this patch series and
+restored from `../snapshot/ark0-blocks-1264.dat` with no network access, except
+where a response is attributed to the live nodes. `../REPRODUCE.md` is the
+procedure that produces them. The M1 block lies far above the snapshot, so the
+responses to it come from nodes that follow the live chain.
 
 All of these files contain public data only: raw transactions, raw blocks,
 public keys, script hashes and Merkle roots. No private key material is
@@ -254,3 +256,46 @@ where it started, at height 1264 and best block
 `00000036e6e81d9884217ca9918e38b9683617b41195a6d4ccc4c4696b31e9d4`, with the
 three invalid branches still listed. The check is repeatable and leaves nothing
 behind.
+
+---
+
+## `m1_badblock_mldsa44.hex`: the block refused under M1
+
+A complete block at height 8714, above the height 8600 from which Ark-0
+executes `OP_CHECKMLDSA44` (`../NETWORK.md`, "Rule change at height 8600
+(M1)"), with a valid signet solution and proof of work that meets
+`nBits = 1d69df08`. Its second transaction spends output 2 of
+`bb7be821d552491aaa89111b22b8e6acbd07c7bb3ceefeeb173d44a000e516b9`, an S1 leaf
+next to an `OP_RETURN` leaf, with an ML-DSA-44 signature that does not
+verify: a valid signature with bit 0 of byte 100 (counting from 0) flipped.
+Flipping it back gives a signature that verifies over the transaction's
+signature message.
+
+| Field | Value |
+|---|---|
+| Block hash | `00000054a2b26fd2cfb2d4ab0a271b619ec0ba382c2216ce85e4b88ac1841182` |
+| Parent | `000000319f097547ba5e174090e10701108d6ae4975b4d032edda9955434cc28` (height 8713) |
+| Merkle root | `d729de1099411af7d1efed1a01a33953b4aca87c33efafb7c4509f8fb47c5d4b` |
+| Time / nonce | 1790480205 (2026-09-27 03:36:45 UTC) / 5145161 |
+| Size | 4233 bytes, two transactions |
+| The spend | txid `467300d5b4bfdcf94c9f2127b59dd5e71829228f3ab9ab9dbdc06de0dcd191db`, wtxid `c0f46d7d403df6229f97e17463cd84b160e415d3325f50d6a477d5842a1e0d5b` |
+
+On 2026-09-27 each of the operator's four nodes validated it and refused it:
+node A and the public node when it was submitted to them, node B and the relay
+when a peer relayed it to them a moment earlier, so that they answered
+`submitblock` with `duplicate-invalid`. Each logged:
+
+```
+Block validation error: block-script-verify-flag-failed (Invalid ML-DSA-44 signature), input 0 of 467300d5b4bfdcf94c9f2127b59dd5e71829228f3ab9ab9dbdc06de0dcd191db (wtxid c0f46d7d403df6229f97e17463cd84b160e415d3325f50d6a477d5842a1e0d5b), spending bb7be821d552491aaa89111b22b8e6acbd07c7bb3ceefeeb173d44a000e516b9:2
+```
+
+The same spend with a valid signature, made separately (ML-DSA-44 signing
+is randomized, so the two signatures differ in more than that bit; wtxid
+`f60d33f0e8f35e33f659059266e6f190378c9ee5b0c8ae3e9e63b546295288b7`), was
+confirmed at height 8715, in
+`0000004813f99aa8205b33255208fd9191d989fbe6b2efd9f58aadac17a4e481`. A node
+that has followed the chain past 8714 refuses this block once its tip is back
+at 8713; `../NETWORK.md` gives the three commands. A new node that had synced
+from the public node answered `submitblock` with
+`block-script-verify-flag-failed (Invalid ML-DSA-44 signature)` and returned to
+its tip afterwards.

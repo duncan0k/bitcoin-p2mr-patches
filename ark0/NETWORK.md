@@ -5,15 +5,18 @@ Pay-to-Merkle-Root (P2MR) spending rules, enforced in block validation, on
 Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Every
 node the operator runs also carries the one patch in `patches-spacing/` (the
 first two since 2026-09-22), which sets how the chain retargets from height
-8064 on; see "Parameters" below.
+8064 on; see "Parameters" below. Since 2026-09-25 they also carry the wallet
+series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
+experimental rule from height 8600; see "Rule change at height 8600 (M1)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
 anyone rebuild the node, replay the chain offline and re-derive every claim
-below without contacting the network, apart from the rule change at height
-8600, whose patch series is not in this repository yet. Since 2026-09-24 the
-network also has one public node, and [`JOIN.md`](JOIN.md) describes how to
-follow the live chain with a node of your own.
+below without contacting the network, apart from what happened after height
+1264, where the snapshot ends: the retarget at 8064 and the rule change at 8600
+need a node that follows the live chain. Since 2026-09-24 the network has one
+public node, and [`JOIN.md`](JOIN.md) describes how to follow the live chain
+with a node of your own.
 
 ## What it is
 
@@ -38,12 +41,13 @@ follow the live chain with a node of your own.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
   signed with Schnorr over secp256k1. No post-quantum signature scheme is
-  implemented, used, or validated anywhere in this series.
-- **One experimental exception from height 8600 (M1).** From that height the
-  operator's nodes also check one post-quantum signature scheme, ML-DSA-44,
-  in outputs that opt into it. Blocks are still authorized by the classical
-  signet challenge, and outputs that do not opt in are unchanged. See "Rule
-  change at height 8600 (M1)" below.
+  implemented, used, or validated anywhere in that series, `patches/`.
+- **One experimental exception from height 8600 (M1).** Since that height the
+  nodes built with `patches-m1/`, the operator's among them, also check one
+  post-quantum signature scheme, ML-DSA-44, in outputs that opt into it.
+  Blocks are still authorized by the classical signet challenge, and outputs
+  that do not opt in are unchanged. See "Rule change at height 8600 (M1)"
+  below.
 
 ### What the evidence does not prove
 
@@ -64,8 +68,9 @@ independently reproducible.
 
 ## Rule change at height 8600 (M1)
 
-From height 8600 the operator's nodes enforce one more rule, an experimental
-one, called milestone M1 here. In a P2MR leaf that is executed (leaf version
+From height 8600 Ark-0 has one more rule, an experimental one, called
+milestone M1 here, which the nodes built with `patches-m1/` enforce, the
+operator's among them. In a P2MR leaf that is executed (leaf version
 `0xc0`, at depth one or more), byte `0xf0` becomes `OP_CHECKMLDSA44`. It takes
 eight stack elements: a 1312-byte ML-DSA-44 public key (FIPS 204) in three,
 which the two standard leaf scripts push from the leaf itself, and a 2420-byte
@@ -102,10 +107,45 @@ makes the opcode push false, as `OP_CHECKSIG` does.
 - **It is not part of BIP-360**, which defines no post-quantum signature check,
   and it is not a proposal for Bitcoin. Blocks on Ark-0 are still authorized
   by the classical signet challenge.
-- **The height is a rule of this network and will not change.** The patch
-  series will be published in this repository after the rule has run on the
-  network. Until then only the operator's nodes enforce it, and what this
-  section says cannot be checked with the material here.
+- **The height is a rule of this network and will not change.** The series is
+  in `patches-m1/` (`README.md`, "Experimental M1 series"), and
+  `doc/p2mr-mldsa44.md` in the patched tree specifies the rule.
+
+### What the chain shows
+
+Two outputs of the protected shape above were funded for the change at height
+7278, in `bb7be821d552491aaa89111b22b8e6acbd07c7bb3ceefeeb173d44a000e516b9`
+(outputs 0 and 2, 1 coin each, locked to test keys): an S1 leaf and an
+`OP_RETURN` leaf, both of version `0xc0` at depth one. Output 0 was spent
+below the height with a signature that does not verify; output 2 above it,
+first in a block that the operator's nodes refused, then with a valid
+signature:
+
+| Height | Block | What happened |
+|---|---|---|
+| 7481 | `0000000d5b3e0b1524c593d31bba696c383dd6d19958be2225c430908592e220` | Below 8600: a spend of output 0, `7cbbe7f3d6d7a0f752b39b8d85fa4f803e3176d4839995df92abf775450dae40`, is valid although its ML-DSA-44 signature does not verify (a valid signature with bit 0 of byte 100 flipped, as at 8714 below), because the byte is still `OP_SUCCESS240`. No node relayed it (`OP_SUCCESSx reserved for soft-fork upgrades`); the operator put it into this block, which all four nodes the operator runs accepted. |
+| 8600 | `0000001d55f182b7fe90f69a6ed37e21169d99607416184d8fffee7a01afff95` | The first block under the rule, 2026-09-26 23:38:02 UTC. |
+| 8714 | `00000054a2b26fd2cfb2d4ab0a271b619ec0ba382c2216ce85e4b88ac1841182`, not in the chain | A block holding a spend of output 2, `467300d5b4bfdcf94c9f2127b59dd5e71829228f3ab9ab9dbdc06de0dcd191db`, whose ML-DSA-44 signature is a valid one with bit 0 of byte 100 (counting from 0) flipped. Each of the four nodes the operator runs validated it and refused it: `block-script-verify-flag-failed (Invalid ML-DSA-44 signature)`. |
+| 8715 | `0000004813f99aa8205b33255208fd9191d989fbe6b2efd9f58aadac17a4e481` | The same spend with a valid signature, made separately (signing is randomized, so it differs from the one above in more than that bit), sent to the public node, relayed by it to the other nodes, and mined. |
+
+The refused block is `evidence/m1_badblock_mldsa44.hex`. A node built with
+`patches-m1/` that follows the chain refuses it too, once its tip is back at
+8713. Do this only on a node you can rewind for a moment: from the first
+command to the last, it disconnects every block above 8713. Run the commands
+in this directory, with that node's `bitcoin-cli` (and its `-datadir`, if it
+has one of its own):
+
+```bash
+bitcoin-cli invalidateblock 0000005be044ace3b4571df44aba0cc9e47a5629e37ba134baf9f715a8425a4b
+bitcoin-cli submitblock "$(cat evidence/m1_badblock_mldsa44.hex)"
+bitcoin-cli reconsiderblock 0000005be044ace3b4571df44aba0cc9e47a5629e37ba134baf9f715a8425a4b
+```
+
+The first command sets aside the block the chain has at 8714. `submitblock`
+answers `block-script-verify-flag-failed (Invalid ML-DSA-44 signature)`, or
+`duplicate-invalid` on a node that has refused the block before; either way
+`bitcoin-cli getchaintips` then lists it as `invalid`. The last command returns
+the node to the chain it followed.
 
 ## Parameters
 
@@ -150,14 +190,15 @@ apart on average, as in the first two periods, a period takes less than a
 quarter of the expected time, so the difficulty rises by the full factor of
 four at each retarget; it keeps rising, by less
 each time, until the proof of work on top of the producer's 90 s pause
-brings the average spacing up to 600 s. Observed on this chain (node A,
-2026-09-22):
+brings the average spacing up to 600 s. Observed on this chain (node A; the
+first two rows on 2026-09-22, the others after the retarget at 8064):
 
 | Heights | `nBits` | Difficulty | Average spacing |
 |---|---|---|---|
 | 0–4031 | `1e0377ae` | 0.0011 | 94.9 s (over 2016–4031) |
 | 4032–6047 | `1e00ddeb` | 0.0045 | 116.3 s |
-| 6048– | `1d377ac0` | 0.0180 | 168.4 s (over 6048–6295) |
+| 6048–8063 | `1d377ac0` | 0.0180 | 171.8 s |
+| 8064– | `1d69df08` | 0.0094 | 127.2 s (over 8064–8600) |
 
 So the `nBits` row above is the starting value, not a constant, and the
 cadence row is the pause the producer keeps, not the spacing the chain
@@ -174,6 +215,12 @@ interval is still 2016 blocks. A node that replays or follows this chain
 past height 8063 needs the patch in `patches-spacing/` and the same option;
 without them it rejects the block at 8064, whose difficulty the two rules
 set differently.
+
+That is what the retarget at 8064 did. Blocks 6048 to 8063 took 346,241 s,
+1.91 times 181,440 s, so the target of block 8064,
+`000000471b85a422db9f1d1be893acb4ca5f3fc594beaa01b739c643effcfee5`, is that
+many times the target before it: `nBits` `1d69df08`, difficulty 0.0094, the
+last row above. Every node the operator runs holds that block.
 
 ### On the genesis hash
 
@@ -249,9 +296,10 @@ chain instead, see `JOIN.md`.
 |---|---|
 | `NETWORK.md` | this file |
 | `REPRODUCE.md` | step-by-step reproduction, with the output each step produced |
-| `JOIN.md` | how to build a node, connect it to the public node and follow the live chain |
+| `JOIN.md` | how to get a node, prebuilt or built, connect it to the public node and follow the live chain |
+| `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
-| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks |
+| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, and the block refused under M1 |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
 | `SHA256SUMS` | checksums for everything above |
