@@ -2563,3 +2563,109 @@ as one whose signature the nodes that enforce the rule checked.
 A new node, started on an empty data directory in the cluster and synced from the public node, refused
 the block at 8714 the same way once `invalidateblock` had put its tip back at 8713, and returned to the
 tip with `reconsiderblock`. `ark0/NETWORK.md` gives those three commands.
+
+## Executed on 2026-09-28 (the network moves to another host)
+
+The two nodes, the producer, the observe and soak jobs and the build namespace moved to a cluster on a
+host dedicated to this work. The cluster they left had restarted twice without shutting down
+(2026-09-21 and 2026-09-26) and is shared with unrelated workloads.
+
+### What changed, and what did not
+
+- **The same builds.** The three images were exported from the old cluster's containerd and imported
+  on the new one, and the manifest digests are the ones recorded above: `sha256:1f18537509dc…` for
+  both nodes, `sha256:e5001ed79a52…` for the producer, the probe and the soak job. The kubelet
+  reports the same image ids as before, `sha256:384ad29c6a3b…` for the nodes and
+  `sha256:4e68de3905cf…` for the producer.
+- **The same configuration and credentials.** `ark0-conf` and the three Secrets were copied object by
+  object and compared key by key by hash: eight keys, all equal. The new cluster's `spec.podCIDR` is
+  the same `/24`, so `rpcallowip` did not change.
+- **The same chain.** The data directories were copied with both nodes stopped; see the sequence.
+- **No root workaround.** The new host carries no cgroup BPF program that refuses sockets to uid
+  10000: a pod running as uid 10000 opened TCP connections to the internet and to the API server, the
+  check in `overlays/root-sockets/README.md`. So the new cluster runs the base, unprivileged: every
+  workload as uid 10000, with `runAsNonRoot`, `fsGroup` and the seccomp profile back, and the volumes
+  owned by `10000:10000`. Maintenance uses `overlays/maintenance`, the base with the producer declared
+  at zero, where it used `overlays/root-sockets-maintenance`.
+- **Secrets encrypted at rest** on the new cluster (k3s `secrets-encryption`). Nothing in the
+  manifests depends on it.
+
+### The sequence
+
+All times UTC.
+
+1. **Ahead of the stop.** The namespace, `ark0-conf`, the three Secrets and the three volumes
+   (`data-nodea-0`, `data-nodeb-0` and `ark0-observe`) were created on the new cluster, the volumes
+   bound by a helper pod, and `kubectl apply --dry-run=server -k contrib/k3s/overlays/maintenance`
+   passed. The public node's configuration gained a `noban` whitelist entry for the new host's
+   address, as it had one for the old cluster's, and the public node was restarted at about 16:31;
+   the old cluster's nodes and the relay were connected again within 20 seconds. The heartbeat check
+   that the observe job pings was paused.
+2. **16:34:03.** Both CronJobs suspended on the old cluster, then the producer scaled to zero on its
+   own. It was gone at 16:34:35. The frozen tip, on both nodes: 9763,
+   `0000006246c9b209965b66e0cc22b7556e72176e8e8523d87fdbf5b1db45984e`, both mempools empty.
+3. **16:34:37.** Both nodes scaled to zero. They were gone at 16:34:44 and neither left a
+   `bitcoind.pid` behind: clean stops.
+4. **16:35:06.** The three volumes packed, each with the sha256 of every file in it (`.cookie` and
+   `.lock` left out, as in step 4 of the first move): node A 30 files, node B 34, the observation
+   volume 4. Unpacked on the new host, chowned to `10000:10000` and hashed again: all 68 equal.
+5. **16:36:43.** The maintenance overlay applied on the new cluster and both CronJobs suspended there
+   at once. Both nodes were ready at 16:37:27. On both: the frozen tip and the genesis hash as above;
+   the chain tips as before, one `active` and the invalid blocks at 127, 8712 and 8714; node A's
+   wallet `ark0` loaded with the same transaction count and key pool; `p2mr` active from 1 and
+   `p2mr_mldsa44` from 8600; `localaddresses` empty; each node connected to the other and, by name, to
+   the public node.
+6. **16:38.** The producer scaled to one. Its first `getblocktemplate` was refused, for the reason
+   `ark0/README.md` gives for a new pod; the loop retried 15 seconds later and mined 9764. The one
+   transaction in the public node's mempool was in node A's too, so nothing had to be broadcast again.
+7. **16:45:02.** With the CronJobs resumed, the first observe run on the new cluster wrote a
+   well-formed line at 9767, both nodes on the same tip and three pods ready, and fetched the
+   heartbeat; the paused check resumed on that ping.
+
+Once 9764 was on the public node and the relay, the old cluster's producer Deployment, the two
+StatefulSets, both CronJobs and the three Secrets were deleted. Its three volumes and the two
+Services are still there. Without the Secrets none of the workloads could start again.
+
+### Before and after
+
+| | old cluster, 16:34:35 | new cluster, 16:37:56 | 16:45:02 |
+|---|---|---|---|
+| block count, both nodes | 9763 | 9763 | 9767 |
+| best hash, both | `0000006246c9b209…db45984e` | the same | `000000142e4a7537…368a3793` |
+| wallet `ark0` on node A | txcount 9891, key pool 4000 | the same | |
+| workloads run as | uid 0 | uid 10000 | uid 10000 |
+
+### Blocks after the move
+
+| height | hash | header time | |
+|---|---|---|---|
+| 9763 | `0000006246c9b209965b66e0cc22b7556e72176e8e8523d87fdbf5b1db45984e` | 16:32:20 | the frozen tip |
+| 9764 | `0000004cb59519ffecdd9d53df4fc47ba22d1698cbc7c61e71f233e02a1dc818` | 16:38:34 | the first block from the new cluster |
+| 9765 | `000000307215813b9c6c720f3db56a3e39d28e4061185c42b14b2124e67e8e9d` | 16:40:08 | |
+
+The public node and the relay held 9764 with that hash.
+
+### Checks on the new cluster
+
+- **Network isolation.** The probe in `ark0/README.md`, from a pod in another namespace against node
+  A's RPC port, read `0/0/1`, and kube-router's rules on the node name all three policies.
+- **The soak.** A soak run started by hand at 16:57 funded and spent from P2MR in blocks 9775 and
+  9776: `ok (index 159, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)`. Node B loads its
+  wallet itself, as it did on the old cluster.
+- **A restart.** The host was restarted once, at 17:02. Both nodes and the producer came back on
+  their own: 9776 came at 17:00:32, and 9777,
+  `0000004e4f33455d561a46ceda2f34f87505f41e04e607e5e10be3a28dc592bb`, at 17:04:29.
+- **The build.** The build namespace was set up the same way (`namespace.yaml`, `pvc.yaml`,
+  `shell.yaml`, the builder image imported with its digest) and seeded from the published tree at
+  `5677973`. A cold build of `master m05 spacing m1` from a fresh clone, with the unit tests and the
+  two P2MR functional scripts, produced five binaries that are byte for byte those of the cold build
+  of 2026-09-27; `bitcoind` hashes to `02548ece…`, the binary both nodes run. The
+  head commit differs from run to run because `git am` records when it ran; the binaries do not.
+
+### Rolling back
+
+The same move in the other direction, with the same care about producers: exactly one may run at any
+moment. Stop the producer on the new cluster and apply `overlays/maintenance`; stop both nodes; copy
+the three volumes back into the old cluster's claims, chowned to `0:0` for `root-sockets`; create the
+three Secrets there again from the new cluster's copies; apply `root-sockets-maintenance`, check the
+tip, and start the producer.
