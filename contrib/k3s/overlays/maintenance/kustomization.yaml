@@ -1,0 +1,32 @@
+# Ark-0 with the block producer held at zero replicas, on a cluster that needs
+# no root workaround: the base (../../ark0) plus the one patch that
+# ../root-sockets-maintenance adds to ../root-sockets. That file says why the
+# producer is declared at zero for maintenance rather than scaled by hand.
+#
+# Use it for every apply while nodes or configuration are being changed, then
+# start the producer explicitly:
+#
+#   kubectl apply --dry-run=server -k contrib/k3s/overlays/maintenance
+#   kubectl apply             -k contrib/k3s/overlays/maintenance
+#   ... do the work, verify the tip ...
+#   kubectl -n ark0 scale deployment/ark0-miner --replicas=1
+#
+# Applying ../../ark0 afterwards also restores `replicas: 1`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ark0
+
+resources:
+  - ../../ark0
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: ark0-miner
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 0
