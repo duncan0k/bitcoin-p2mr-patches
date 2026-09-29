@@ -20,8 +20,25 @@ operator gets by running the demo out of a home directory:
 
 Dockerfile.miner sets all six to the layout inside the producer image, so the
 same file runs unchanged on a workstation and in a pod.
+
+Two more make the producer sign blocks with ML-DSA-44, for the networks that
+try out the two M2 candidates. Ark-0 itself sets neither:
+
+  ARK0_PQ_BLOCK_SEED_FILE      -signetpqblock (doc/signet-pqblock.md): a file
+                               holding the key's 32-byte seed in hex, normally
+                               a mounted Secret. Needs the next two as well.
+  ARK0_PQ_BLOCK_FROM           the first height whose blocks carry the PQ push
+  ARK0_PQ_BLOCK_KEY_SHA256     SHA256 of the public key the nodes expect, as
+                               they log it at startup
+  ARK0_PQ_CHALLENGE_SEED_FILE  -signetpqchallenge (doc/signet-pqchallenge.md):
+                               the seed file of the key the challenge is
+                               derived from; blocks are then signed with it
+                               alone, without the wallet
+
+Keys are derived from their seeds in memory and never printed.
 """
 import argparse
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -37,6 +54,10 @@ GRIND = f"{BIN}/bitcoin-util grind"
 NODE_A = os.environ.get("ARK0_NODE_A") or os.path.join(ARK0, "nodeA")
 NODE_B = os.environ.get("ARK0_NODE_B") or os.path.join(ARK0, "nodeB")
 WALLET = os.environ.get("ARK0_WALLET") or "ark0"
+PQ_BLOCK_SEED_FILE = os.environ.get("ARK0_PQ_BLOCK_SEED_FILE")
+PQ_BLOCK_FROM = os.environ.get("ARK0_PQ_BLOCK_FROM")
+PQ_BLOCK_KEY_SHA256 = os.environ.get("ARK0_PQ_BLOCK_KEY_SHA256")
+PQ_CHALLENGE_SEED_FILE = os.environ.get("ARK0_PQ_CHALLENGE_SEED_FILE")
 HRP = "tb"
 EVIDENCE = os.path.join(ARK0, "evidence")
 STEPS = os.path.join(EVIDENCE, "steps.jsonl")
@@ -119,7 +140,37 @@ def record(step, **fields):
 
 def reward_spk():
     addr = open(os.path.join(ARK0, "reward_address.txt")).read().strip()
-    return bytes.fromhex(cli_json("getaddressinfo", addr)["scriptPubKey"])
+    # validateaddress rather than getaddressinfo: it needs no wallet, and a
+    # -signetpqchallenge network's producer has none.
+    return bytes.fromhex(cli_json("validateaddress", addr, wallet=False)["scriptPubKey"])
+
+
+def pq_key(path):
+    """The ML-DSA-44 key pair derived from the seed in a file. Never printed."""
+    from test_framework.signet_pq import signet_pq_keygen
+    seed = bytes.fromhex(open(path).read().strip())
+    assert len(seed) == 32, f"{path} does not hold a 32-byte seed"
+    return signet_pq_keygen(seed)
+
+
+def add_pq_block_signature(block, tmpl):
+    """-signetpqblock: sign the block with ML-DSA-44 and append the PQ push,
+    before the signet solution is signed over it (doc/signet-pqblock.md).
+
+    Nodes below the rule's height only log a bad signature, so a producer with
+    the wrong key would not find out until the chain stopped at the height.
+    The key is therefore checked against the one the nodes expect, at every
+    block, before ARK0_PQ_BLOCK_FROM too.
+    """
+    from test_framework.signet_pq import add_signet_pq_signature
+    assert PQ_BLOCK_FROM and PQ_BLOCK_KEY_SHA256, \
+        "ARK0_PQ_BLOCK_SEED_FILE needs ARK0_PQ_BLOCK_FROM and ARK0_PQ_BLOCK_KEY_SHA256"
+    pubkey, seckey = pq_key(PQ_BLOCK_SEED_FILE)
+    assert hashlib.sha256(pubkey).hexdigest() == PQ_BLOCK_KEY_SHA256.lower(), \
+        "the ML-DSA-44 block key is not the one ARK0_PQ_BLOCK_KEY_SHA256 names"
+    if tmpl["height"] < int(PQ_BLOCK_FROM):
+        return
+    add_signet_pq_signature(block, seckey, bytes.fromhex(tmpl["signet_challenge"]), rnd=os.urandom(32))
 
 
 def mine_block(extra_raw_txs=()):
@@ -134,12 +185,21 @@ def mine_block(extra_raw_txs=()):
     for raw in extra_raw_txs:
         tmpl["transactions"].append({"data": raw})
     block = miner.new_block(tmpl, reward_spk())
-    psbt = miner.generate_psbt(block, tmpl["signet_challenge"])
-    processed = json.loads(cli_stdin("walletprocesspsbt", psbt))
-    assert processed["complete"], f"wallet could not sign the signet solution: {processed}"
-    decoded = miner.decode_challenge_psbt(processed["psbt"])
-    block = miner.get_block_from_psbt(decoded)
-    solution = miner.get_solution_from_psbt(decoded)
+    if PQ_CHALLENGE_SEED_FILE:
+        # -signetpqchallenge: the signet solution is the key's ML-DSA-44
+        # signature itself, with no wallet and no PSBT (doc/signet-pqchallenge.md).
+        from test_framework.signet_pq import signet_p2mr_solution
+        pubkey, seckey = pq_key(PQ_CHALLENGE_SEED_FILE)
+        solution = signet_p2mr_solution(block, pubkey, seckey, rnd=os.urandom(32))
+    else:
+        if PQ_BLOCK_SEED_FILE:
+            add_pq_block_signature(block, tmpl)
+        psbt = miner.generate_psbt(block, tmpl["signet_challenge"])
+        processed = json.loads(cli_stdin("walletprocesspsbt", psbt))
+        assert processed["complete"], f"wallet could not sign the signet solution: {processed}"
+        decoded = miner.decode_challenge_psbt(processed["psbt"])
+        block = miner.get_block_from_psbt(decoded)
+        solution = miner.get_solution_from_psbt(decoded)
     block = miner.finish_block(block, solution, GRIND)
     blockhex = block.serialize().hex()
     result = cli_stdin("submitblock", blockhex, wallet=False)
