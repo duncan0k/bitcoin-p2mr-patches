@@ -155,7 +155,7 @@ def reward_spk():
 
 
 def require(condition, message):
-    """A check the ML-DSA-44 block key depends on. Unlike assert, python -O and
+    """A check the block producer depends on. Unlike assert, python -O and
     PYTHONOPTIMIZE leave it in place."""
     if not condition:
         raise RuntimeError(message)
@@ -223,7 +223,7 @@ def mine_block(extra_raw_txs=()):
             add_pq_block_signature(block, tmpl)
         psbt = miner.generate_psbt(block, tmpl["signet_challenge"])
         processed = json.loads(cli_stdin("walletprocesspsbt", psbt))
-        assert processed["complete"], f"wallet could not sign the signet solution: {processed}"
+        require(processed["complete"], f"wallet could not sign the signet solution: {processed}")
         decoded = miner.decode_challenge_psbt(processed["psbt"])
         block = miner.get_block_from_psbt(decoded)
         solution = miner.get_solution_from_psbt(decoded)
@@ -237,7 +237,7 @@ def mine_block(extra_raw_txs=()):
 def cmd_mine(args):
     for i in range(args.count):
         blockhex, blockhash, result = mine_block()
-        assert result is None, f"block rejected: {result}"
+        require(result is None, f"block rejected: {result}")
         height = int(cli("getblockcount", wallet=False))
         if args.quiet:
             # The block producer service runs this in a loop; keep it out of
