@@ -1,4 +1,4 @@
-From 0462cbe9f46e225ffbc617f1a007e65fde119a38 Mon Sep 17 00:00:00 2001
+From 19fb4905e1e968a9509de599946624981ebd3983 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:19:21 -0600
 Subject: [PATCH 56/56] doc: describe -signetpqchallenge

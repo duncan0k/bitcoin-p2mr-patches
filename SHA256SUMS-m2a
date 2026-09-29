@@ -1,4 +1,4 @@
 5a49c04700bb1d3063d88a95cba2fa2c071888df8cb2e58758068e36091b23b8 *0049-signet-require-an-ML-DSA-44-block-signature-from-a-h.patch
-8c2d7401c85d49b797dea86ba8532413dc0659ec213638a146431947cd63bb5d *0050-test-add-signet_pqblock_tests-and-its-vectors.patch
-0992e5183da75f8c14efaa099051da663f46ad75a667938d22b181066bd4f500 *0051-test-add-feature_signet_pqblock.py.patch
-b467b7f738de8247726ed656be5b2cd44c76ea1e54a23d281da9abf4497e99ae *0052-doc-describe-signetpqblock.patch
+1c62f76cecaf5ddf4433337ad1c818e730e6efd684afb1f339ec09f20aa5431a *0050-test-add-signet_pqblock_tests-and-its-vectors.patch
+7b103ac03e908fc5bc2565946c94486258a288a3377a03bba42322903c22337b *0051-test-add-feature_signet_pqblock.py.patch
+6894e39df20a834c980d9f4e96910aa6396adb79ede2a0f85773cafeac17f32e *0052-doc-describe-signetpqblock.patch

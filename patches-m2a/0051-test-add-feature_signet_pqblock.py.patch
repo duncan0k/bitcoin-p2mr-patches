@@ -1,4 +1,4 @@
-From f39e3abff54508242cef09a8e4491f8ad2ef2c59 Mon Sep 17 00:00:00 2001
+From 8affe846c78bde33f99c1bf037ed8b31f8182dc5 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:16:29 -0600
 Subject: [PATCH 51/52] test: add feature_signet_pqblock.py
@@ -9,17 +9,17 @@ the rule rejects, a node without the rule following the valid chain,
 challenge like Ark-0's, blocks made the way the Ark-0 producer makes them: the
 PQ push first, then the wallet's signet solution over it.
 ---
- test/functional/feature_signet_pqblock.py | 325 ++++++++++++++++++++++
+ test/functional/feature_signet_pqblock.py | 327 ++++++++++++++++++++++
  test/functional/test_runner.py            |   1 +
- 2 files changed, 326 insertions(+)
+ 2 files changed, 328 insertions(+)
  create mode 100644 test/functional/feature_signet_pqblock.py
 
 diff --git a/test/functional/feature_signet_pqblock.py b/test/functional/feature_signet_pqblock.py
 new file mode 100644
-index 0000000..978f6e3
+index 0000000..bd769b1
 --- /dev/null
 +++ b/test/functional/feature_signet_pqblock.py
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,327 @@
 +#!/usr/bin/env python3
 +# Copyright (c) 2026 CipherScope
 +# Distributed under the MIT software license, see the accompanying
@@ -111,7 +111,8 @@ index 0000000..978f6e3
 +        self.extra_args = [
 +            # the OP_TRUE signet: nodes 0 and 1 with the rule, node 2 without it
 +            ["-signetchallenge=51", true_rule, noban, "-debug=validation", "-blockreservedweight=16000"],
-+            ["-signetchallenge=51", true_rule, noban],
++            # without -debug, so that below the height it takes the path of a node that logs nothing
++            ["-signetchallenge=51", true_rule, noban, "-debug=0"],
 +            ["-signetchallenge=51", noban],
 +            # the bare multisig signet: node 3 (with the classical key) and node 4, both with the rule
 +            [f"-signetchallenge={self.multi_challenge.hex()}", multi_rule, noban, "-blockreservedweight=16000"],
@@ -245,6 +246,7 @@ index 0000000..978f6e3
 +            "PQ push with a flipped bit": commitment + CScriptOp.encode_op_pushdata(push[:100] + bytes([push[100] ^ 1]) + push[101:]),
 +            "two PQ pushes": commitment + CScriptOp.encode_op_pushdata(push) + CScriptOp.encode_op_pushdata(push),
 +            "another version": commitment + CScriptOp.encode_op_pushdata(SIGNET_PQ_HEADER + bytes([SIGNET_PQ_VERSION + 1]) + push[5:]),
++            "another header": commitment + CScriptOp.encode_op_pushdata(bytes([push[0] ^ 1]) + push[1:]),
 +            "a longer PQ push": commitment + CScriptOp.encode_op_pushdata(push + b"\x00"),
 +            "a non-shortest encoding": commitment + bytes([OP_PUSHDATA4]) + len(push).to_bytes(4, "little") + push,
 +            "a byte after it": commitment + CScriptOp.encode_op_pushdata(push) + b"\x00",

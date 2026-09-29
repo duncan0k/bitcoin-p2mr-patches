@@ -1,4 +1,4 @@
-From cdc3ba4b115c5024cd03b01ac50f678b44718167 Mon Sep 17 00:00:00 2001
+From 223800fbdd90e1d835d90e133a30340bdd51dee8 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:19:21 -0600
 Subject: [PATCH 53/56] signet: signets whose blocks only an ML-DSA-44 key

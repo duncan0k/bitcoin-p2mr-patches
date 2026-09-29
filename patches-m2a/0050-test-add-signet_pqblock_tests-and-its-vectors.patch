@@ -1,4 +1,4 @@
-From 8f3e394ffe420c5ae5b4816b2ea434dbda0c2b02 Mon Sep 17 00:00:00 2001
+From cf4347a36309213136efe7513b2152b115adf422 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:16:29 -0600
 Subject: [PATCH 50/52] test: add signet_pqblock_tests and its vectors
@@ -13,10 +13,10 @@ output the rule rejects, the height read from the coinbase, and the option.
  src/test/CMakeLists.txt                     |   3 +
  src/test/data/signet_pqblock.json           |  26 ++
  src/test/data/signet_pqblock_noble.json     |   9 +
- src/test/signet_pqblock_tests.cpp           | 309 ++++++++++++++++++++
+ src/test/signet_pqblock_tests.cpp           | 318 ++++++++++++++++++++
  test/functional/test_framework/signet_pq.py | 138 +++++++++
  test/util/generate_signet_pqblock_tests.py  | 118 ++++++++
- 6 files changed, 603 insertions(+)
+ 6 files changed, 612 insertions(+)
  create mode 100644 src/test/data/signet_pqblock.json
  create mode 100644 src/test/data/signet_pqblock_noble.json
  create mode 100644 src/test/signet_pqblock_tests.cpp
@@ -93,10 +93,10 @@ index 0000000..5be2fe9
 +]
 diff --git a/src/test/signet_pqblock_tests.cpp b/src/test/signet_pqblock_tests.cpp
 new file mode 100644
-index 0000000..1d9e988
+index 0000000..a2a28f8
 --- /dev/null
 +++ b/src/test/signet_pqblock_tests.cpp
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,318 @@
 +// Copyright (c) 2026 CipherScope
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -109,6 +109,7 @@ index 0000000..1d9e988
 +#include <consensus/merkle.h>
 +#include <consensus/params.h>
 +#include <consensus/validation.h>
++#include <logging.h>
 +#include <primitives/block.h>
 +#include <primitives/transaction.h>
 +#include <script/script.h>
@@ -275,6 +276,8 @@ index 0000000..1d9e988
 +    flipped[100] ^= 1;
 +    auto other_version{push};
 +    other_version[4] = 0x02;
++    auto other_header{push};
++    other_header[0] ^= 0x01;
 +    std::vector<unsigned char> pushdata4{OP_PUSHDATA4, 0x79, 0x09, 0x00, 0x00};
 +    pushdata4 = Concat(pushdata4, push);
 +
@@ -284,6 +287,7 @@ index 0000000..1d9e988
 +        Concat(commitment, Push(flipped)),                               // a flipped bit
 +        Concat(Concat(commitment, Push(push)), Push(push)),              // two PQ pushes
 +        Concat(commitment, Push(other_version)),                         // another version
++        Concat(commitment, Push(other_header)),                          // another header
 +        Concat(commitment, Push(Concat(push, {0x00}))),                  // a longer PQ push
 +        Concat(commitment, pushdata4),                                   // not the shortest encoding
 +        Concat(Concat(commitment, Push(push)), {OP_0}),                  // an opcode after it
@@ -316,6 +320,10 @@ index 0000000..1d9e988
 +    const Consensus::Params& consensus{params->GetConsensus()};
 +
 +    BOOST_CHECK(CheckSignetPQBlock(block, consensus));                                          // OP_5 OP_0, below 6
++    // A node that does not log validation does not look at a block below the height at all.
++    LogInstance().DisableCategory(BCLog::VALIDATION);
++    BOOST_CHECK(CheckSignetPQBlock(block, consensus));
++    LogInstance().EnableCategory(BCLog::VALIDATION);
 +    BOOST_CHECK(!CheckSignetPQBlock(block, PQParams(pubkey, 5)->GetConsensus()));                 // at 5
 +    BOOST_CHECK(CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << 3 << OP_0), consensus));
 +    BOOST_CHECK(!CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << 6 << OP_0), consensus));
@@ -326,6 +334,7 @@ index 0000000..1d9e988
 +    // No height at all, and a negative one.
 +    BOOST_CHECK(!CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript()), consensus));
 +    BOOST_CHECK(!CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << OP_1NEGATE << OP_0), consensus));
++    BOOST_CHECK(!CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << -5 << OP_0), consensus));
 +    // A pushed height (17 and above): the vector block at 17, without its PQ push.
 +    const CBlock signed17{ReadBlock(vectors["cases"][1]["block"])};
 +    const std::vector<unsigned char> script17{Commitment(signed17)};

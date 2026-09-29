@@ -1,4 +1,4 @@
-From 54f6caf9f55e0a5dfc975d18bd3e800ae800b3a4 Mon Sep 17 00:00:00 2001
+From b44f14c4f6ad9916fd044c007204f662f40bf5c7 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:19:21 -0600
 Subject: [PATCH 54/56] test: add signet_pqchallenge_tests and its vectors
