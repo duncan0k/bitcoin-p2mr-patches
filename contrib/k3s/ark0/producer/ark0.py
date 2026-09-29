@@ -154,11 +154,18 @@ def reward_spk():
     return bytes.fromhex(cli_json("validateaddress", addr, wallet=False)["scriptPubKey"])
 
 
+def require(condition, message):
+    """A check the ML-DSA-44 block key depends on. Unlike assert, python -O and
+    PYTHONOPTIMIZE leave it in place."""
+    if not condition:
+        raise RuntimeError(message)
+
+
 def pq_key(path):
     """The ML-DSA-44 key pair derived from the seed in a file. Never printed."""
     from test_framework.signet_pq import signet_pq_keygen
     seed = bytes.fromhex(open(path).read().strip())
-    assert len(seed) == 32, f"{path} does not hold a 32-byte seed"
+    require(len(seed) == 32, f"{path} does not hold a 32-byte seed")
     return signet_pq_keygen(seed)
 
 
@@ -172,11 +179,11 @@ def add_pq_block_signature(block, tmpl):
     block, before ARK0_PQ_BLOCK_FROM too.
     """
     from test_framework.signet_pq import add_signet_pq_signature
-    assert PQ_BLOCK_FROM and PQ_BLOCK_KEY_SHA256, \
-        "ARK0_PQ_BLOCK_SEED_FILE needs ARK0_PQ_BLOCK_FROM and ARK0_PQ_BLOCK_KEY_SHA256"
+    require(PQ_BLOCK_FROM and PQ_BLOCK_KEY_SHA256,
+            "ARK0_PQ_BLOCK_SEED_FILE needs ARK0_PQ_BLOCK_FROM and ARK0_PQ_BLOCK_KEY_SHA256")
     pubkey, seckey = pq_key(PQ_BLOCK_SEED_FILE)
-    assert hashlib.sha256(pubkey).hexdigest() == PQ_BLOCK_KEY_SHA256.lower(), \
-        "the ML-DSA-44 block key is not the one ARK0_PQ_BLOCK_KEY_SHA256 names"
+    require(hashlib.sha256(pubkey).hexdigest() == PQ_BLOCK_KEY_SHA256.lower(),
+            "the ML-DSA-44 block key is not the one ARK0_PQ_BLOCK_KEY_SHA256 names")
     if tmpl["height"] < int(PQ_BLOCK_FROM):
         return
     add_signet_pq_signature(block, seckey, bytes.fromhex(tmpl["signet_challenge"]), rnd=os.urandom(32))
@@ -192,13 +199,16 @@ def mine_block(extra_raw_txs=()):
     """
     tmpl = cli_json("getblocktemplate", '{"rules":["signet","segwit"]}', wallet=False)
     if tmpl["signet_challenge"] == ARK0_SIGNET_CHALLENGE:
-        # Without the block key, or signing from above the rule's height, the
+        # Without the block key, signing from above the rule's height, or in the
+        # other candidate's mode, which leaves the block signature out, the
         # producer would mine blocks the nodes accept until 20000 and refuse
         # from there on. Stop before the first one instead.
-        assert PQ_BLOCK_SEED_FILE and PQ_BLOCK_FROM and int(PQ_BLOCK_FROM) <= ARK0_PQ_BLOCK_HEIGHT \
-            and (PQ_BLOCK_KEY_SHA256 or "").lower() == ARK0_PQ_KEY_SHA256, \
-            "Ark-0 blocks need ARK0_PQ_BLOCK_SEED_FILE, ARK0_PQ_BLOCK_FROM at most " \
-            f"{ARK0_PQ_BLOCK_HEIGHT} and ARK0_PQ_BLOCK_KEY_SHA256 {ARK0_PQ_KEY_SHA256}"
+        require(PQ_BLOCK_SEED_FILE and not PQ_CHALLENGE_SEED_FILE and PQ_BLOCK_FROM
+                and int(PQ_BLOCK_FROM) <= ARK0_PQ_BLOCK_HEIGHT
+                and (PQ_BLOCK_KEY_SHA256 or "").lower() == ARK0_PQ_KEY_SHA256,
+                "Ark-0 blocks need ARK0_PQ_BLOCK_SEED_FILE, ARK0_PQ_BLOCK_FROM at most "
+                f"{ARK0_PQ_BLOCK_HEIGHT}, ARK0_PQ_BLOCK_KEY_SHA256 {ARK0_PQ_KEY_SHA256} "
+                "and no ARK0_PQ_CHALLENGE_SEED_FILE")
     for raw in extra_raw_txs:
         tmpl["transactions"].append({"data": raw})
     block = miner.new_block(tmpl, reward_spk())
