@@ -1,0 +1,444 @@
+From feed2596083e2c1d243816875128c212c51ec8d9 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:16:29 -0600
+Subject: [PATCH 49/53] signet: require an ML-DSA-44 block signature from a
+ height on (-signetpqblock)
+
+A custom signet given -signetpqblock=<pubkey>@<height> requires, from that
+height on, an ML-DSA-44 signature by <pubkey> in the witness commitment output
+of every block, next to the signet solution (doc/signet-pqblock.md). The output
+must then be exactly OP_RETURN, the commitment, the PQ push (PQB1, version 1,
+signature) and at most one signet solution push, each in its shortest encoding.
+
+The signature signs TaggedHash("SignetPQBlock", SHA256(challenge) || nVersion
+|| hashPrevBlock || merkle root || nTime), the merkle root taken with the
+witness commitment output cut back to OP_RETURN, the commitment and the PQ
+push's header and version. It is checked last in CheckBlock, on the same
+condition as the signet solution, so that templates are left alone and
+ConnectBlock checks it again for every block it connects. The height is the
+one the coinbase commits to (BIP34).
+
+Nodes without the rule accept these blocks: the rule is a soft fork of the
+signet it is given to. The Ark-0 signet refuses the option.
+---
+ src/chainparams.cpp        |  30 ++++++++
+ src/chainparamsbase.cpp    |   1 +
+ src/consensus/params.h     |  17 +++++
+ src/kernel/chainparams.cpp |  19 +++++
+ src/kernel/chainparams.h   |  10 +++
+ src/signet.cpp             | 138 +++++++++++++++++++++++++++++++++++++
+ src/signet.h               |  26 +++++++
+ src/validation.cpp         |  11 +++
+ 8 files changed, 252 insertions(+)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index a9e2cea..c22d92d 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -8,6 +8,7 @@
+ #include <chainparamsbase.h>
+ #include <common/args.h>
+ #include <consensus/params.h>
++#include <crypto/mldsa44.h>
+ #include <deploymentinfo.h>
+ #include <logging.h>
+ #include <tinyformat.h>
+@@ -68,6 +69,35 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.pow_target_spacing_change.emplace(Consensus::PowTargetSpacingChange{.height = *height, .spacing = *spacing});
+     }
++    if (!args.GetArgs("-signetpqblock").empty()) {
++        const auto values = args.GetArgs("-signetpqblock");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetpqblock cannot be multiple values.");
++        }
++        if (!options.challenge) {
++            throw std::runtime_error("-signetpqblock requires -signetchallenge.");
++        }
++        if (IsArk0SignetChallenge(*options.challenge)) {
++            throw std::runtime_error("-signetpqblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++        }
++        const auto& value{values[0]};
++        const auto at{value.find('@')};
++        if (at == std::string::npos) {
++            throw std::runtime_error(strprintf("-signetpqblock must be <pubkey>@<height>, not '%s'.", value));
++        }
++        const auto pubkey{TryParseHex<uint8_t>(value.substr(0, at))};
++        const auto height{ToIntegral<int32_t>(value.substr(at + 1))};
++        if (!pubkey || !height) {
++            throw std::runtime_error(strprintf("-signetpqblock must be <pubkey>@<height>, not '%s'.", value));
++        }
++        if (pubkey->size() != MLDSA44_PUBKEY_SIZE) {
++            throw std::runtime_error(strprintf("-signetpqblock needs a %d-byte ML-DSA-44 public key, not %d bytes.", MLDSA44_PUBKEY_SIZE, pubkey->size()));
++        }
++        if (*height < 1) {
++            throw std::runtime_error(strprintf("-signetpqblock height must be at least 1, not %d.", *height));
++        }
++        options.pq_block.emplace(Consensus::SignetPQBlock{.height = *height, .pubkey = *pubkey});
++    }
+ }
+ 
+ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& options)
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index 621485a..769f97c 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -24,6 +24,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetchallenge", "Blocks must satisfy the given script to be considered valid (only for signet networks; defaults to the global default signet test network challenge)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetseednode", "Specify a seed node for the signet network, in the hostname[:port] format, e.g. sig.net:1234 (may be used multiple times to specify multiple seed nodes; defaults to the global default signet test network seed node(s))", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetpowtargetspacing=<seconds>[@<height>]", "Measure the difficulty retargets at or above <height> (default: 0) against <seconds> per block (1 to 600) instead of the signet default of 600. The retarget interval stays 2016 blocks. This is a consensus rule of the network: every node must use the same values, and must have them before the chain reaches the first retarget they change. Requires -signetchallenge (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetpqblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1) to also carry an ML-DSA-44 signature by <pubkey> (1312 bytes, hex) in its witness commitment output; see doc/signet-pqblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+ static std::unique_ptr<CBaseChainParams> globalChainBaseParams;
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index a14c467..a5bf6cd 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -90,6 +90,16 @@ struct PowTargetSpacingChange {
+     int64_t spacing;
+ };
+ 
++/**
++ * An ML-DSA-44 block signature a signet requires, next to its challenge, in
++ * every block at or above `height` (doc/signet-pqblock.md); see
++ * Params::signet_pq_block.
++ */
++struct SignetPQBlock {
++    int height;
++    std::vector<unsigned char> pubkey; //!< ML-DSA-44 public key, 1312 bytes
++};
++
+ /**
+  * Parameters that influence chain consensus.
+  */
+@@ -150,6 +160,13 @@ struct Params {
+      * signet given -signetpowtargetspacing, which requires -signetchallenge.
+      */
+     std::optional<PowTargetSpacingChange> pow_target_spacing_change{};
++    /**
++     * Signet only: from `height` on, every block must also carry an ML-DSA-44
++     * signature by `pubkey` in its witness commitment output
++     * (doc/signet-pqblock.md). Only set on a signet given -signetpqblock,
++     * which requires -signetchallenge.
++     */
++    std::optional<SignetPQBlock> signet_pq_block{};
+     /** The timespan the retarget for the block at `height` measures against. */
+     int64_t PowTargetTimespan(int64_t height) const
+     {
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index e30843c..deaada3 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -10,6 +10,8 @@
+ #include <consensus/merkle.h>
+ #include <consensus/params.h>
+ #include <crypto/hex_base.h>
++#include <crypto/mldsa44.h>
++#include <crypto/sha256.h>
+ #include <hash.h>
+ #include <kernel/messagestartchars.h>
+ #include <primitives/block.h>
+@@ -37,6 +39,11 @@ using namespace util::hex_literals;
+ //! The signet challenge of Ark-0, the network ARK0_MLDSA44_HEIGHT is for.
+ static constexpr auto ARK0_SIGNET_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"_hex_u8};
+ 
++bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
++{
++    return std::ranges::equal(challenge, ARK0_SIGNET_CHALLENGE);
++}
++
+ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+ {
+     CMutableTransaction txNew;
+@@ -508,6 +515,18 @@ public:
+             LogInfo("Signet difficulty retargets against %d s per block from height %d",
+                     options.pow_target_spacing_change->spacing, options.pow_target_spacing_change->height);
+         }
++        // An ML-DSA-44 block signature required from a height on (doc/signet-pqblock.md).
++        // ReadSigNetArgs only accepts it together with a challenge that is not Ark-0's.
++        if (options.pq_block) {
++            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge));
++            assert(options.pq_block->pubkey.size() == MLDSA44_PUBKEY_SIZE && options.pq_block->height >= 1);
++            consensus.signet_pq_block = *options.pq_block;
++            // Every node of the network needs the same value: log what an operator can compare.
++            std::array<unsigned char, CSHA256::OUTPUT_SIZE> key_hash;
++            CSHA256().Write(options.pq_block->pubkey.data(), options.pq_block->pubkey.size()).Finalize(key_hash.data());
++            LogInfo("Signet blocks need an ML-DSA-44 block signature from height %d, by the key whose SHA256 is %s",
++                    options.pq_block->height, HexStr(key_hash));
++        }
+         consensus.fPowAllowMinDifficultyBlocks = false;
+         consensus.enforce_BIP94 = false;
+         consensus.fPowNoRetargeting = false;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 3d52eaf..f047d1d 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -18,6 +18,7 @@
+ #include <cstdint>
+ #include <memory>
+ #include <optional>
++#include <span>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -32,6 +33,9 @@
+  */
+ inline constexpr int ARK0_MLDSA44_HEIGHT{8600};
+ 
++/** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
++bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
++
+ struct AssumeutxoHash : public BaseHash<uint256> {
+     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+ };
+@@ -148,6 +152,12 @@ public:
+          * height on. Only accepted together with a challenge of its own.
+          */
+         std::optional<Consensus::PowTargetSpacingChange> pow_target_spacing_change{};
++        /**
++         * ML-DSA-44 block signature required from a height on
++         * (doc/signet-pqblock.md). Only accepted together with a challenge of
++         * its own that is not the Ark-0 signet's.
++         */
++        std::optional<Consensus::SignetPQBlock> pq_block{};
+     };
+ 
+     /**
+diff --git a/src/signet.cpp b/src/signet.cpp
+index d0f8aa2..70b30b3 100644
+--- a/src/signet.cpp
++++ b/src/signet.cpp
+@@ -7,10 +7,15 @@
+ #include <consensus/merkle.h>
+ #include <consensus/params.h>
+ #include <consensus/validation.h>
++#include <crypto/mldsa44.h>
++#include <crypto/sha256.h>
++#include <hash.h>
++#include <logging.h>
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
+ #include <script/interpreter.h>
+ #include <script/script.h>
++#include <span.h>
+ #include <streams.h>
+ #include <uint256.h>
+ #include <util/check.h>
+@@ -20,8 +25,10 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <exception>
++#include <limits>
+ #include <memory>
+ #include <span>
++#include <string_view>
+ #include <utility>
+ #include <vector>
+ 
+@@ -151,3 +158,134 @@ bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& cons
+     }
+     return true;
+ }
++
++// ML-DSA-44 block signature (doc/signet-pqblock.md)
++
++//! Context string of the ML-DSA-44 block signature: kept apart from OP_CHECKMLDSA44's.
++static constexpr std::string_view SIGNET_PQ_CONTEXT{"SIGNET/PQBLOCK/EXP0"};
++//! Size of the push that carries it: header, version and signature.
++static constexpr size_t SIGNET_PQ_PUSH_SIZE{SIGNET_PQ_HEADER.size() + 1 + MLDSA44_SIGNATURE_SIZE};
++
++static const HashWriter HASHER_SIGNET_PQ_BLOCK{TaggedHash("SignetPQBlock")};
++
++std::optional<uint256> SignetPQBlockMessage(const CBlock& block, std::span<const uint8_t> challenge)
++{
++    if (block.vtx.empty()) return std::nullopt;
++    const int cidx{GetWitnessCommitmentIndex(block)};
++    if (cidx == NO_WITNESS_COMMITMENT) return std::nullopt;
++
++    // The witness commitment output as the signer saw it: OP_RETURN, the commitment, and the
++    // PQ push cut back to its header and version. The signet solution, added after the ML-DSA-44
++    // signature, is not part of it.
++    CMutableTransaction coinbase{*block.vtx[0]};
++    CScript& script{coinbase.vout.at(cidx).scriptPubKey};
++    std::vector<uint8_t> cut{SIGNET_PQ_HEADER.begin(), SIGNET_PQ_HEADER.end()};
++    cut.push_back(SIGNET_PQ_VERSION);
++    script = CScript(script.begin(), script.begin() + MINIMUM_WITNESS_COMMITMENT) << cut;
++    const uint256 merkle{ComputeModifiedMerkleRoot(coinbase, block)};
++
++    // SHA256 of the raw challenge, without the length prefix a serialized script would have.
++    uint256 challenge_hash;
++    CSHA256().Write(challenge.data(), challenge.size()).Finalize(challenge_hash.begin());
++
++    HashWriter hasher{HASHER_SIGNET_PQ_BLOCK};
++    hasher << challenge_hash << block.nVersion << block.hashPrevBlock << merkle << block.nTime;
++    return hasher.GetSHA256();
++}
++
++/**
++ * The height a block's coinbase starts with (BIP34), if it starts with it in exactly the form
++ * BIP34 requires: the bytes of CScript() << height.
++ */
++static std::optional<int> CoinbaseHeight(const CBlock& block)
++{
++    if (block.vtx.empty() || block.vtx[0]->vin.empty()) return std::nullopt;
++    const CScript& script_sig{block.vtx[0]->vin[0].scriptSig};
++    CScript::const_iterator pc{script_sig.begin()};
++    opcodetype opcode;
++    std::vector<unsigned char> data;
++    if (!script_sig.GetOp(pc, opcode, data)) return std::nullopt;
++    int64_t height;
++    if (opcode == OP_0) {
++        height = 0;
++    } else if (opcode >= OP_1 && opcode <= OP_16) {
++        height = CScript::DecodeOP_N(opcode);
++    } else if (!data.empty() && data.size() <= 4) {
++        try {
++            height = CScriptNum{data, /*fRequireMinimal=*/true, /*nMaxNumSize=*/4}.GetInt64();
++        } catch (const scriptnum_error&) {
++            return std::nullopt;
++        }
++    } else {
++        return std::nullopt;
++    }
++    if (height < 0 || height > std::numeric_limits<int>::max()) return std::nullopt;
++    const CScript expected{CScript() << height};
++    if (!std::equal(expected.begin(), expected.end(), script_sig.begin(), pc)) return std::nullopt;
++    return static_cast<int>(height);
++}
++
++/**
++ * The ML-DSA-44 signature in a witness commitment output of exactly the form
++ * doc/signet-pqblock.md requires: OP_RETURN, the commitment, the PQ push, and at most one signet
++ * solution push after it, every push in its shortest encoding and nothing else. nullopt when the
++ * script has any other form.
++ */
++static std::optional<std::vector<unsigned char>> PQBlockSignature(const CScript& script)
++{
++    // OP_RETURN and the 36-byte commitment push were checked by GetWitnessCommitmentIndex.
++    // CheckMinimalPush asserts a push opcode, so every other opcode is turned away before it.
++    CScript::const_iterator pc{script.begin() + MINIMUM_WITNESS_COMMITMENT};
++    opcodetype opcode;
++    std::vector<unsigned char> data;
++    if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4 || !CheckMinimalPush(data, opcode) || data.size() != SIGNET_PQ_PUSH_SIZE) return std::nullopt;
++    if (!std::equal(SIGNET_PQ_HEADER.begin(), SIGNET_PQ_HEADER.end(), data.begin()) || data[SIGNET_PQ_HEADER.size()] != SIGNET_PQ_VERSION) return std::nullopt;
++    std::vector<unsigned char> signature(data.begin() + SIGNET_PQ_HEADER.size() + 1, data.end());
++
++    if (pc != script.end()) {
++        // The signet solution push, which the classical check reads: the header and some data.
++        if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4 || !CheckMinimalPush(data, opcode)) return std::nullopt;
++        if (data.size() <= sizeof(SIGNET_HEADER) || !std::equal(std::begin(SIGNET_HEADER), std::end(SIGNET_HEADER), data.begin())) return std::nullopt;
++        if (pc != script.end()) return std::nullopt;
++    }
++    return signature;
++}
++
++bool CheckSignetPQBlock(const CBlock& block, const Consensus::Params& consensusParams)
++{
++    const auto& rule{consensusParams.signet_pq_block};
++    if (!rule || block.GetHash() == consensusParams.hashGenesisBlock) return true;
++
++    // A height that cannot be read counts as reached: such a block also breaks BIP34, which
++    // ContextualCheckBlock enforces, so this can only reject blocks that are invalid anyway.
++    const std::optional<int> height{CoinbaseHeight(block)};
++    const bool enforced{!height || *height >= rule->height};
++    // Below the height nothing is rejected, and the block is only looked at to log whether it
++    // would pass, so that the signatures can be checked before they are enforced.
++    if (!enforced && !LogAcceptCategory(BCLog::VALIDATION, BCLog::Level::Debug)) return true;
++
++    const int cidx{GetWitnessCommitmentIndex(block)};
++    const std::optional<std::vector<unsigned char>> signature{cidx == NO_WITNESS_COMMITMENT ? std::nullopt : PQBlockSignature(block.vtx[0]->vout[cidx].scriptPubKey)};
++    bool valid{false};
++    if (signature) {
++        const std::optional<uint256> message{SignetPQBlockMessage(block, consensusParams.signet_challenge)};
++        valid = message && MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE>{rule->pubkey.data(), MLDSA44_PUBKEY_SIZE},
++                                         std::span<const unsigned char>{message->data(), message->size()},
++                                         MakeUCharSpan(SIGNET_PQ_CONTEXT),
++                                         std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE>{signature->data(), MLDSA44_SIGNATURE_SIZE});
++    }
++    if (!enforced) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetPQBlock: block %s below height %d, ML-DSA-44 block signature %s\n",
++                 block.GetHash().ToString(), rule->height, !signature ? "absent or not in the required form" : valid ? "valid" : "invalid");
++        return true;
++    }
++    if (!signature) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetPQBlock: Errors in block (no ML-DSA-44 block signature in the required form)\n");
++        return false;
++    }
++    if (!valid) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetPQBlock: Errors in block (ML-DSA-44 block signature invalid)\n");
++        return false;
++    }
++    return true;
++}
+diff --git a/src/signet.h b/src/signet.h
+index 9ebae84..c23cc46 100644
+--- a/src/signet.h
++++ b/src/signet.h
+@@ -7,8 +7,12 @@
+ 
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
++#include <uint256.h>
+ 
++#include <array>
++#include <cstdint>
+ #include <optional>
++#include <span>
+ 
+ class CScript;
+ namespace Consensus {
+@@ -20,6 +24,28 @@ struct Params;
+  */
+ bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& consensusParams);
+ 
++/** Header of the witness commitment push that carries a signet's ML-DSA-44 block signature
++ *  (doc/signet-pqblock.md): "PQB1". */
++inline constexpr std::array<uint8_t, 4> SIGNET_PQ_HEADER{0x50, 0x51, 0x42, 0x31};
++/** Format version that follows the header in that push. */
++inline constexpr uint8_t SIGNET_PQ_VERSION{0x01};
++
++/**
++ * The 32-byte message a signet's ML-DSA-44 block signature signs (doc/signet-pqblock.md):
++ * TaggedHash("SignetPQBlock", SHA256(challenge) || nVersion || hashPrevBlock || merkle root ||
++ * nTime), where the merkle root is taken over the block's transactions with the coinbase's
++ * witness commitment output cut back to OP_RETURN <commitment> <SIGNET_PQ_HEADER ||
++ * SIGNET_PQ_VERSION>. nullopt when the block has no coinbase or no witness commitment.
++ */
++std::optional<uint256> SignetPQBlockMessage(const CBlock& block, std::span<const uint8_t> challenge);
++
++/**
++ * Check the ML-DSA-44 block signature of a signet that requires one from a height on
++ * (Consensus::Params::signet_pq_block, doc/signet-pqblock.md). True when the network requires
++ * none and for blocks below that height, whose signature, if any, is only logged.
++ */
++bool CheckSignetPQBlock(const CBlock& block, const Consensus::Params& consensusParams);
++
+ /**
+  * Generate the signet tx corresponding to the given block
+  *
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 47b384e..e39b867 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -4067,6 +4067,17 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
+     if (nSigOps * WITNESS_SCALE_FACTOR > MAX_BLOCK_SIGOPS_COST)
+         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "out-of-bounds SigOpCount");
+ 
++    // Signet only: the ML-DSA-44 block signature some signets require from a height on
++    // (doc/signet-pqblock.md). Checked on the same condition as the signet solution above, so block
++    // templates, which TestBlockValidity checks without fCheckPOW, are left alone; in CheckBlock
++    // rather than ContextualCheckBlock because ConnectBlock runs CheckBlock again for every block it
++    // connects; and last, after the cheaper checks and the merkle root, so that a block whose
++    // transactions do not match its header is reported as mutated rather than as invalid. The
++    // height is the one the coinbase commits to (BIP34).
++    if (consensusParams.signet_blocks && fCheckPOW && !CheckSignetPQBlock(block, consensusParams)) {
++        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-signet-pqblk", "signet ML-DSA-44 block signature validation failure");
++    }
++
+     if (fCheckPOW && fCheckMerkleRoot)
+         block.fChecked = true;
+ 
+-- 
+2.49.0.windows.1
+

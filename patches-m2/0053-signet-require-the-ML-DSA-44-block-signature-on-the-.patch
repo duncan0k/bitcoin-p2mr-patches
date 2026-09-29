@@ -1,0 +1,214 @@
+From 4dff7dcd99bcbe2e3af77c4b01e2bd5999931616 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 12:51:21 -0600
+Subject: [PATCH 53/53] signet: require the ML-DSA-44 block signature on the
+ Ark-0 signet from height 20000
+
+The Ark-0 signet now has the rule of -signetpqblock without the option: from
+height 20000 (ARK0_PQ_BLOCK_HEIGHT) every block needs an ML-DSA-44 block
+signature by the key whose SHA256 is
+eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad
+(ARK0_PQ_BLOCK_PUBKEY). Like ARK0_MLDSA44_HEIGHT, both are rules of that
+network and fixed in the code, and the option stays refused there. A node
+logs the height and the key's SHA256 at startup, as it does for the option.
+---
+ doc/signet-pqblock.md             |  5 ++-
+ src/kernel/chainparams.cpp        | 66 ++++++++++++++++++++++++++++---
+ src/kernel/chainparams.h          | 10 +++++
+ src/test/signet_pqblock_tests.cpp | 34 ++++++++++++++++
+ 4 files changed, 109 insertions(+), 6 deletions(-)
+
+diff --git a/doc/signet-pqblock.md b/doc/signet-pqblock.md
+index 92197e1..8f17378 100644
+--- a/doc/signet-pqblock.md
++++ b/doc/signet-pqblock.md
+@@ -42,7 +42,10 @@ SHA256 of the key, so that operators can compare them.
+ 
+ The Ark-0 signet (challenge
+ `5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`)
+-refuses the option: its rules are fixed in the code.
++refuses the option: its rules are fixed in the code. It requires the signature
++from height 20000 (`ARK0_PQ_BLOCK_HEIGHT`), by the key whose SHA256 is
++`eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`
++(`ARK0_PQ_BLOCK_PUBKEY` in `src/kernel/chainparams.cpp`).
+ 
+ ## The block
+ 
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index deaada3..83b7721 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -39,6 +39,53 @@ using namespace util::hex_literals;
+ //! The signet challenge of Ark-0, the network ARK0_MLDSA44_HEIGHT is for.
+ static constexpr auto ARK0_SIGNET_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"_hex_u8};
+ 
++//! The ML-DSA-44 public key whose block signatures the Ark-0 signet requires from
++//! ARK0_PQ_BLOCK_HEIGHT on (doc/signet-pqblock.md). Its SHA256 is
++//! eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad.
++static constexpr auto ARK0_PQ_BLOCK_PUBKEY{
++    "b92b2c1f1eca027e10bcb4f379c98691585d9d9479cbf2c76a1ba1c10fcc4692"
++    "9a4b2ad4a17e065f0948a95ccf4e33b9aa8598ac2db4c8e8b8683528e6dde8b9"
++    "121f466d53b924fa926a81ba5ee4439d42ddca021c49dd708189ec800c7a0c97"
++    "ed7ff61ea8b63b2ada6725a9d5742c612a95fa2b4d47ec12568c1a7dbb853cae"
++    "82c67132869102e8e807d9010dab70bf4479bd97de88698393f52b388569bba6"
++    "7324ccec2301cd82cfde4baf1ae6772e51d87cfd1f28377573540b7f21bcccc3"
++    "0d48a8325f58b5ad64d1e97fc948a5ed491a5ebfd7c9273b16afae6228af4663"
++    "c4fae55749ee4b30cd5e8b63bfed6ee81b5e9703d9cd5df3c1042c9217ce54cd"
++    "d174ff3df75030cbc4cb949ba5ff85c8890a9d97db9329bf43178a5d7c0ddefa"
++    "35df0cafa587cab73d6d16e072931df07ac5d7a93c067de13b5f1e018d0e3079"
++    "7c1308688b97a0ad11759915c4c27a0d46df710fb365f5e63801f1b3ba61776a"
++    "3f4887e96a904ae0bab70225ff1fd8c089d3fc4fa36f9c63568d1891ed9706f5"
++    "0b9345a4ff892d6e42631f283d92ab37a59c10e7923c193ba138b02fe013ff43"
++    "a7ddbe31f9e66cc07875f13dd279d8874a7821dc0c50fb1be4a2862ba4a1b1ac"
++    "43d7cfcccba701f8e2e5fd820c23a8f4cdfa0334deacc74e518686025d721440"
++    "368551e527617472ba07995e1dba85d0a5edb9d76893321f20193f9f3dbbe5ef"
++    "c2ec488ca3fd85bfde0976d72d4974874e972976df8b7e3c93a1b0c0a3f7b65b"
++    "74975537faf97f5118cbbbb057eda8be2d07bf872b1ca92b401b0e83aed98d49"
++    "c1e2dafb9d4fba5e2134048895b8b3af408043f487203bcd4e73bbb51a9eb991"
++    "01e4299ba95a71b533f1736836acfb39bbd4360aa4fac599f0f436559e44ba83"
++    "0f3f398052afa84bfe52d9b501163a81bcfdbe55a0da2998dfe28605fb48e751"
++    "865251e004d13f09f59044ca12d8276813ac07ea02b1015ecbce907de6a03bf2"
++    "e2a3d26d8c55cac17717e9b6480de4a8fc278601b25e1700d0454446b61f722f"
++    "edff052e90fa189df0316b03dad33c78d5a940d9f0e1c83f06f3f8a49a005e42"
++    "73fcd4dc586151a92ae716004d27bd25373a4fa3cfcd6789087587dfba504927"
++    "425dd159e378e32a52b3d94f59c8a7073c84c170a80348df9f99503d76fa87b9"
++    "989b21e81a95b657ad1909ff11751ebcd9abd2ccd7fb94d1ecc4fdf46fd98641"
++    "33fa79bb87562decdba3383b414524cb2a6839b55c7424209b61736160504b3c"
++    "c9f9cd3313baf2d96341b84c9cbd71c5271ba7b089ab05abd30ad20a50d311c4"
++    "8dca40fcdeb0590ace32b5eed15a37854ed9d60b12343c9d0281ee48d8ec2a3a"
++    "f4d2e5ca335481b880ec513735c0d06126e406b5ed8efb74400c5fdfb88a6f24"
++    "8dd223e054a3e477687fa944cf395d1adf1a77862a029684c1544c4f09473e5d"
++    "f21077d25c843223839ecf98b86c37cdec05c7f18e7d7683af3f803b9f24dd7d"
++    "032876f57d41ce2ef425ea8b1c4baee134eefca561c537e0b6706839a079fcd5"
++    "780cd3e6728724f22a35b6971057e09a1b5b9dae4b8ca3e8f87dad31d06d5285"
++    "3d037e2a33d4997f65a6cef50bc6c2e4e28b1476c09f61206046436a684a47d5"
++    "28ceb5305e9180d8274a04b1810e39d09cc72663897e2e73ed0afd0377fe428e"
++    "46e3b4bcdc720d96e9f513ef62c535a776300ebfdf6e308512ee99b2806a616d"
++    "249b13d0872c5387e033081dce811b9af597243154788b6982d950ef72b57bff"
++    "c619b712e33df29b7b39ba04931068783e2bcac08011e9ef4a5b8875dccbc4cc"
++    "fc8974a6e31d3270043e779b5e3bdabd40f01cfc0f7438937d505a2897cdf0dc"_hex_u8};
++static_assert(ARK0_PQ_BLOCK_PUBKEY.size() == MLDSA44_PUBKEY_SIZE);
++
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
+ {
+     return std::ranges::equal(challenge, ARK0_SIGNET_CHALLENGE);
+@@ -515,17 +562,26 @@ public:
+             LogInfo("Signet difficulty retargets against %d s per block from height %d",
+                     options.pow_target_spacing_change->spacing, options.pow_target_spacing_change->height);
+         }
+-        // An ML-DSA-44 block signature required from a height on (doc/signet-pqblock.md).
+-        // ReadSigNetArgs only accepts it together with a challenge that is not Ark-0's.
++        // An ML-DSA-44 block signature required from a height on (doc/signet-pqblock.md): on the
++        // Ark-0 signet by the key and from the height this code fixes, on another custom signet
++        // as -signetpqblock says. ReadSigNetArgs refuses the option on Ark-0.
+         if (options.pq_block) {
+             assert(options.challenge && !IsArk0SignetChallenge(*options.challenge));
+-            assert(options.pq_block->pubkey.size() == MLDSA44_PUBKEY_SIZE && options.pq_block->height >= 1);
+             consensus.signet_pq_block = *options.pq_block;
++        } else if (IsArk0SignetChallenge(bin)) {
++            consensus.signet_pq_block = Consensus::SignetPQBlock{
++                .height = ARK0_PQ_BLOCK_HEIGHT,
++                .pubkey = {ARK0_PQ_BLOCK_PUBKEY.begin(), ARK0_PQ_BLOCK_PUBKEY.end()},
++            };
++        }
++        if (consensus.signet_pq_block) {
++            const auto& rule{*consensus.signet_pq_block};
++            assert(rule.pubkey.size() == MLDSA44_PUBKEY_SIZE && rule.height >= 1);
+             // Every node of the network needs the same value: log what an operator can compare.
+             std::array<unsigned char, CSHA256::OUTPUT_SIZE> key_hash;
+-            CSHA256().Write(options.pq_block->pubkey.data(), options.pq_block->pubkey.size()).Finalize(key_hash.data());
++            CSHA256().Write(rule.pubkey.data(), rule.pubkey.size()).Finalize(key_hash.data());
+             LogInfo("Signet blocks need an ML-DSA-44 block signature from height %d, by the key whose SHA256 is %s",
+-                    options.pq_block->height, HexStr(key_hash));
++                    rule.height, HexStr(key_hash));
+         }
+         consensus.fPowAllowMinDifficultyBlocks = false;
+         consensus.enforce_BIP94 = false;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index f047d1d..52690f3 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -33,6 +33,16 @@
+  */
+ inline constexpr int ARK0_MLDSA44_HEIGHT{8600};
+ 
++/**
++ * Height from which the Ark-0 signet requires the ML-DSA-44 block signature of
++ * doc/signet-pqblock.md, by the key kernel/chainparams.cpp fixes as
++ * ARK0_PQ_BLOCK_PUBKEY (SHA256 eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad).
++ * Like ARK0_MLDSA44_HEIGHT, it is a rule of that network, fixed here rather than
++ * given by an option. Set once, when the rule was adopted on 2026-09-29; it does
++ * not change after a build carrying it has left the network's own nodes.
++ */
++inline constexpr int ARK0_PQ_BLOCK_HEIGHT{20000};
++
+ /** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
+ 
+diff --git a/src/test/signet_pqblock_tests.cpp b/src/test/signet_pqblock_tests.cpp
+index a2a28f8..3156e8d 100644
+--- a/src/test/signet_pqblock_tests.cpp
++++ b/src/test/signet_pqblock_tests.cpp
+@@ -10,6 +10,8 @@
+ #include <consensus/merkle.h>
+ #include <consensus/params.h>
+ #include <consensus/validation.h>
++#include <crypto/sha256.h>
++#include <kernel/chainparams.h>
+ #include <logging.h>
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
+@@ -19,6 +21,7 @@
+ #include <streams.h>
+ #include <test/util/common.h>
+ #include <test/util/json.h>
++#include <test/util/logging.h>
+ #include <test/util/setup_common.h>
+ #include <uint256.h>
+ #include <util/chaintype.h>
+@@ -28,6 +31,7 @@
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++#include <array>
+ #include <cstdint>
+ #include <limits>
+ #include <string>
+@@ -315,4 +319,34 @@ BOOST_AUTO_TEST_CASE(other_implementation)
+     BOOST_CHECK(Commitment(block) != Commitment(ReadBlock(own["cases"][1]["block"])));
+ }
+ 
++// The Ark-0 signet has the rule without the option: from ARK0_PQ_BLOCK_HEIGHT on, by the key the
++// code fixes, whose SHA256 is published with the release.
++BOOST_AUTO_TEST_CASE(ark0)
++{
++    ArgsManager args;
++    args.ForceSetArg("-signetchallenge", "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae");
++    std::unique_ptr<const CChainParams> params;
++    {
++        ASSERT_DEBUG_LOG("Signet blocks need an ML-DSA-44 block signature from height 20000, by the key whose SHA256 is eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad");
++        params = CreateChainParams(args, ChainType::SIGNET);
++    }
++    const Consensus::Params& consensus{params->GetConsensus()};
++    BOOST_REQUIRE(consensus.signet_pq_block);
++    BOOST_CHECK_EQUAL(consensus.signet_pq_block->height, ARK0_PQ_BLOCK_HEIGHT);
++    BOOST_CHECK_EQUAL(ARK0_PQ_BLOCK_HEIGHT, 20000);
++    std::array<unsigned char, CSHA256::OUTPUT_SIZE> key_hash;
++    CSHA256().Write(consensus.signet_pq_block->pubkey.data(), consensus.signet_pq_block->pubkey.size()).Finalize(key_hash.data());
++    BOOST_CHECK_EQUAL(HexStr(key_hash), "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad");
++
++    // A block without a PQ push, at 19999 and at 20000.
++    const UniValue file{read_json(json_tests::signet_pqblock)};
++    const CBlock signed_block{ReadBlock(file[1]["cases"][0]["block"])};
++    const std::vector<unsigned char> script{Commitment(signed_block)};
++    const CBlock block{WithCommitment(signed_block, std::vector<unsigned char>(script.begin(), script.begin() + MINIMUM_WITNESS_COMMITMENT))};
++    BOOST_CHECK(CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << 19999 << OP_0), consensus));
++    BOOST_CHECK(!CheckSignetPQBlock(WithCoinbaseScriptSig(block, CScript() << 20000 << OP_0), consensus));
++    // The Ark-0 genesis block is the signet genesis block, exempt as on every signet.
++    BOOST_CHECK(CheckSignetPQBlock(params->GenesisBlock(), consensus));
++}
++
+ BOOST_AUTO_TEST_SUITE_END()
+-- 
+2.49.0.windows.1
+

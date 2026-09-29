@@ -145,6 +145,7 @@ node_image_for_patch_sets() {
         "master spacing")     printf '%s-m0-spacing\n'  "$NODE_IMAGE_BASE" ;;
         "master m05 spacing") printf '%s-m05-spacing\n' "$NODE_IMAGE_BASE" ;;
         "master m05 spacing m1") printf '%s-m05-spacing-m1\n' "$NODE_IMAGE_BASE" ;;
+        "master m05 spacing m1 m2") printf '%s-m05-spacing-m1-m2\n' "$NODE_IMAGE_BASE" ;;
         "master m05 spacing m1 m2a") printf '%s-m05-spacing-m1-m2a\n' "$NODE_IMAGE_BASE" ;;
         "master m05 spacing m1 m2a m2b") printf '%s-m05-spacing-m1-m2a-m2b\n' "$NODE_IMAGE_BASE" ;;
         *) die "no node image tag is defined for patch sets '$1';" \

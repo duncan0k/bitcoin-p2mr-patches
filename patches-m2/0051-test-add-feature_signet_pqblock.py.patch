@@ -1,0 +1,380 @@
+From 3cedcbfa1b932ab31551ea881d38ac4acd2f22ed Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:16:29 -0600
+Subject: [PATCH 51/53] test: add feature_signet_pqblock.py
+
+Two signets. On one with an OP_TRUE challenge: activation, the malformed blocks
+the rule rejects, a node without the rule following the valid chain,
+-reindex-chainstate and a late upgrade. On one with a bare 1-of-1 multisig
+challenge like Ark-0's, blocks made the way the Ark-0 producer makes them: the
+PQ push first, then the wallet's signet solution over it.
+---
+ test/functional/feature_signet_pqblock.py | 343 ++++++++++++++++++++++
+ test/functional/test_runner.py            |   1 +
+ 2 files changed, 344 insertions(+)
+ create mode 100644 test/functional/feature_signet_pqblock.py
+
+diff --git a/test/functional/feature_signet_pqblock.py b/test/functional/feature_signet_pqblock.py
+new file mode 100644
+index 0000000..dca20a7
+--- /dev/null
++++ b/test/functional/feature_signet_pqblock.py
+@@ -0,0 +1,343 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the ML-DSA-44 block signature a signet requires with -signetpqblock (doc/signet-pqblock.md).
++
++Two signets, each with nodes that have the rule and one node that does not:
++
++- an OP_TRUE challenge, where blocks carry no signet solution: activation,
++  every malformed block the rule rejects, a late upgrade and -reindex-chainstate;
++- a 1-of-1 bare multisig challenge like Ark-0's, signed by the wallet through
++  contrib/signet/miner exactly as the Ark-0 block producer does: the PQ push is
++  added first and the signet solution signs over it.
++"""
++
++import copy
++import importlib.machinery
++import importlib.util
++import json
++import logging
++import os
++import shlex
++import subprocess
++
++from test_framework.blocktools import SIGNET_HEADER
++from test_framework.descriptors import descsum_create
++from test_framework.key import ECKey
++from test_framework.messages import CBlock, CBlockHeader, from_hex
++from test_framework.script import CScript, CScriptOp, OP_1, OP_1NEGATE, OP_CHECKMULTISIG, OP_PUSHDATA1, OP_PUSHDATA4, OP_RETURN, OP_TRUE
++from test_framework.signet_pq import (
++    SIGNET_PQ_HEADER,
++    SIGNET_PQ_VERSION,
++    WITNESS_COMMITMENT_SIZE,
++    SIGNET_PQ_CONTEXT,
++    add_signet_pq_signature,
++    signet_pq_keygen,
++    signet_pq_message,
++    signet_pq_push,
++    signet_pq_signature,
++    verify_signet_pq_signature,
++    witness_commitment_index,
++)
++from test_framework.p2mr_mldsa44 import mldsa44_sign
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.test_node import ErrorMatch
++from test_framework.util import assert_equal
++from test_framework.wallet_util import bytes_to_wif
++
++# Test keys only: derived from public strings.
++PQ_PUBKEY, PQ_SECKEY = signet_pq_keygen(bytes.fromhex("11" * 32))
++OTHER_PUBKEY, OTHER_SECKEY = signet_pq_keygen(bytes.fromhex("22" * 32))
++CLASSICAL_KEY = (42).to_bytes(32, "big")
++
++TRUE_CHALLENGE = CScript([OP_TRUE])
++TRUE_HEIGHT = 12      # -signetpqblock height on the OP_TRUE signet
++MULTI_HEIGHT = 4      # and on the bare multisig signet
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++
++
++def load_signet_miner(srcdir):
++    """contrib/signet/miner as a module, the way the Ark-0 producer loads it.
++
++    The module calls logging.basicConfig when it is loaded, which would copy every log line of
++    this test to stderr, and the test runner fails a test that writes to stderr. The handler it
++    adds is removed again."""
++    path = os.path.join(srcdir, "contrib", "signet", "miner")
++    loader = importlib.machinery.SourceFileLoader("signetminer", path)
++    spec = importlib.util.spec_from_loader("signetminer", loader)
++    module = importlib.util.module_from_spec(spec)
++    root = logging.getLogger()
++    handlers = list(root.handlers)
++    loader.exec_module(module)
++    for handler in list(root.handlers):
++        if handler not in handlers:
++            root.removeHandler(handler)
++    return module
++
++
++class SignetPQBlockTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.setup_clean_chain = True
++        self.num_nodes = 5
++        key = ECKey()
++        key.set(CLASSICAL_KEY, True)
++        self.multi_challenge = CScript([OP_1, key.get_pubkey().get_bytes(), OP_1, OP_CHECKMULTISIG])
++        noban = "-whitelist=noban@127.0.0.1"
++        true_rule = f"-signetpqblock={PQ_PUBKEY.hex()}@{TRUE_HEIGHT}"
++        multi_rule = f"-signetpqblock={PQ_PUBKEY.hex()}@{MULTI_HEIGHT}"
++        self.extra_args = [
++            # the OP_TRUE signet: nodes 0 and 1 with the rule, node 2 without it
++            ["-signetchallenge=51", true_rule, noban, "-debug=validation", "-blockreservedweight=16000"],
++            # without -debug, so that below the height it takes the path of a node that logs nothing
++            ["-signetchallenge=51", true_rule, noban, "-debug=0"],
++            ["-signetchallenge=51", noban],
++            # the bare multisig signet: node 3 (with the classical key) and node 4, both with the rule
++            [f"-signetchallenge={self.multi_challenge.hex()}", multi_rule, noban, "-blockreservedweight=16000"],
++            [f"-signetchallenge={self.multi_challenge.hex()}", multi_rule, noban],
++        ]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++        self.skip_if_no_bitcoin_util()
++
++    def setup_network(self):
++        self.setup_nodes()
++        # Two signets: connect only the nodes of each one.
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++        self.connect_nodes(3, 4)
++
++    # Blocks
++
++    def grind(self, block):
++        util_argv = self.nodes[0].binaries.util_argv() + ["grind"]
++        header = CBlockHeader.serialize(block).hex()
++        out = subprocess.run(util_argv + [header], stdout=subprocess.PIPE, check=True).stdout.strip()
++        block.nNonce = from_hex(CBlockHeader(), out.decode()).nNonce
++        return block
++
++    def template_block(self, node, *, time=None):
++        """A block from the node's template, with the witness commitment and no pushes after it."""
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        return self.miner.new_block(tmpl, bytes(CScript([OP_TRUE])), blocktime=time)
++
++    def true_block(self, node, *, sign=True, seckey=PQ_SECKEY, time=None):
++        """A ground block for the OP_TRUE signet, signed with ML-DSA-44 unless sign is False."""
++        block = self.template_block(node, time=time)
++        if sign:
++            add_signet_pq_signature(block, seckey, bytes(TRUE_CHALLENGE))
++        return self.grind(block)
++
++    def set_commitment(self, block, script):
++        """Replace the witness commitment output's script, recompute the merkle root and grind."""
++        block.vtx[0].vout[witness_commitment_index(block)].scriptPubKey = CScript(script)
++        block.hashMerkleRoot = block.calc_merkle_root()
++        return self.grind(block)
++
++    def submit(self, node, block, expected=None):
++        assert_equal(node.submitblock(block.serialize().hex()), expected)
++
++    def multi_block(self, node, *, sign=True):
++        """A block for the bare multisig signet, made the way the Ark-0 producer makes one."""
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        block = self.miner.new_block(tmpl, bytes(CScript([OP_TRUE])))
++        if sign:
++            add_signet_pq_signature(block, PQ_SECKEY, bytes(self.multi_challenge))
++        psbt = self.miner.generate_psbt(block, tmpl["signet_challenge"])
++        processed = node.walletprocesspsbt(psbt=psbt, sign=True, sighashtype="ALL")
++        assert processed["complete"]
++        decoded = self.miner.decode_challenge_psbt(processed["psbt"])
++        block = self.miner.get_block_from_psbt(decoded)
++        solution = self.miner.get_solution_from_psbt(decoded)
++        util_argv = self.nodes[0].binaries.util_argv() + ["grind"]
++        return self.miner.finish_block(block, solution, shlex.join(util_argv))
++
++    # Tests
++
++    def run_test(self):
++        self.miner = load_signet_miner(self.config["environment"]["SRCDIR"])
++        self.test_options()
++        self.test_below_height()
++        self.test_malformed()
++        self.test_at_height()
++        self.test_reindex()
++        self.test_late_upgrade()
++        self.test_multisig_signet()
++        self.test_other_implementation()
++
++    def test_options(self):
++        self.log.info("-signetpqblock is refused without a challenge, on Ark-0 and with a bad value")
++        node = self.nodes[2]
++        self.stop_node(2)
++        rule = f"-signetpqblock={PQ_PUBKEY.hex()}@{TRUE_HEIGHT}"
++        node.assert_start_raises_init_error([rule], "Error: -signetpqblock requires -signetchallenge.")
++        node.assert_start_raises_init_error([f"-signetchallenge={ARK0_CHALLENGE}", rule],
++                                            "Error: -signetpqblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY[:-1].hex()}@5"],
++                                            "Error: -signetpqblock needs a 1312-byte ML-DSA-44 public key, not 1311 bytes.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@0"],
++                                            "Error: -signetpqblock height must be at least 1, not 0.")
++        value = PQ_PUBKEY.hex()
++        node.assert_start_raises_init_error(["-signetchallenge=51", f"-signetpqblock={value}"],
++                                            f"Error: -signetpqblock must be <pubkey>@<height>, not '{value}'.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", rule, rule.replace(f"@{TRUE_HEIGHT}", "@13")],
++                                            "Error: -signetpqblock cannot be multiple values.")
++        self.start_node(2, extra_args=self.extra_args[2])
++        self.connect_nodes(0, 2)
++
++    def test_below_height(self):
++        self.log.info("Below the height blocks need no ML-DSA-44 signature; a present one is only logged")
++        node = self.nodes[0]
++        for _ in range(3):
++            self.submit(node, self.true_block(node, sign=False))
++        with node.assert_debug_log([f"below height {TRUE_HEIGHT}, ML-DSA-44 block signature absent or not in the required form"]):
++            self.submit(node, self.true_block(node, sign=False))
++        block = self.true_block(node)
++        assert verify_signet_pq_signature(block, PQ_PUBKEY, bytes(TRUE_CHALLENGE))
++        with node.assert_debug_log([f"below height {TRUE_HEIGHT}, ML-DSA-44 block signature valid"]):
++            self.submit(node, block)
++        block = self.true_block(node, seckey=OTHER_SECKEY)
++        with node.assert_debug_log([f"below height {TRUE_HEIGHT}, ML-DSA-44 block signature invalid"]):
++            self.submit(node, block)
++        while node.getblockcount() < TRUE_HEIGHT - 1:
++            self.submit(node, self.true_block(node, sign=False))
++        self.sync_blocks(self.nodes[0:3])
++        assert_equal(self.nodes[2].getblockcount(), TRUE_HEIGHT - 1)
++
++    def test_malformed(self):
++        self.log.info("From the height every block not in the required form is rejected")
++        node = self.nodes[0]
++        challenge = bytes(TRUE_CHALLENGE)
++        # A valid block at the height. Its variants below keep its transactions and its signature,
++        # which stays valid for all of them (the message does not cover the PQ push), so each one is
++        # rejected for its form alone, except the one with the flipped bit.
++        base = self.true_block(node)
++        push = signet_pq_push(signet_pq_signature(base))
++        commitment = commitment_of(base)
++
++        def variant(script):
++            return self.set_commitment(copy.deepcopy(base), script)
++
++        cases = {
++            "no PQ push": commitment,
++            "a non-push opcode instead of it": commitment + bytes([OP_1NEGATE]),
++            "PQ push with a flipped bit": commitment + CScriptOp.encode_op_pushdata(push[:100] + bytes([push[100] ^ 1]) + push[101:]),
++            "two PQ pushes": commitment + CScriptOp.encode_op_pushdata(push) + CScriptOp.encode_op_pushdata(push),
++            "another version": commitment + CScriptOp.encode_op_pushdata(SIGNET_PQ_HEADER + bytes([SIGNET_PQ_VERSION + 1]) + push[5:]),
++            "another header": commitment + CScriptOp.encode_op_pushdata(bytes([push[0] ^ 1]) + push[1:]),
++            "a longer PQ push": commitment + CScriptOp.encode_op_pushdata(push + b"\x00"),
++            "a non-shortest encoding": commitment + bytes([OP_PUSHDATA4]) + len(push).to_bytes(4, "little") + push,
++            "a byte after it": commitment + CScriptOp.encode_op_pushdata(push) + b"\x00",
++            "a non-push opcode after it": commitment + CScriptOp.encode_op_pushdata(push) + bytes([OP_RETURN]),
++            "an unparsable tail": commitment + CScriptOp.encode_op_pushdata(push) + b"\x4d\xff",
++            "a header-only signet push": commitment + CScriptOp.encode_op_pushdata(push) + CScriptOp.encode_op_pushdata(SIGNET_HEADER),
++            "a non-shortest signet push": commitment + CScriptOp.encode_op_pushdata(push) + bytes([OP_PUSHDATA1, 6]) + SIGNET_HEADER + bytes(2),
++            "a PQ push after the signet push": commitment + CScriptOp.encode_op_pushdata(SIGNET_HEADER + b"\x00\x00") + CScriptOp.encode_op_pushdata(push),
++        }
++        for name, script in cases.items():
++            self.log.debug(f"  {name}")
++            self.submit(node, variant(script), "bad-signet-pqblk")
++
++        block = self.true_block(node, seckey=OTHER_SECKEY)
++        self.submit(node, block, "bad-signet-pqblk")
++        # A signature over the message of another block (the same one a second later).
++        block = self.true_block(node, sign=False, time=base.nTime + 1)
++        wrong = mldsa44_sign(PQ_SECKEY, signet_pq_message(base, challenge), context=SIGNET_PQ_CONTEXT)
++        self.submit(node, self.set_commitment(block, commitment_of(block) + CScriptOp.encode_op_pushdata(signet_pq_push(wrong))), "bad-signet-pqblk")
++        # The same message under OP_CHECKMLDSA44's context.
++        block = self.true_block(node, sign=False)
++        wrong = mldsa44_sign(PQ_SECKEY, signet_pq_message(block, challenge))
++        self.submit(node, self.set_commitment(block, commitment_of(block) + CScriptOp.encode_op_pushdata(signet_pq_push(wrong))), "bad-signet-pqblk")
++        assert_equal(node.getblockcount(), TRUE_HEIGHT - 1)
++
++    def test_at_height(self):
++        self.log.info("A node without the rule accepts what the rule rejects, and follows the longer valid chain")
++        node, other = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        unsigned = self.true_block(other, sign=False)
++        self.submit(node, unsigned, "bad-signet-pqblk")
++        self.submit(other, unsigned)
++        assert_equal(other.getbestblockhash(), unsigned.hash_hex)
++
++        self.log.info("Signed blocks are accepted from the height on, and templates keep working")
++        for _ in range(3):
++            self.submit(node, self.true_block(node))
++        assert_equal(node.getblockcount(), TRUE_HEIGHT + 2)
++        self.connect_nodes(0, 2)
++        self.sync_blocks(self.nodes[0:3])
++        assert_equal(other.getbestblockhash(), node.getbestblockhash())
++
++    def test_reindex(self):
++        self.log.info("-reindex-chainstate checks every block again and ends at the same tip")
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        self.restart_node(0, extra_args=self.extra_args[0] + ["-reindex-chainstate"])
++        assert_equal(node.getbestblockhash(), tip)
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++
++    def test_late_upgrade(self):
++        self.log.info("A node that took a block without the signature before it upgraded")
++        node, other = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        good_tip = node.getbestblockhash()
++        unsigned = self.true_block(other, sign=False)
++        self.submit(other, unsigned)
++        assert_equal(other.getbestblockhash(), unsigned.hash_hex)
++
++        # Restarted with the rule, the block check at startup finds the block among the last ones.
++        self.stop_node(2)
++        other.assert_start_raises_init_error(self.extra_args[0][:2] + ["-whitelist=noban@127.0.0.1"],
++                                             "Corrupted block database detected", match=ErrorMatch.PARTIAL_REGEX)
++        # -reindex-chainstate connects every block again and leaves that one out.
++        self.start_node(2, extra_args=self.extra_args[0][:2] + ["-whitelist=noban@127.0.0.1", "-reindex-chainstate"])
++        assert_equal(other.getbestblockhash(), good_tip)
++        self.connect_nodes(0, 2)
++        self.submit(node, self.true_block(node))
++        self.sync_blocks([node, other])
++        self.restart_node(2, extra_args=self.extra_args[2])
++        self.connect_nodes(0, 2)
++
++    def test_multisig_signet(self):
++        self.log.info("Bare multisig challenge: the PQ push first, then the wallet's signet solution over it")
++        node = self.nodes[3]
++        wif = bytes_to_wif(CLASSICAL_KEY)
++        res = node.importdescriptors([{"desc": descsum_create(f"multi(1,{wif})"), "timestamp": "now"}])
++        assert all(r["success"] for r in res)
++
++        for height in range(1, MULTI_HEIGHT + 3):
++            block = self.multi_block(node, sign=(height != 2))
++            script = bytes(block.vtx[0].vout[witness_commitment_index(block)].scriptPubKey)
++            assert SIGNET_HEADER in script
++            if height != 2:
++                assert verify_signet_pq_signature(block, PQ_PUBKEY, bytes(self.multi_challenge))
++            self.submit(node, block)
++        self.sync_blocks(self.nodes[3:5])
++        assert_equal(self.nodes[4].getblockcount(), MULTI_HEIGHT + 2)
++
++        self.log.info("At the height a block with only the classical solution is rejected")
++        self.submit(node, self.multi_block(node, sign=False), "bad-signet-pqblk")
++
++    def test_other_implementation(self):
++        self.log.info("The block another implementation signed verifies here too")
++        # p2mr-ts computed its message and signed it with @noble/post-quantum, hedged; the unit
++        # tests check the same block (src/test/data/signet_pqblock_noble.json).
++        path = os.path.join(self.config["environment"]["SRCDIR"], "src", "test", "data", "signet_pqblock_noble.json")
++        with open(path, encoding="utf-8") as f:
++            vectors = json.load(f)[1]
++        block = from_hex(CBlock(), vectors["block"])
++        pubkey = bytes.fromhex(vectors["pubkey"])
++        challenge = bytes.fromhex(vectors["challenge"])
++        assert verify_signet_pq_signature(block, pubkey, challenge)
++        assert not verify_signet_pq_signature(block, OTHER_PUBKEY, challenge)
++        assert not verify_signet_pq_signature(block, pubkey, challenge + bytes([OP_TRUE]))
++
++
++def commitment_of(block):
++    return bytes(block.vtx[0].vout[witness_commitment_index(block)].scriptPubKey)[:WITNESS_COMMITMENT_SIZE]
++
++
++if __name__ == '__main__':
++    SignetPQBlockTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 6dcc268..22870c4 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -288,6 +288,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr.py',
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
++    'feature_signet_pqblock.py',
+     'wallet_p2mr.py',
+     'wallet_p2mr_multisig.py',
+     'wallet_p2mr_timelock.py',
+-- 
+2.49.0.windows.1
+
