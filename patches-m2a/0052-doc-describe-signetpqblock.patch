@@ -1,4 +1,4 @@
-From 14606254efe3a1da3d10fdb619f893023e330454 Mon Sep 17 00:00:00 2001
+From c1ab08c4c1aa66580b4129dda068647ff546562f Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:16:29 -0600
 Subject: [PATCH 52/52] doc: describe -signetpqblock
@@ -10,7 +10,7 @@ Subject: [PATCH 52/52] doc: describe -signetpqblock
 
 diff --git a/doc/signet-pqblock.md b/doc/signet-pqblock.md
 new file mode 100644
-index 0000000..56e8480
+index 0000000..92197e1
 --- /dev/null
 +++ b/doc/signet-pqblock.md
 @@ -0,0 +1,126 @@
@@ -111,9 +111,9 @@ index 0000000..56e8480
 +above any, but every node connects it at its first start.
 +
 +Below the height nothing is rejected. With `-debug=validation` a node logs for
-+every block whether it would pass: its signature valid, invalid, or absent or
-+not in the required form. So the signatures can be checked before they are
-+enforced.
++every block below the height but the genesis block whether it would pass: its
++signature valid, invalid, or absent or not in the required form. So the
++signatures can be checked before they are enforced.
 +
 +## Nodes that upgrade late
 +

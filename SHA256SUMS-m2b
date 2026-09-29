@@ -1,4 +1,4 @@
-5ca21b2a1b2725ad75857e747c2b88aa179e9d5bf14d6f18393fa4a43968266c *0053-signet-signets-whose-blocks-only-an-ML-DSA-44-key-si.patch
-541c0d98f0172103867b5f3b9303695cf9752a144d18afaa02207a34dac64c4c *0054-test-add-signet_pqchallenge_tests-and-its-vectors.patch
-a3b4c969857e89c7ec460eca1206dca64cb3e076eed8b1821c38721abd7d0878 *0055-test-add-feature_signet_pqchallenge.py.patch
-c759840d7abd7d9e6bdf4f60dade79c50ef456a552af33d1692efe779cc73166 *0056-doc-describe-signetpqchallenge.patch
+cec0ced0defd64f70de571737092f8956ea0b802b3a3b0585fbc2611429b4376 *0053-signet-signets-whose-blocks-only-an-ML-DSA-44-key-si.patch
+bf2c0918c935330f0c6e40010b4298d4ea2969513be3a51fa70286f978ab400b *0054-test-add-signet_pqchallenge_tests-and-its-vectors.patch
+48afe5184668624c5ec8ec19e20e57367e8fafc82c1aef00c5e7e6b15ba96371 *0055-test-add-feature_signet_pqchallenge.py.patch
+fd44d11733fd24dcc65054286c0f38f5edb3f149366fd6a33f123ef3df439cde *0056-doc-describe-signetpqchallenge.patch

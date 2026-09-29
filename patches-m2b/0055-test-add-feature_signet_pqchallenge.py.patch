@@ -1,4 +1,4 @@
-From a9bef47a67f2c62d5b7909f787ba0c4168aa4e7a Mon Sep 17 00:00:00 2001
+From bb8cf4a7ffbe1e7daf8a6e30774929cadad28509 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:19:21 -0600
 Subject: [PATCH 55/56] test: add feature_signet_pqchallenge.py

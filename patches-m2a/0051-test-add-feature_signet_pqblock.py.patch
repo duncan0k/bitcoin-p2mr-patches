@@ -1,4 +1,4 @@
-From b2c07ed4665a452fa96ccf3ebb5e5ccc3b732875 Mon Sep 17 00:00:00 2001
+From f39e3abff54508242cef09a8e4491f8ad2ef2c59 Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:16:29 -0600
 Subject: [PATCH 51/52] test: add feature_signet_pqblock.py
