@@ -5,6 +5,12 @@
 # destination. The signing key is not here; it is in node A's wallet, and the
 # producer asks node A to sign the signet solution through walletprocesspsbt.
 #
+# Since M2 it also holds a second key: the ML-DSA-44 block key, from the Secret
+# ark0-pq-signer. From ARK0_PQ_BLOCK_FROM on it adds that key's signature to
+# every block before node A signs the signet solution over it
+# (doc/signet-pqblock.md of the Core series). The node images enforce the
+# signature from height 20000 (ARK0_PQ_BLOCK_HEIGHT).
+#
 # Apply this last, and only once both nodes are Ready and agree on the tip.
 apiVersion: apps/v1
 kind: Deployment
@@ -64,6 +70,15 @@ spec:
             - { name: ARK0_RPC_PORT_B, value: "38442" }
             - { name: ARK0_CREDENTIALS, value: "/secrets/rpccredentials.conf" }
             - { name: ARK0_REWARD_ADDRESS_FILE, value: "/config/reward_address.txt" }
+            # M2. The signature starts 2000 blocks before the rule's height, so that
+            # every node's validation log shows it verifying before it is enforced.
+            # The producer checks its key against this SHA256, the one the nodes
+            # log at startup, at every block, before 18000 too. On Ark-0 it mines
+            # nothing without all three, the right SHA256 and a start at or below
+            # 20000.
+            - { name: ARK0_PQ_BLOCK_SEED_FILE, value: "/pq/seed" }
+            - { name: ARK0_PQ_BLOCK_FROM, value: "18000" }
+            - { name: ARK0_PQ_BLOCK_KEY_SHA256, value: "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad" }
           resources:
             requests: { cpu: "250m", memory: "256Mi" }
             limits: { cpu: "2", memory: "2Gi" }
@@ -76,6 +91,8 @@ spec:
             # Only so the wallet can be rebuilt without going back to the host;
             # the loop never reads it.
             - { name: signer, mountPath: /signer, readOnly: true }
+            # The ML-DSA-44 block key's seed, read at every block from 18000 on.
+            - { name: pq, mountPath: /pq, readOnly: true }
       volumes:
         - name: home
           emptyDir: {}
@@ -93,4 +110,8 @@ spec:
         - name: signer
           secret:
             secretName: ark0-signer
+            defaultMode: 0440
+        - name: pq
+          secret:
+            secretName: ark0-pq-signer
             defaultMode: 0440

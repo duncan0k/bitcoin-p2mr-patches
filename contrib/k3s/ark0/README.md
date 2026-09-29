@@ -78,9 +78,9 @@ The rendered file is not a secret but it is not repository content either.
 Write it outside the checkout; `-o` is required so that it cannot default into
 one.
 
-## The two Secrets
+## The three Secrets
 
-Both are created by hand and neither appears in any file here. `kubectl create
+All three are created by hand and none appears in any file here. `kubectl create
 secret` keeps their values out of the shell history only if the shell is
 configured to ignore commands with a leading space, so prefer `--from-file`
 over `--from-literal` where there is a choice.
@@ -104,7 +104,24 @@ signing key and travels with node A's data directory, so the producer signs
 through `walletprocesspsbt` and never reads this file. It is mounted so that
 the wallet can be rebuilt without going back to the host.
 
-The exact commands are in `../ARK0-MIGRATION.md`, step 3.
+**`ark0-pq-signer`**, one key, `seed`: the 32-byte seed of the ML-DSA-44 block
+key, as 64 hex characters on one line. The public key derived from it is the one
+the node images fix for Ark-0 (`ARK0_PQ_BLOCK_PUBKEY` in the Core series, M2),
+and its SHA256 is what `50-miner.yaml` gives the producer as
+`ARK0_PQ_BLOCK_KEY_SHA256`.
+
+Unlike `ark0-signer` it is a dependency. The producer derives the key from it
+and signs every block with it from `ARK0_PQ_BLOCK_FROM` on, and from height
+20000 the nodes refuse a block without that signature: without this Secret the
+producer's pod does not start, and a producer that cannot read it mines no
+Ark-0 block. The seed is generated once, off the cluster, and kept in encrypted
+backups; the Secret is made from a file, as the other two are:
+
+```sh
+sudo k3s kubectl -n ark0 create secret generic ark0-pq-signer --from-file=seed=seed.hex
+```
+
+The exact commands for the first two are in `../ARK0-MIGRATION.md`, step 3.
 
 ## The wallet `70-soak.yaml` needs
 
@@ -340,7 +357,7 @@ wait once, bounded, for each node to answer before they read anything.
 Every workload here runs as uid 10000, the uid the images create and declare,
 with `runAsNonRoot`, an `fsGroup` that gives that uid the data volume and the
 mounted Secret, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation:
-false` and every capability dropped. The two Secret mounts are `0440` rather
+false` and every capability dropped. The Secret mounts are `0440` rather
 than `0400`, because a Secret volume belongs to root and the pod's `fsGroup`,
 so `0400` is readable only by root and an unprivileged pod reads it by group.
 

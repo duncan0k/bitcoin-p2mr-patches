@@ -65,6 +65,7 @@ directory's README says what each one is and what has to be filled in.
 | `Deployment/ark0-miner` | `50-miner.yaml` | one replica, the `p2mr-miner` image, the loop against `ark0-nodea` |
 | `Secret/ark0-rpc` | by hand | `rpcauth` for the nodes, `rpccredentials.conf` for the producer |
 | `Secret/ark0-signer` | by hand | `signer.wif` |
+| `Secret/ark0-pq-signer` | by hand, since M2 | `seed`, the ML-DSA-44 block key the producer signs with (`ark0/README.md`, "The three Secrets") |
 | `CronJob/ark0-observe` + its volume | `60-observe.yaml` | the ten minute probe that replaces the host crontab line |
 | `CronJob/ark0-soak` | `70-soak.yaml` | the six hourly M0.5 wallet round trip, writing to the observation volume |
 
