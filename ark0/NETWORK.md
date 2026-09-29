@@ -8,15 +8,18 @@ first two since 2026-09-22), which sets how the chain retargets from height
 8064 on; see "Parameters" below. Since 2026-09-25 they also carry the wallet
 series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
 experimental rule from height 8600; see "Rule change at height 8600 (M1)".
+Since 2026-09-30 they also carry the M2 series in `patches-m2/`, which from
+height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
+at height 20000 (M2)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
 anyone rebuild the node, replay the chain offline and re-derive every claim
 below without contacting the network, apart from what happened after height
-1264, where the snapshot ends: the retarget at 8064 and the rule change at 8600
-need a node that follows the live chain. Since 2026-09-24 the network has one
-public node, and [`JOIN.md`](JOIN.md) describes how to follow the live chain
-with a node of your own.
+1264, where the snapshot ends: the retarget at 8064 and the rule changes from
+8600 on need a node that follows the live chain. Since 2026-09-24 the network
+has one public node, and [`JOIN.md`](JOIN.md) describes how to follow the live
+chain with a node of your own.
 
 ## What it is
 
@@ -35,9 +38,10 @@ with a node of your own.
   deployment never activates there and `getdeploymentinfo` does not list it.
 - **Not an open network in the usual sense.** Anyone can run a node and follow
   it (`JOIN.md`), but every block is produced by one party, the operator, who
-  holds the key of the 1-of-1 challenge. There is one public node, and a block
-  explorer and a faucet, all run by the operator. It is a test network for
-  trying things out, and it may be reset at any time.
+  holds the key of the 1-of-1 challenge and the ML-DSA-44 block key that M2
+  requires from height 20000. There is one public node, and a block explorer
+  and a faucet, all run by the operator. It is a test network for trying things
+  out, and it may be reset at any time.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
   The leaves in the demo tree are ordinary `OP_CHECKSIG` tapscript leaves
   signed with Schnorr over secp256k1. No post-quantum signature scheme is
@@ -45,9 +49,13 @@ with a node of your own.
 - **One experimental exception from height 8600 (M1).** Since that height the
   nodes built with `patches-m1/`, the operator's among them, also check one
   post-quantum signature scheme, ML-DSA-44, in outputs that opt into it.
-  Blocks are still authorized by the classical signet challenge, and outputs
-  that do not opt in are unchanged. See "Rule change at height 8600 (M1)"
-  below.
+  Outputs that do not opt in are unchanged. See "Rule change at height 8600
+  (M1)" below.
+- **A second one from height 20000 (M2).** From that height the nodes built
+  with `patches-m2/` also require an ML-DSA-44 signature by one fixed key on
+  every block, next to the solution of the classical signet challenge. The
+  proof-of-work rules and the rules for spending outputs are unchanged. See
+  "Rule change at height 20000 (M2)" below.
 
 ### What the evidence does not prove
 
@@ -93,20 +101,24 @@ makes the opcode push false, as `OP_CHECKSIG` does.
   with the opcode are relayed:** the public key followed by `OP_CHECKMLDSA44`
   (S1), and S1 followed by `OP_VERIFY <x-only key> OP_CHECKSIG` (S2). Other
   scripts with the opcode are not relayed, but a block may still contain them,
-  and some of them pass without a valid signature: with an empty one, where
-  the script accepts a false result, or with a key taken from the witness.
+  and some of them pass without a valid signature by a committed key: with
+  an empty one, where the script accepts a false result, or with a signature
+  under a key the spender chooses and puts in the witness.
 - **The tree decides the rest, and a node cannot see it.** A spend reveals one
-  leaf, and every other leaf of the tree is another way to spend the output.
-  An S1 or S2 leaf protects the output only if every other leaf can only fail,
-  as in a tree of exactly two leaves, both at depth one and both of leaf
-  version `0xc0`, the other being `OP_RETURN`. At another leaf version an
-  `OP_RETURN` leaf is not executed, and a spend through it needs no
-  signature; a single leaf sits at depth zero and is spent without being
-  executed. Once the rule applies, an executed S1 or S2 leaf protects the
-  spending path of its own output and nothing more.
+  leaf, and other leaves of the tree may provide other ways to spend the
+  output. M1 restricts the spending of the whole output to committed
+  ML-DSA-44 keys only if every spendable leaf requires a valid signature under
+  a key fixed by that leaf, as S1 and S2 do; for example, a tree of exactly
+  two leaves, both at depth one and both of leaf version `0xc0`: an S1 or S2
+  leaf and an `OP_RETURN` leaf. At another leaf version an `OP_RETURN` leaf is
+  not executed, and a spend through it needs no signature; a single leaf sits
+  at depth zero and is spent without being executed. Once the rule applies, an
+  executed S1 or S2 leaf protects the spending path of its own output and
+  nothing more.
 - **It is not part of BIP-360**, which defines no post-quantum signature check,
-  and it is not a proposal for Bitcoin. Blocks on Ark-0 are still authorized
-  by the classical signet challenge.
+  and it is not a proposal for Bitcoin. Blocks on Ark-0 are authorized by the
+  classical signet challenge, and from height 20000 by M2's block signature as
+  well.
 - **The height is a rule of this network and will not change.** The series is
   in `patches-m1/` (`README.md`, "Experimental M1 series"), and
   `doc/p2mr-mldsa44.md` in the patched tree specifies the rule.
@@ -147,6 +159,56 @@ answers `block-script-verify-flag-failed (Invalid ML-DSA-44 signature)`, or
 `bitcoin-cli getchaintips` then lists it as `invalid`. The last command returns
 the node to the chain it followed.
 
+## Rule change at height 20000 (M2)
+
+From height 20000 every block on Ark-0 also needs an ML-DSA-44 (FIPS 204)
+signature by one fixed public key, next to the solution that the classical
+signet challenge requires. This experimental rule is called milestone M2 here.
+The nodes built with `patches-m2/` enforce it, the operator's among them, and
+`doc/signet-pqblock.md` in the patched tree specifies it.
+
+- **Where the signature is.** In the coinbase output that holds the witness
+  commitment, right after the commitment: one 2425-byte push of the tag
+  `PQB1`, a version byte `01` and the 2420-byte signature. The signet solution
+  follows it, and nothing else may. From height 20000 on, a block whose output
+  has any other form is invalid (`bad-signet-pqblk`).
+- **What it covers.** The block's version, previous block and time, and every
+  transaction, the coinbase included, apart from the signature bytes and the
+  signet solution push. A node with the rule therefore accepts no block whose
+  contents the holder of this key did not sign: with the classical challenge
+  key alone, no block with contents of its own can be made that such a node
+  accepts. Like the signet solution, the signature does not
+  cover `nNonce` and `nBits`, and it does not cover the signet solution either,
+  so a block with the same contents can appear under other hashes.
+- **The key and the height are fixed in the code for this network's
+  challenge** (`ARK0_PQ_BLOCK_PUBKEY` and `ARK0_PQ_BLOCK_HEIGHT`). The key is
+  the operator's, like the classical challenge key, and a block needs both.
+  A node built with `patches-m2/` logs the height and the key's SHA256 when it
+  starts:
+
+  ```
+  Signet blocks need an ML-DSA-44 block signature from height 20000, by the key whose SHA256 is eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad
+  ```
+
+- **Below height 20000, M2 rejects no block.** The operator's block producer
+  signs every block from height 18000 on, and a node started with
+  `-debug=validation` logs, for each block below 20000 that it validates
+  other than the genesis block, whether its signature is valid, invalid, or
+  absent or not in the required form. So the signatures can be checked on the
+  chain before they are enforced.
+- **It is a soft fork.** A node without `patches-m2/` accepts every block a
+  node with it accepts and keeps following the chain, but does not check the
+  signature. A node that accepted blocks at or above height 20000 before it
+  upgraded has not checked them; one start with `-reindex-chainstate`
+  (`-reindex` on a pruned node) checks them.
+- **What it does not change.** Who produces blocks: the operator, as before,
+  now with two keys instead of one. The proof-of-work rules and the rules for
+  spending outputs are unchanged; what M2 adds is the push in the coinbase, and
+  a node without the rule checks nothing new. It is not part of BIP 325 or
+  BIP-360, and it is not a proposal for Bitcoin.
+- **The height is a rule of this network and will not change.** The series is
+  in `patches-m2/` (`README.md`, "Experimental M2 series").
+
 ## Parameters
 
 | Parameter | Value |
@@ -166,6 +228,7 @@ the node to the chain it followed.
 | Address prefix | `tb1z` (bech32m, witness v2, 32-byte program) |
 | Output type name | `witness_v2_p2mr` |
 | `OP_CHECKMLDSA44` (M1) | from height 8600, see "Rule change at height 8600 (M1)" |
+| ML-DSA-44 block signature (M2) | from height 20000, by the key whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, see "Rule change at height 20000 (M2)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -175,8 +238,8 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is one of two consensus changes on this
-network besides P2MR; the other is M1 ("Rule change at height 8600 (M1)"
+by the patch in `patches-spacing/`, is one of three consensus changes on this
+network besides P2MR; the others are M1 and M2 (the two "Rule change" sections
 above). Producing blocks faster than ten minutes is what a
 signet is for: the signet solution decides who may produce a block, while
 proof of work still paces how fast, as the next paragraphs record.

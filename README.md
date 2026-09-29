@@ -9,9 +9,13 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 - License: same as Bitcoin Core (MIT); patches authored by CipherScope <dev@cipherscope.io>
 - Status: experimental. **Not deployed on, and not intended for, mainnet or the public signet** (the
   deployments never activate there).
-- One experimental extension beyond BIP-360: the M1 series in `patches-m1/` adds an ML-DSA-44 signature
-  check, `OP_CHECKMLDSA44`, that only the Ark-0 test signet activates (see "Experimental M1 series"
-  below). BIP-360 defines no post-quantum signature check, and this one is not proposed for Bitcoin.
+- Two experimental extensions, both deployed on the Ark-0 test signet. The M1 series in `patches-m1/`
+  adds an ML-DSA-44 signature check in P2MR leaves, `OP_CHECKMLDSA44`, which is active on Ark-0 from
+  height 8600 and on regtest by default, and on no other signet, testnet or mainnet (see "Experimental
+  M1 series" below); BIP-360 defines no post-quantum signature check. The M2 series in `patches-m2/`
+  requires an ML-DSA-44 signature by a fixed key on every block from a height on, next to the signet
+  solution: on Ark-0 from height 20000, and on another custom signet only if it sets `-signetpqblock`
+  (see "Experimental M2 series" below). Neither is proposed for Bitcoin.
 
 ## Layout
 
@@ -19,11 +23,15 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 patches/            10 git format-patch files, apply in order with git am
 patches-m05/        24 further patches, the M0.5 wallet series (see below)
 patches-spacing/    1 patch, the retarget spacing Ark-0 uses from height 8064 (see below)
-patches-m1/         13 further patches, the experimental M1 series, active on Ark-0 only (see below)
+patches-m1/         13 further patches, the experimental M1 series, on Ark-0 from height 8600 (see below)
+patches-m2/         5 further patches, the experimental M2 series, on Ark-0 from height 20000 (see below)
+patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
+patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
 SHA256SUMS-m1       checksums of the M1 patches
+SHA256SUMS-m2       checksums of the M2 patches; SHA256SUMS-m2a and SHA256SUMS-m2b for the candidates
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
 ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
@@ -84,9 +92,10 @@ validation only after activation.
 ## Out of scope / wording
 
 - No activation on mainnet or the public signet: this holds for everything in this repository. No
-  post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the one post-quantum
-  signature check is the experimental M1 series in `patches-m1/`, which only Ark-0 activates, from
-  height 8600 (`ark0/NETWORK.md`).
+  post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum
+  signature checks are the experimental M1 and M2 series in `patches-m1/` and `patches-m2/`, which
+  Ark-0 activates from heights 8600 and 20000 (`ark0/NETWORK.md`); another custom signet can switch
+  M2 on with `-signetpqblock`.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
   is a separate series applying on top.
@@ -94,8 +103,15 @@ validation only after activation.
   Bitcoin Core v31.1, enforced at block validation, independently reproducible". It is not "the first",
   "the only", "the real bc1z", "mainnet-ready", or "a quantum-resistant network".
 - Describe M1 as: "an experimental ML-DSA-44 signature check in P2MR leaves, active on the Ark-0 test
-  signet only". It is not part of BIP-360, it is not a proposal for Bitcoin, and it does not make Ark-0
-  a quantum-resistant network: blocks there are still authorized by a classical signet challenge.
+  signet only" (regtest activates it too, for tests). It is not part of BIP-360, it is not a proposal
+  for Bitcoin, and it does not make Ark-0 a quantum-resistant network: it checks ML-DSA-44 signatures
+  only in the P2MR leaves that use the opcode, and it restricts the spending of an entire output to
+  committed ML-DSA-44 keys only if every spendable leaf requires a valid signature under a key fixed by
+  that leaf, as S1 and S2 do.
+- Describe M2 as: "an experimental ML-DSA-44 block signature, required on the Ark-0 test signet from
+  height 20000". It is not part of BIP 325, it is not a proposal for Bitcoin, and it does not make
+  Ark-0 a quantum-resistant network either: blocks still need the classical signet solution and proof
+  of work, one party holds both block keys, and M2 changes no rule for spending an output.
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
 
@@ -146,11 +162,12 @@ It has been exercised on the experimental signet, which is why it is in this tre
 outside it. From 2026-09-16 to 2026-09-25 the verifying node of the Ark-0 signet ran a build of this
 series while the block producing node ran the consensus series without it, so the two were continuously
 checked against each other on a live chain; a divergence would have been the finding. From 2026-09-22
-both also carried `patches-spacing/`, described below, and since 2026-09-25 both run one build of all
-four sets, `patches-m1/` included. A job every six hours funds a P2MR
+both also carried `patches-spacing/`, described below; from 2026-09-25 both ran one build of all four
+sets, `patches-m1/` included, and since 2026-09-30 they run one of all five, `patches-m2/` included. A
+job every six hours funds a P2MR
 address from one node and spends it back from the other through the PSBT flow, asserting the witness
-dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records that roll, the build it came from, and
-the first round trip it produced.
+dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records the 2026-09-25 roll, the build it came
+from, and the first round trip it produced.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch
@@ -207,7 +224,9 @@ as an experiment of the Ark-0 test signet. It is not part of BIP-360, which defi
 signature check, and it is not proposed for Bitcoin. `doc/p2mr-mldsa44.md`, added by the series, is
 its specification. `ark0/NETWORK.md`, "Rule change at height 8600 (M1)", says what it protects on
 Ark-0 and what it does not: in short, a spend through one of two leaf templates, S1 and S2, needs a
-valid ML-DSA-44 signature, and only an output whose other leaves can only fail is protected by it.
+valid ML-DSA-44 signature, and M1 restricts the spending of an entire output to committed ML-DSA-44
+keys only if every spendable leaf requires a valid signature under a key fixed by that leaf, as S1 and
+S2 do.
 
 | # | Commit | Content |
 |---|---|---|
@@ -228,10 +247,11 @@ not relay spends that use the opcode. Bitcoin Core's wallet does not create or s
 wallet side, which builds S1 and S2 outputs and signs spends of them, is in
 [p2mr-ts](https://github.com/duncan0k/p2mr-ts), whose README describes it.
 
-Verified in the k3s cluster (`contrib/k3s`) on the build both Ark-0 nodes have run since 2026-09-25,
-from a fresh clone, which `contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 744 of 750
-test cases with 5 skipped; 13 P2MR and neighbouring functional scripts passed, `feature_p2mr_mldsa44.py`
-among them; and the default functional suite passed, 274 tests with 17 skipped. Two more builds from
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes ran from 2026-09-25 to
+2026-09-30, from a fresh clone, which `contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed
+744 of 750 test cases with 5 skipped; 13 P2MR and neighbouring functional scripts passed,
+`feature_p2mr_mldsa44.py` among them; and the default functional suite passed, 274 tests with 17
+skipped. Two more builds from
 fresh clones with an empty compiler cache, the second from the files in `patches-m1/` as published
 here, produced the same five binaries, byte for byte.
 
@@ -255,19 +275,79 @@ git format-patch --start-number 36 51be7ca..p2mr-m1 -o patches-m1
 (cd patches-m1 && sha256sum -b *.patch) > SHA256SUMS-m1
 ```
 
+## Experimental M2 series (`patches-m2/`)
+
+Five patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/` and `patches-m1/`, in
+that order. From a height on, they require every block of a signet to carry an ML-DSA-44 (FIPS 204)
+signature by a fixed public key, in the coinbase output that holds the witness commitment, next to the
+signet solution: on a custom signet as `-signetpqblock=<pubkey>@<height>` gives them, and on Ark-0
+from height 20000 by a key fixed in the code, where the option is refused. It is an experiment of the
+Ark-0 test signet, a test network for trying things out that may be reset at any time. It is not part
+of BIP 325, which defines the signet solution and no other
+signature, and it is not proposed for Bitcoin. `doc/signet-pqblock.md`, added by the series, is its
+specification. `ark0/NETWORK.md`, "Rule change at height 20000 (M2)", says what it changes on Ark-0
+and what it does not.
+
+| # | Commit | Content |
+|---|---|---|
+| 49 | signet: require an ML-DSA-44 block signature from a height on (-signetpqblock) | the option; from the height, the witness commitment output must be exactly `OP_RETURN`, the commitment, the PQ push (`PQB1`, version 1, the 2420-byte signature) and at most one signet solution push; the signature covers `TaggedHash("SignetPQBlock", SHA256(challenge) ‖ nVersion ‖ hashPrevBlock ‖ merkle root ‖ nTime)` with context string `SIGNET/PQBLOCK/EXP0`; checked in `CheckBlock` on the same condition as the signet solution, so `ConnectBlock` checks it again and templates are left alone; the height from the BIP34 push; below the height, a verdict per non-genesis block in the `validation` log |
+| 50 | test: add signet_pqblock_tests and its vectors | `test_framework/signet_pq.py` and a generator for fixed vectors; every form of the output the rule rejects, every length of the BIP34 height push, the option; a block signed by p2mr-ts, a separate TypeScript implementation that computes the message on its own |
+| 51 | test: add feature_signet_pqblock.py | activation, malformed blocks, a node without the rule following the chain, `-reindex-chainstate` and a late upgrade; and blocks made the way the Ark-0 producer makes them, under a 1-of-1 challenge like Ark-0's |
+| 52 | doc: describe -signetpqblock | `doc/signet-pqblock.md` |
+| 53 | signet: require the ML-DSA-44 block signature on the Ark-0 signet from height 20000 | `ARK0_PQ_BLOCK_HEIGHT` and `ARK0_PQ_BLOCK_PUBKEY`, whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad` |
+
+It is a soft fork: a node built without `patches-m2/` accepts every block a node with it accepts and
+keeps following Ark-0, but does not check the block signatures. The operator's block producer,
+`contrib/k3s/ark0/producer/ark0.py`, signs with the functional test framework's `signet_pq.py`.
+
+Two candidates were built for M2 and run on two staging signets before one was chosen for Ark-0.
+`patches-m2a/` is the first: the four general patches above, without Ark-0's height and key.
+`patches-m2b/`, four patches on top of it, is the second: a signet whose challenge is derived from an
+ML-DSA-44 key, so that the ML-DSA-44 signature is the signet solution itself
+(`-signetpqchallenge`, `doc/signet-pqchallenge.md`). Ark-0 took the first because it keeps the
+network: a new challenge would have been a new chain, and a node that does not know the second
+rule accepts any block of such a signet. The second is kept as an experiment and is not used on Ark-0.
+
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since 2026-09-30,
+which `contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 750 of 756 test cases and one
+more with a warning, and skipped 5; 7 P2MR and signet functional scripts passed,
+`feature_signet_pqblock.py` among them; and the default functional suite passed 275 tests and skipped
+17. A second build, from a fresh clone with an empty compiler cache and the files in `patches-m2/` as
+published here, produced the same five binaries, byte for byte.
+
+Review status: the design went through three rounds of review and the series through four, by Codex
+(gpt-6-sol at maximum effort) and Claude (Fable 5.1) independently; Fable passed the series in the
+second round, gpt-6-sol in the fourth. The Ark-0 commit, 53, and the block producer were reviewed by
+gpt-6-sol, in four rounds, and gpt-6-astra.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
+       ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch \
+       ../bitcoin-p2mr-patches/patches-m2/*.patch
+```
+
+The series is exported from the `p2mr-m2` branch of the Core tree, which carries the four earlier
+patch sets below the five M2 commits; `01541e4` is the last M1 commit on that branch:
+
+```bash
+git format-patch --start-number 49 01541e4..p2mr-m2 -o patches-m2
+(cd patches-m2 && sha256sum -b *.patch) > SHA256SUMS-m2
+```
+
 ## Prebuilt node
 
-The release `ark0-node-m1` of this repository carries the build the Ark-0 nodes run, all four patch
+The release `ark0-node-m2` of this repository carries the build the Ark-0 nodes run, all five patch
 sets: the five binaries for x86_64 Linux in an archive, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
 in `ark0/release-signing-key.asc`. `ark0/JOIN.md`, section 1, says how to check both and what the
 binaries need from the system.
 
-The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, every
-build from a fresh clone gave the same bytes, among them two with an empty compiler cache, one of those
-from the patch files as published. That image comes from `contrib/k3s/Dockerfile.builder`, which pins
-its Ubuntu 24.04 base by digest but not its package versions: the archive's `BUILDER-PACKAGES.txt`
-lists the version of every package it had, and `PROVENANCE.txt` the toolchain, so an image built later
-matches only if it installs those versions (snapshot.ubuntu.com serves past ones). And the build path,
-`/work/src`, is part of the binaries, so a rebuild elsewhere has to use it too.
+The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
+release build and a second build from a fresh clone, with an empty compiler cache and the files in
+`patches-m2/` as published, produced the same five binaries byte for byte. That image comes from
+`contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
+versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
+`PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
+(snapshot.ubuntu.com serves past ones). And the build path, `/work/src`, is part of the binaries, so a
+rebuild elsewhere has to use it too.
