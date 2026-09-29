@@ -39,6 +39,20 @@ wherever that tree is, and copy the output to the cluster:
 on a command line), applies the manifest, waits for the nodes and, on network
 a, gives node A the wallet with the classical key.
 
+## Tests on a running network
+
+Two scripts run inside a network's producer pod, which has the RPC
+credentials, the key and `ark0.py` (their docstrings give the command):
+
+- `m2_negative.py` submits blocks that are valid but for the M2 rule to all
+  three nodes and prints their answers: the nodes with the rule refuse each
+  one, the M1 node takes it. On network a only at or above the rule's height.
+- `m2_fill.py` spends mature coinbases into transactions with 98,000-byte
+  `OP_RETURN` outputs until the mempool holds more than a block, to show that
+  full blocks with the ML-DSA-44 signature stay within the weight limit.
+
+## Taking one down
+
 Taking one down deletes its namespace and everything in it:
 
     sudo k3s kubectl delete namespace ark0-m2a
