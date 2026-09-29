@@ -1,20 +1,20 @@
-From 574191433871b5fc219e3c4553f94d98ac85124d Mon Sep 17 00:00:00 2001
+From efc6501c1c465b8a58d5baa18b450650d127fe4c Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:19:21 -0600
 Subject: [PATCH 55/56] test: add feature_signet_pqchallenge.py
 
 ---
- test/functional/feature_signet_pqchallenge.py | 163 ++++++++++++++++++
+ test/functional/feature_signet_pqchallenge.py | 199 ++++++++++++++++++
  test/functional/test_runner.py                |   1 +
- 2 files changed, 164 insertions(+)
+ 2 files changed, 200 insertions(+)
  create mode 100644 test/functional/feature_signet_pqchallenge.py
 
 diff --git a/test/functional/feature_signet_pqchallenge.py b/test/functional/feature_signet_pqchallenge.py
 new file mode 100644
-index 0000000..f3f10d8
+index 0000000..6acb59f
 --- /dev/null
 +++ b/test/functional/feature_signet_pqchallenge.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,199 @@
 +#!/usr/bin/env python3
 +# Copyright (c) 2026 CipherScope
 +# Distributed under the MIT software license, see the accompanying
@@ -27,17 +27,24 @@ index 0000000..f3f10d8
 +version, so it takes blocks whose solution proves nothing.
 +"""
 +
++import copy
++import json
++import os
 +import subprocess
++from io import BytesIO
 +
 +from test_framework.blocktools import SIGNET_HEADER
-+from test_framework.messages import CBlockHeader, from_hex
++from test_framework.messages import CBlock, CBlockHeader, deser_string, deser_string_vector, from_hex
 +from test_framework.script import CScript, CScriptOp, OP_0, OP_1NEGATE, OP_PUSHDATA4, OP_TRUE
++from test_framework.p2mr_mldsa44 import mldsa44_sighash, mldsa44_verify
 +from test_framework.signet_pq import (
 +    WITNESS_COMMITMENT_SIZE,
 +    add_signet_solution,
 +    signet_p2mr_solution,
 +    signet_pq_challenge,
++    signet_pq_challenge_tree,
 +    signet_pq_keygen,
++    signet_txs,
 +    witness_commitment_index,
 +)
 +from test_framework.test_framework import BitcoinTestFramework
@@ -108,6 +115,7 @@ index 0000000..f3f10d8
 +        self.test_blocks()
 +        self.test_rejected()
 +        self.test_node_without_option()
++        self.test_other_implementation()
 +
 +    def test_options(self):
 +        self.log.info("-signetpqchallenge needs a key, agrees with -signetchallenge and excludes -signetpqblock")
@@ -174,6 +182,34 @@ index 0000000..f3f10d8
 +        self.connect_nodes(0, 2)
 +        self.sync_blocks()
 +        assert_equal(other.getbestblockhash(), node.getbestblockhash())
++
++    def test_other_implementation(self):
++        self.log.info("The block another implementation signed verifies here too")
++        # p2mr-ts computed its signature message and signed it with @noble/post-quantum, hedged;
++        # the unit tests check the same block (src/test/data/signet_pqchallenge_noble.json).
++        path = os.path.join(self.config["environment"]["SRCDIR"], "src", "test", "data", "signet_pqchallenge_noble.json")
++        with open(path, encoding="utf-8") as f:
++            vectors = json.load(f)[1]
++        block = from_hex(CBlock(), vectors["block"])
++        pubkey = bytes.fromhex(vectors["pubkey"])
++        index = witness_commitment_index(block)
++        script = bytes(block.vtx[0].vout[index].scriptPubKey)
++        pushes = list(CScript(script[WITNESS_COMMITMENT_SIZE:]))
++        assert len(pushes) == 1 and pushes[0][:len(SIGNET_HEADER)] == SIGNET_HEADER
++        solution = BytesIO(pushes[0][len(SIGNET_HEADER):])
++        assert_equal(deser_string(solution), b"")
++        stack = deser_string_vector(solution)
++        assert_equal(solution.read(), b"")
++        tree = signet_pq_challenge_tree(pubkey)
++        leaf = tree.leaves["pq"]
++        assert_equal(stack[5:], [bytes(leaf.script), leaf.control_block])
++        # The message is computed here from the block without its solution.
++        unsigned = copy.deepcopy(block)
++        unsigned.vtx[0].vout[index].scriptPubKey = script[:WITNESS_COMMITMENT_SIZE]
++        to_sign, to_spend = signet_txs(unsigned, tree.scriptPubKey)
++        message = mldsa44_sighash(to_sign, [to_spend.vout[0]], 0, leaf.script)
++        assert mldsa44_verify(pubkey, message, b"".join(stack[:5]))
++        assert not mldsa44_verify(OTHER_PUBKEY, message, b"".join(stack[:5]))
 +
 +
 +if __name__ == '__main__':

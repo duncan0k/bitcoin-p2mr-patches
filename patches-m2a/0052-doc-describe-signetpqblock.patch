@@ -1,4 +1,4 @@
-From 840e037f5d3e08a3455f54f3d9d09046f383cec0 Mon Sep 17 00:00:00 2001
+From a229301377dd3bad59e4f91894afded5752a08dd Mon Sep 17 00:00:00 2001
 From: CipherScope <dev@cipherscope.io>
 Date: Tue, 29 Sep 2026 04:16:29 -0600
 Subject: [PATCH 52/52] doc: describe -signetpqblock
