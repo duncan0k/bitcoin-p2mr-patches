@@ -1,0 +1,195 @@
+From a9bef47a67f2c62d5b7909f787ba0c4168aa4e7a Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:19:21 -0600
+Subject: [PATCH 55/56] test: add feature_signet_pqchallenge.py
+
+---
+ test/functional/feature_signet_pqchallenge.py | 163 ++++++++++++++++++
+ test/functional/test_runner.py                |   1 +
+ 2 files changed, 164 insertions(+)
+ create mode 100644 test/functional/feature_signet_pqchallenge.py
+
+diff --git a/test/functional/feature_signet_pqchallenge.py b/test/functional/feature_signet_pqchallenge.py
+new file mode 100644
+index 0000000..f3f10d8
+--- /dev/null
++++ b/test/functional/feature_signet_pqchallenge.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test -signetpqchallenge: a signet whose blocks only an ML-DSA-44 key can sign (doc/signet-pqchallenge.md).
++
++Nodes 0 and 1 run with -signetpqchallenge. Node 2 gets the same challenge
++through -signetchallenge alone, as a node without the option would: it checks
++solutions with the old flags, under which a P2MR program is an unknown witness
++version, so it takes blocks whose solution proves nothing.
++"""
++
++import subprocess
++
++from test_framework.blocktools import SIGNET_HEADER
++from test_framework.messages import CBlockHeader, from_hex
++from test_framework.script import CScript, CScriptOp, OP_0, OP_1NEGATE, OP_PUSHDATA4, OP_TRUE
++from test_framework.signet_pq import (
++    WITNESS_COMMITMENT_SIZE,
++    add_signet_solution,
++    signet_p2mr_solution,
++    signet_pq_challenge,
++    signet_pq_keygen,
++    witness_commitment_index,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++
++# Test keys only: derived from public strings.
++PUBKEY, SECKEY = signet_pq_keygen(bytes.fromhex("33" * 32))
++OTHER_PUBKEY, OTHER_SECKEY = signet_pq_keygen(bytes.fromhex("44" * 32))
++CHALLENGE = signet_pq_challenge(PUBKEY)
++
++
++class SignetPQChallengeTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.setup_clean_chain = True
++        self.num_nodes = 3
++        noban = "-whitelist=noban@127.0.0.1"
++        self.extra_args = [
++            [f"-signetpqchallenge={PUBKEY.hex()}", noban],
++            [f"-signetpqchallenge={PUBKEY.hex()}", f"-signetchallenge={CHALLENGE.hex()}", noban],
++            [f"-signetchallenge={CHALLENGE.hex()}", noban],
++        ]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_bitcoin_util()
++
++    def setup_network(self):
++        self.setup_nodes()
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++
++    def grind(self, block):
++        util_argv = self.nodes[0].binaries.util_argv() + ["grind"]
++        header = CBlockHeader.serialize(block).hex()
++        out = subprocess.run(util_argv + [header], stdout=subprocess.PIPE, check=True).stdout.strip()
++        block.nNonce = from_hex(CBlockHeader(), out.decode()).nNonce
++        return block
++
++    def new_block(self, node):
++        """A block from the node's template: coinbase to OP_TRUE, the witness commitment last."""
++        from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        assert_equal(tmpl["signet_challenge"], CHALLENGE.hex())
++        block = create_block(tmpl=tmpl, coinbase=create_coinbase(tmpl["height"], script_pubkey=CScript([OP_TRUE]),
++                                                                 nValue=tmpl["coinbasevalue"] // 100_000_000))
++        add_witness_commitment(block)
++        return block
++
++    def signed_block(self, node, *, pubkey=PUBKEY, seckey=SECKEY):
++        block = self.new_block(node)
++        add_signet_solution(block, signet_p2mr_solution(block, pubkey, seckey))
++        return self.grind(block)
++
++    def with_commitment(self, node, script_tail):
++        """A block whose witness commitment output is the commitment followed by script_tail."""
++        block = self.new_block(node)
++        index = witness_commitment_index(block)
++        commitment = bytes(block.vtx[0].vout[index].scriptPubKey)[:WITNESS_COMMITMENT_SIZE]
++        block.vtx[0].vout[index].scriptPubKey = CScript(commitment + script_tail)
++        block.hashMerkleRoot = block.calc_merkle_root()
++        return self.grind(block)
++
++    def submit(self, node, block, expected=None):
++        assert_equal(node.submitblock(block.serialize().hex()), expected)
++
++    def run_test(self):
++        self.test_options()
++        self.test_blocks()
++        self.test_rejected()
++        self.test_node_without_option()
++
++    def test_options(self):
++        self.log.info("-signetpqchallenge needs a key, agrees with -signetchallenge and excludes -signetpqblock")
++        node = self.nodes[2]
++        self.stop_node(2)
++        key = PUBKEY.hex()
++        node.assert_start_raises_init_error([f"-signetpqchallenge={key[2:]}"],
++                                            "Error: -signetpqchallenge needs a 1312-byte ML-DSA-44 public key in hex.")
++        node.assert_start_raises_init_error([f"-signetpqchallenge={key}", "-signetchallenge=51"],
++                                            f"Error: -signetpqchallenge makes the challenge {CHALLENGE.hex()}, which differs from -signetchallenge.")
++        node.assert_start_raises_init_error([f"-signetpqchallenge={key}", f"-signetpqblock={key}@5"],
++                                            "Error: -signetpqblock cannot be combined with -signetpqchallenge, whose blocks are signed with ML-DSA-44 already.")
++        self.start_node(2, extra_args=self.extra_args[2])
++        self.connect_nodes(0, 2)
++
++    def test_blocks(self):
++        self.log.info("Blocks signed with the key are accepted, and OP_CHECKMLDSA44 is active from height 1")
++        node = self.nodes[0]
++        for _ in range(5):
++            self.submit(node, self.signed_block(node))
++        self.sync_blocks()
++        assert_equal(self.nodes[1].getblockcount(), 5)
++        assert_equal(self.nodes[2].getblockcount(), 5)
++        info = node.getdeploymentinfo()["deployments"]["p2mr_mldsa44"]
++        assert info["active"] and info["height"] == 1
++        # Without the option the opcode never activates, and a buried deployment that never
++        # activates is not listed.
++        assert "p2mr_mldsa44" not in self.nodes[2].getdeploymentinfo()["deployments"]
++
++    def test_rejected(self):
++        self.log.info("Every other solution and every other form of the output is rejected")
++        node = self.nodes[0]
++        block = self.new_block(node)
++        solution = signet_p2mr_solution(block, PUBKEY, SECKEY)
++        flipped = solution[:10] + bytes([solution[10] ^ 1]) + solution[11:]
++        cases = {
++            "a flipped bit": CScriptOp.encode_op_pushdata(SIGNET_HEADER + flipped),
++            "no witness": CScriptOp.encode_op_pushdata(SIGNET_HEADER + b"\x00\x00"),
++            "no solution": b"",
++            "a non-push opcode instead of it": bytes([OP_1NEGATE]),
++            "a header without data": CScriptOp.encode_op_pushdata(SIGNET_HEADER),
++            "an opcode after it": CScriptOp.encode_op_pushdata(SIGNET_HEADER + solution) + bytes([OP_0]),
++            "a non-shortest encoding": bytes([OP_PUSHDATA4]) + (len(solution) + 4).to_bytes(4, "little") + SIGNET_HEADER + solution,
++        }
++        for name, tail in cases.items():
++            self.log.debug(f"  {name}")
++            self.submit(node, self.with_commitment(node, tail), "bad-signet-blksig")
++        self.submit(node, self.signed_block(node, pubkey=OTHER_PUBKEY, seckey=OTHER_SECKEY), "bad-signet-blksig")
++        # The key's own leaf, signed by another key.
++        self.submit(node, self.signed_block(node, seckey=OTHER_SECKEY), "bad-signet-blksig")
++        assert_equal(node.getblockcount(), 5)
++
++    def test_node_without_option(self):
++        self.log.info("A node without the option takes a block whose solution proves nothing")
++        node, other = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        empty = self.with_commitment(other, CScriptOp.encode_op_pushdata(SIGNET_HEADER + b"\x00\x00"))
++        self.submit(node, empty, "bad-signet-blksig")
++        self.submit(other, empty)
++        assert_equal(other.getbestblockhash(), empty.hash_hex)
++        # It follows the longer chain once it sees one.
++        for _ in range(2):
++            self.submit(node, self.signed_block(node))
++        self.connect_nodes(0, 2)
++        self.sync_blocks()
++        assert_equal(other.getbestblockhash(), node.getbestblockhash())
++
++
++if __name__ == '__main__':
++    SignetPQChallengeTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 22870c4..640ba1b 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -289,6 +289,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
+     'feature_signet_pqblock.py',
++    'feature_signet_pqchallenge.py',
+     'wallet_p2mr.py',
+     'wallet_p2mr_multisig.py',
+     'wallet_p2mr_timelock.py',
+-- 
+2.49.0.windows.1
+

@@ -1,0 +1,145 @@
+From 14606254efe3a1da3d10fdb619f893023e330454 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:16:29 -0600
+Subject: [PATCH 52/52] doc: describe -signetpqblock
+
+---
+ doc/signet-pqblock.md | 126 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 126 insertions(+)
+ create mode 100644 doc/signet-pqblock.md
+
+diff --git a/doc/signet-pqblock.md b/doc/signet-pqblock.md
+new file mode 100644
+index 0000000..56e8480
+--- /dev/null
++++ b/doc/signet-pqblock.md
+@@ -0,0 +1,126 @@
++# Signet ML-DSA-44 block signatures (`-signetpqblock`)
++
++A custom signet can require, from a height on, that every block carries an
++ML-DSA-44 (FIPS 204) signature by a fixed public key, in addition to the
++signet solution its challenge already requires. Nodes without the rule keep
++accepting those blocks: the rule only narrows what is valid, so a signet can
++switch it on at a height without splitting from nodes that did not upgrade.
++
++This is an experiment of the Ark-0 test network. It is not part of BIP 325 or
++any other BIP.
++
++## What it proves and what it does not
++
++From the height on, a node with the rule accepts a block only if an ML-DSA-44
++signature by the configured key covers the block's contents: its version,
++previous block, time, every transaction, and the whole coinbase except the
++two pushes described below. A party that holds only the classical challenge
++key cannot make such a node accept a block with contents of its own.
++
++It does not make anything else post-quantum. Transaction outputs, proof of
++work and nodes without the rule are not covered.
++
++Like a signet solution, the signature does not cover `nNonce` and `nBits`. It
++does not cover the signet solution push either. So anyone can make blocks with
++the same contents and other hashes:
++
++- by grinding the block again;
++- by changing the solution in any way the challenge still accepts, such as
++  extra pushes in its scriptSig, which signet does not forbid.
++
++A holder of the classical key can also sign the block again.
++
++## Configuration
++
++    -signetpqblock=<pubkey>@<height>
++
++`<pubkey>` is the 1312-byte ML-DSA-44 public key in hex and `<height>` the
++first height that must carry a signature (at least 1). The option requires
++`-signetchallenge`, and every node of the network must use the same value
++before the chain reaches `<height>`. At startup a node logs the height and the
++SHA256 of the key, so that operators can compare them.
++
++The Ark-0 signet (challenge
++`5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`)
++refuses the option: its rules are fixed in the code.
++
++## The block
++
++At or above the height, the coinbase output that holds the witness commitment
++(the last one that starts with `OP_RETURN` and the 36-byte commitment push)
++must be exactly:
++
++| Order | Content | Encoding |
++|---|---|---|
++| 1 | `OP_RETURN` | `6a` |
++| 2 | witness commitment `aa21a9ed ‖ 32 bytes` | `24 ‖ 36 bytes` |
++| 3 | PQ push: `PQB1` (`50514231`) ‖ version `01` ‖ signature (2420 bytes), 2425 bytes | `4d 7909 ‖ 2425 bytes` |
++| 4 (optional) | signet solution push: `ecc7daa2` ‖ solution, longer than 4 bytes | shortest encoding |
++
++Nothing may follow. Any other form is rejected with `bad-signet-pqblk`.
++
++## The message
++
++1. Take the coinbase and replace the witness commitment output's script by
++   `6a ‖ 24 ‖ <36-byte commitment> ‖ 05 ‖ 50514231 01`: the PQ push cut back to
++   its header and version, the signet solution push left out.
++2. Compute the merkle root over that coinbase's txid and the txids of the
++   block's other transactions.
++3. The message is the 32-byte
++   `TaggedHash("SignetPQBlock", SHA256(challenge) ‖ nVersion ‖ hashPrevBlock ‖ merkle root ‖ nTime)`,
++   where `SHA256(challenge)` hashes the raw challenge bytes, `nVersion` is a
++   little-endian int32, `nTime` a little-endian uint32, and the two hashes are
++   32 bytes each in their serialized (internal) byte order.
++4. The signature is pure ML-DSA-44 over that message, with the context string
++   `SIGNET/PQBLOCK/EXP0` (FIPS 204 `ML-DSA.Verify`, external interface).
++
++## Where it is checked
++
++In `CheckBlock`, on the same condition as the signet solution (`fCheckPOW`),
++after the merkle root and the other context-free checks:
++
++- `ProcessNewBlock` and `AcceptBlock` check every new block.
++- `ConnectBlock` runs `CheckBlock` again for every block it connects,
++  `-reindex-chainstate` included.
++- `TestBlockValidity` checks templates and proposals without `fCheckPOW`, so
++  `getblocktemplate` keeps working at and above the height, as it does for
++  the signet solution.
++
++The height is the one the coinbase starts with (BIP34), in exactly the form
++`CScript() << height`. A coinbase without it counts as having reached the
++height; `ContextualCheckBlock` rejects such a block anyway.
++
++The genesis block is exempt, as it is from the signet solution. It has no
++witness commitment, and its coinbase starts with a push that reads as a height
++above any, but every node connects it at its first start.
++
++Below the height nothing is rejected. With `-debug=validation` a node logs for
++every block whether it would pass: its signature valid, invalid, or absent or
++not in the required form. So the signatures can be checked before they are
++enforced.
++
++## Nodes that upgrade late
++
++A node that accepted blocks above the height before it had the rule does not
++check them again on its own. On restart, `-checkblocks` (default 6) checks the
++most recent ones and reports a corrupted block database if one fails. Run the
++node once with `-reindex-chainstate` to check every block again (a pruned node
++needs `-reindex`).
++
++A node with the rule treats a peer that relays a block without a valid
++signature as it treats any peer relaying an invalid block.
++
++## Producing blocks
++
++1. Build the block from `getblocktemplate` with its witness commitment.
++2. Append the push `05 50514231 01` to the witness commitment output.
++3. Compute the message, sign it, and replace that push by the full PQ push.
++4. Recompute the merkle root.
++5. Add the signet solution as usual (it now signs over the PQ push), recompute
++   the merkle root, and grind the nonce.
++
++The coinbase is about 9.7k weight units larger: start the node that makes
++templates with `-blockreservedweight=16000` or more.
++
++`test/functional/test_framework/signet_pq.py` implements steps 2 to 4;
++`test/util/generate_signet_pqblock_tests.py` generates the unit test vectors.
+-- 
+2.49.0.windows.1
+

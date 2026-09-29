@@ -17,7 +17,7 @@ set -euo pipefail
 ensure_workspace
 
 log "clearing the patch directories"
-in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1
+in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1 /work/patches/m2a /work/patches/m2b
 
 log "copying the consensus series (patches/) to /work/patches/master"
 push_dir "$REPO_ROOT/patches" /work/patches/master
@@ -47,13 +47,25 @@ else
     log "patches-m1/ is absent on this branch, skipping the M1 series"
 fi
 
+# The two M2 candidates: m2a (-signetpqblock) applies on m1, m2b
+# (-signetpqchallenge) on m2a.
+for set_name in m2a m2b; do
+    if [ -d "$REPO_ROOT/patches-$set_name" ]; then
+        log "copying the M2 series (patches-$set_name/) to /work/patches/$set_name"
+        push_dir "$REPO_ROOT/patches-$set_name" "/work/patches/$set_name"
+        push_file "$REPO_ROOT/SHA256SUMS-$set_name" "/work/patches/$set_name"
+    else
+        log "patches-$set_name/ is absent on this branch, skipping it"
+    fi
+done
+
 log "copying the image build contexts"
 push_file "$HERE/Dockerfile.builder" /work/imgctx/builder
 push_file "$HERE/Dockerfile.node" /work/imgctx/node
 in_shell mkdir -p /work/imgctx/node/bin /work/img
 
 log "verifying the checksums on the volume"
-for set_name in master m05 spacing m1; do
+for set_name in master m05 spacing m1 m2a m2b; do
     if in_shell test -d "/work/patches/$set_name"; then
         # sha256sum's own exit status, on its own, with nothing downstream of
         # it. The previous version ended in `| tail -3`, so the pipeline

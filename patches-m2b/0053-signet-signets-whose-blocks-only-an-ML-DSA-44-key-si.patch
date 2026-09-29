@@ -1,0 +1,238 @@
+From 6cfc790f8e717fc2ca59d0c6cd0bd15fee2f20ed Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:19:21 -0600
+Subject: [PATCH 53/56] signet: signets whose blocks only an ML-DSA-44 key
+ signs (-signetpqchallenge)
+
+-signetpqchallenge=<pubkey> sets the challenge to the P2MR output of an
+ML-DSA-44 key: its OP_CHECKMLDSA44 leaf next to a leaf that can only fail,
+both at depth one (doc/signet-pqchallenge.md). The challenge is derived from
+the key rather than taken as given, because a single-leaf P2MR output is spent
+without running its leaf.
+
+On such a signet the solution is checked with the P2MR and OP_CHECKMLDSA44
+script rules, the witness commitment output must be exactly OP_RETURN, the
+commitment and the solution push in its shortest encoding, and OP_CHECKMLDSA44
+is active in transactions from height 1. Nodes that only get the same
+challenge through -signetchallenge check solutions with the old flags, under
+which a P2MR program is an unknown witness version: every node of such a
+network needs the option.
+---
+ src/chainparams.cpp        | 19 +++++++++++++++++++
+ src/chainparamsbase.cpp    |  1 +
+ src/consensus/params.h     |  7 +++++++
+ src/kernel/chainparams.cpp | 27 +++++++++++++++++++++++++++
+ src/kernel/chainparams.h   | 13 +++++++++++++
+ src/signet.cpp             | 32 +++++++++++++++++++++++++++++++-
+ 6 files changed, 98 insertions(+), 1 deletion(-)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index c22d92d..b727013 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -41,6 +41,22 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.challenge.emplace(*val);
+     }
++    if (!args.GetArgs("-signetpqchallenge").empty()) {
++        const auto values = args.GetArgs("-signetpqchallenge");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetpqchallenge cannot be multiple values.");
++        }
++        const auto pubkey{TryParseHex<uint8_t>(values[0])};
++        if (!pubkey || pubkey->size() != MLDSA44_PUBKEY_SIZE) {
++            throw std::runtime_error(strprintf("-signetpqchallenge needs a %d-byte ML-DSA-44 public key in hex.", MLDSA44_PUBKEY_SIZE));
++        }
++        const auto challenge{SignetPQChallenge(*pubkey)};
++        if (options.challenge && *options.challenge != challenge) {
++            throw std::runtime_error(strprintf("-signetpqchallenge makes the challenge %s, which differs from -signetchallenge.", HexStr(challenge)));
++        }
++        options.challenge.emplace(challenge);
++        options.pq_challenge_pubkey.emplace(*pubkey);
++    }
+     if (!args.GetArgs("-signetpowtargetspacing").empty()) {
+         const auto values = args.GetArgs("-signetpowtargetspacing");
+         if (values.size() != 1) {
+@@ -80,6 +96,9 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         if (IsArk0SignetChallenge(*options.challenge)) {
+             throw std::runtime_error("-signetpqblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
+         }
++        if (options.pq_challenge_pubkey) {
++            throw std::runtime_error("-signetpqblock cannot be combined with -signetpqchallenge, whose blocks are signed with ML-DSA-44 already.");
++        }
+         const auto& value{values[0]};
+         const auto at{value.find('@')};
+         if (at == std::string::npos) {
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index 769f97c..cfc450d 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -24,6 +24,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetchallenge", "Blocks must satisfy the given script to be considered valid (only for signet networks; defaults to the global default signet test network challenge)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetseednode", "Specify a seed node for the signet network, in the hostname[:port] format, e.g. sig.net:1234 (may be used multiple times to specify multiple seed nodes; defaults to the global default signet test network seed node(s))", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetpowtargetspacing=<seconds>[@<height>]", "Measure the difficulty retargets at or above <height> (default: 0) against <seconds> per block (1 to 600) instead of the signet default of 600. The retarget interval stays 2016 blocks. This is a consensus rule of the network: every node must use the same values, and must have them before the chain reaches the first retarget they change. Requires -signetchallenge (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetpqchallenge=<pubkey>", "Use as challenge the P2MR output of the ML-DSA-44 key <pubkey> (1312 bytes, hex): an OP_CHECKMLDSA44 leaf next to a leaf that can only fail, so that only that key can sign blocks; see doc/signet-pqchallenge.md. Solutions are then checked with the P2MR and OP_CHECKMLDSA44 script rules, and OP_CHECKMLDSA44 is active in transactions from height 1. This defines the network: every node must use it. May be given together with the same -signetchallenge (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetpqblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1) to also carry an ML-DSA-44 signature by <pubkey> (1312 bytes, hex) in its witness commitment output; see doc/signet-pqblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index a5bf6cd..fe697ed 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -167,6 +167,13 @@ struct Params {
+      * which requires -signetchallenge.
+      */
+     std::optional<SignetPQBlock> signet_pq_block{};
++    /**
++     * Signet only: the challenge is the P2MR output of an ML-DSA-44 key
++     * (doc/signet-pqchallenge.md), and its solution is checked with the P2MR
++     * and OP_CHECKMLDSA44 script rules. Only set on a signet given
++     * -signetpqchallenge.
++     */
++    bool signet_pq_challenge{false};
+     /** The timespan the retarget for the block at `height` measures against. */
+     int64_t PowTargetTimespan(int64_t height) const
+     {
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index deaada3..78de415 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -44,6 +44,22 @@ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
+     return std::ranges::equal(challenge, ARK0_SIGNET_CHALLENGE);
+ }
+ 
++std::vector<uint8_t> SignetPQChallenge(std::span<const uint8_t> pubkey)
++{
++    assert(pubkey.size() == MLDSA44_PUBKEY_SIZE);
++    // <pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44, with the key cut into 520, 520 and 272 bytes
++    // (doc/p2mr-mldsa44.md), next to OP_RETURN.
++    const CScript pq_leaf{CScript() << std::vector<uint8_t>(pubkey.begin(), pubkey.begin() + 520)
++                                    << std::vector<uint8_t>(pubkey.begin() + 520, pubkey.begin() + 1040)
++                                    << std::vector<uint8_t>(pubkey.begin() + 1040, pubkey.end())
++                                    << OP_CHECKMLDSA44};
++    const CScript fail_leaf{CScript() << OP_RETURN};
++    const uint256 root{ComputeTapbranchHash(ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, pq_leaf),
++                                            ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, fail_leaf))};
++    const CScript challenge{CScript() << OP_2 << std::vector<uint8_t>(root.begin(), root.end())};
++    return {challenge.begin(), challenge.end()};
++}
++
+ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+ {
+     CMutableTransaction txNew;
+@@ -505,6 +521,17 @@ public:
+         // OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md) only activates on the Ark-0 signet,
+         // from the height this code fixes for that network. There is no option for it.
+         consensus.P2MRMLDSA44Height = std::ranges::equal(bin, ARK0_SIGNET_CHALLENGE) ? ARK0_MLDSA44_HEIGHT : std::numeric_limits<int>::max();
++        // A signet whose challenge is an ML-DSA-44 key's (doc/signet-pqchallenge.md) checks its
++        // solution with OP_CHECKMLDSA44, and runs the opcode in transactions from height 1 too.
++        // ReadSigNetArgs only sets it together with that challenge.
++        if (options.pq_challenge_pubkey) {
++            // Only the challenge the key makes: a P2MR challenge taken as given could be a single
++            // leaf, which is spent without running it.
++            assert(options.challenge && *options.challenge == SignetPQChallenge(*options.pq_challenge_pubkey));
++            consensus.signet_pq_challenge = true;
++            consensus.P2MRMLDSA44Height = 1;
++            LogInfo("Signet blocks are signed with ML-DSA-44: the challenge is a P2MR output of an ML-DSA-44 key");
++        }
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         // A different target spacing for the retargets from a height on.
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index f047d1d..8faa82d 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -36,6 +36,13 @@ inline constexpr int ARK0_MLDSA44_HEIGHT{8600};
+ /** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
+ 
++/**
++ * The signet challenge -signetpqchallenge sets for an ML-DSA-44 public key
++ * (doc/signet-pqchallenge.md): the P2MR output whose script tree holds the
++ * key's OP_CHECKMLDSA44 leaf and a leaf that can only fail, both at depth one.
++ */
++std::vector<uint8_t> SignetPQChallenge(std::span<const uint8_t> pubkey);
++
+ struct AssumeutxoHash : public BaseHash<uint256> {
+     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+ };
+@@ -158,6 +165,12 @@ public:
+          * its own that is not the Ark-0 signet's.
+          */
+         std::optional<Consensus::SignetPQBlock> pq_block{};
++        /**
++         * The ML-DSA-44 public key the challenge is the P2MR output of
++         * (doc/signet-pqchallenge.md). Only set together with the challenge
++         * SignetPQChallenge() derives from it, which SigNetParams checks.
++         */
++        std::optional<std::vector<uint8_t>> pq_challenge_pubkey{};
+     };
+ 
+     /**
+diff --git a/src/signet.cpp b/src/signet.cpp
+index 70b30b3..d0a4d3d 100644
+--- a/src/signet.cpp
++++ b/src/signet.cpp
+@@ -35,6 +35,8 @@
+ static constexpr uint8_t SIGNET_HEADER[4] = {0xec, 0xc7, 0xda, 0xa2};
+ 
+ static constexpr script_verify_flags BLOCK_SCRIPT_VERIFY_FLAGS = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_NULLDUMMY;
++//! The flags for a challenge that is an ML-DSA-44 key's P2MR output (doc/signet-pqchallenge.md).
++static constexpr script_verify_flags PQ_CHALLENGE_SCRIPT_VERIFY_FLAGS = BLOCK_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44;
+ 
+ static bool FetchAndClearCommitmentSection(const std::span<const uint8_t> header, CScript& witness_commitment, std::vector<uint8_t>& result)
+ {
+@@ -129,6 +131,24 @@ std::optional<SignetTxs> SignetTxs::Create(const CBlock& block, const CScript& c
+     return SignetTxs{tx_to_spend, tx_spending};
+ }
+ 
++/**
++ * Whether the block's witness commitment output is exactly OP_RETURN, the commitment and one
++ * signet solution push (the header and some data) in its shortest encoding.
++ */
++static bool IsExactSolutionCommitment(const CBlock& block)
++{
++    const int cidx{GetWitnessCommitmentIndex(block)};
++    if (cidx == NO_WITNESS_COMMITMENT) return false;
++    const CScript& script{block.vtx[0]->vout[cidx].scriptPubKey};
++    // CheckMinimalPush asserts a push opcode, so every other opcode is turned away before it.
++    CScript::const_iterator pc{script.begin() + MINIMUM_WITNESS_COMMITMENT};
++    opcodetype opcode;
++    std::vector<unsigned char> data;
++    if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4 || !CheckMinimalPush(data, opcode)) return false;
++    if (data.size() <= sizeof(SIGNET_HEADER) || !std::equal(std::begin(SIGNET_HEADER), std::end(SIGNET_HEADER), data.begin())) return false;
++    return pc == script.end();
++}
++
+ // Signet block solution checker
+ bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& consensusParams)
+ {
+@@ -145,6 +165,15 @@ bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& cons
+         return false;
+     }
+ 
++    // With an ML-DSA-44 key's challenge (doc/signet-pqchallenge.md) the witness commitment output
++    // must be exactly OP_RETURN, the commitment and the solution push in its shortest encoding.
++    // Signet itself tolerates other encodings and trailing bytes, which change a block's hash but
++    // not what its solution signs.
++    if (consensusParams.signet_pq_challenge && !IsExactSolutionCommitment(block)) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetBlockSolution: Errors in block (witness commitment output not in the required form)\n");
++        return false;
++    }
++
+     const CScript& scriptSig = signet_txs->m_to_sign.vin[0].scriptSig;
+     const CScriptWitness& witness = signet_txs->m_to_sign.vin[0].scriptWitness;
+ 
+@@ -152,7 +181,8 @@ bool CheckSignetBlockSolution(const CBlock& block, const Consensus::Params& cons
+     txdata.Init(signet_txs->m_to_sign, {signet_txs->m_to_spend.vout[0]});
+     TransactionSignatureChecker sigcheck(&signet_txs->m_to_sign, /* nInIn= */ 0, /* amountIn= */ signet_txs->m_to_spend.vout[0].nValue, txdata, MissingDataBehavior::ASSERT_FAIL);
+ 
+-    if (!VerifyScript(scriptSig, signet_txs->m_to_spend.vout[0].scriptPubKey, &witness, BLOCK_SCRIPT_VERIFY_FLAGS, sigcheck)) {
++    const script_verify_flags flags{consensusParams.signet_pq_challenge ? PQ_CHALLENGE_SCRIPT_VERIFY_FLAGS : BLOCK_SCRIPT_VERIFY_FLAGS};
++    if (!VerifyScript(scriptSig, signet_txs->m_to_spend.vout[0].scriptPubKey, &witness, flags, sigcheck)) {
+         LogDebug(BCLog::VALIDATION, "CheckSignetBlockSolution: Errors in block (block solution invalid)\n");
+         return false;
+     }
+-- 
+2.49.0.windows.1
+

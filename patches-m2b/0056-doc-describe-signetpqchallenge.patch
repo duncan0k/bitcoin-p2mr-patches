@@ -1,0 +1,83 @@
+From cfa10915cafa003f2fc8f698f6842ecd5d031876 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 29 Sep 2026 04:19:21 -0600
+Subject: [PATCH 56/56] doc: describe -signetpqchallenge
+
+---
+ doc/signet-pqchallenge.md | 64 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+ create mode 100644 doc/signet-pqchallenge.md
+
+diff --git a/doc/signet-pqchallenge.md b/doc/signet-pqchallenge.md
+new file mode 100644
+index 0000000..8a30bbb
+--- /dev/null
++++ b/doc/signet-pqchallenge.md
+@@ -0,0 +1,64 @@
++# Signets signed with ML-DSA-44 only (`-signetpqchallenge`)
++
++`-signetpqchallenge=<pubkey>` makes a signet whose blocks only an ML-DSA-44
++(FIPS 204) key can sign. There is no classical signature anywhere in its block
++authorization. It is a separate network: its challenge, and so its network
++magic, differs from every other signet's.
++
++This is an experiment of the Ark-0 test network. It is not part of BIP 325 or
++any other BIP.
++
++## The challenge
++
++The option sets the challenge to the P2MR (BIP 360) output of the key: a script
++tree with the key's `OP_CHECKMLDSA44` leaf
++(`<pk[0]> <pk[1]> <pk[2]> OP_CHECKMLDSA44`, see `doc/p2mr-mldsa44.md`) and a
++leaf that can only fail (`OP_RETURN`), both at depth one:
++
++    OP_2 <TapBranch(TapLeaf(0xc0, pq_leaf), TapLeaf(0xc0, OP_RETURN))>
++
++Deriving the challenge from the key, rather than accepting any P2MR challenge,
++matters: a P2MR output whose tree is a single leaf is spent without running
++that leaf, so an arbitrary P2MR challenge would not say who may sign blocks.
++
++`-signetchallenge` may be given too, but only with the same value. The option
++cannot be combined with `-signetpqblock`. At startup a node logs the challenge
++it uses (`Signet with challenge ...`), which the operators of a network can
++compare.
++
++## The rules
++
++On a signet with the option:
++
++- The signet solution is checked with the P2MR and `OP_CHECKMLDSA44` script
++  rules added to the signet flags. It is an empty scriptSig and the witness
++  stack of the ML-DSA-44 leaf: five signature chunks, the leaf script and its
++  33-byte control block. The signature signs the leaf's signature message over
++  the BIP 325 virtual transaction, with the context string of
++  `OP_CHECKMLDSA44`.
++- The coinbase output that holds the witness commitment must be exactly
++  `OP_RETURN`, the commitment, and the signet solution push
++  (`ecc7daa2 ‖ solution`) in its shortest encoding, with nothing after it.
++  Otherwise anyone could re-encode the push or append bytes, which changes a
++  block's hash but not what its solution signs.
++- `OP_CHECKMLDSA44` is active in transactions from height 1.
++
++The genesis block has no solution, as on every signet.
++
++## Every node needs the option
++
++A node given the same challenge through `-signetchallenge` alone checks
++solutions with the old flags. Under those a P2MR program is an unknown witness
++version, so it accepts any solution, including none. Such a node offers no
++block authorization at all. Every node of such a network must run with
++`-signetpqchallenge`, and with software that knows it.
++
++## Producing blocks
++
++`test/functional/test_framework/signet_pq.py` builds the solution:
++`signet_p2mr_solution()` computes the virtual transactions as
++`contrib/signet/miner` does, signs the leaf's signature message and serializes
++the witness. Add it as the signet solution push, recompute the merkle root and
++grind the nonce. The solution is about 3.8 KB of non-witness data in the
++coinbase, so start the node that makes templates with
++`-blockreservedweight=24000` or more.
+-- 
+2.49.0.windows.1
+
