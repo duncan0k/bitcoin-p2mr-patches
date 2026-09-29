@@ -21,12 +21,15 @@ operator gets by running the demo out of a home directory:
 Dockerfile.miner sets all six to the layout inside the producer image, so the
 same file runs unchanged on a workstation and in a pod.
 
-Two more make the producer sign blocks with ML-DSA-44, for the networks that
-try out the two M2 candidates. Ark-0 itself sets neither:
+Two modes make the producer sign blocks with ML-DSA-44. Ark-0 runs the first
+since M2, whose rule its nodes enforce from height 20000 (ARK0_PQ_BLOCK_HEIGHT
+in the Core series), and sets all three of its variables; the second is M2's
+other candidate, which only its staging network ran:
 
-  ARK0_PQ_BLOCK_SEED_FILE      -signetpqblock (doc/signet-pqblock.md): a file
-                               holding the key's 32-byte seed in hex, normally
-                               a mounted Secret. Needs the next two as well.
+  ARK0_PQ_BLOCK_SEED_FILE      -signetpqblock (doc/signet-pqblock.md) and the
+                               Ark-0 rule: a file holding the key's 32-byte
+                               seed in hex, normally a mounted Secret. Needs
+                               the next two as well.
   ARK0_PQ_BLOCK_FROM           the first height whose blocks carry the PQ push
   ARK0_PQ_BLOCK_KEY_SHA256     SHA256 of the public key the nodes expect, as
                                they log it at startup
@@ -58,6 +61,12 @@ PQ_BLOCK_SEED_FILE = os.environ.get("ARK0_PQ_BLOCK_SEED_FILE")
 PQ_BLOCK_FROM = os.environ.get("ARK0_PQ_BLOCK_FROM")
 PQ_BLOCK_KEY_SHA256 = os.environ.get("ARK0_PQ_BLOCK_KEY_SHA256")
 PQ_CHALLENGE_SEED_FILE = os.environ.get("ARK0_PQ_CHALLENGE_SEED_FILE")
+# The Ark-0 signet, which requires the ML-DSA-44 block signature from height
+# 20000 on, by the key with this SHA256 (ARK0_PQ_BLOCK_HEIGHT and
+# ARK0_PQ_BLOCK_PUBKEY in the Core series).
+ARK0_SIGNET_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
+ARK0_PQ_BLOCK_HEIGHT = 20000
+ARK0_PQ_KEY_SHA256 = "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad"
 HRP = "tb"
 EVIDENCE = os.path.join(ARK0, "evidence")
 STEPS = os.path.join(EVIDENCE, "steps.jsonl")
@@ -182,6 +191,14 @@ def mine_block(extra_raw_txs=()):
     Returns (block_hex, blockhash_or_None, submitblock_result).
     """
     tmpl = cli_json("getblocktemplate", '{"rules":["signet","segwit"]}', wallet=False)
+    if tmpl["signet_challenge"] == ARK0_SIGNET_CHALLENGE:
+        # Without the block key, or signing from above the rule's height, the
+        # producer would mine blocks the nodes accept until 20000 and refuse
+        # from there on. Stop before the first one instead.
+        assert PQ_BLOCK_SEED_FILE and PQ_BLOCK_FROM and int(PQ_BLOCK_FROM) <= ARK0_PQ_BLOCK_HEIGHT \
+            and (PQ_BLOCK_KEY_SHA256 or "").lower() == ARK0_PQ_KEY_SHA256, \
+            "Ark-0 blocks need ARK0_PQ_BLOCK_SEED_FILE, ARK0_PQ_BLOCK_FROM at most " \
+            f"{ARK0_PQ_BLOCK_HEIGHT} and ARK0_PQ_BLOCK_KEY_SHA256 {ARK0_PQ_KEY_SHA256}"
     for raw in extra_raw_txs:
         tmpl["transactions"].append({"data": raw})
     block = miner.new_block(tmpl, reward_spk())
