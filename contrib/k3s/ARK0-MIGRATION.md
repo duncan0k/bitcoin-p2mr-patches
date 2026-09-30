@@ -2670,3 +2670,161 @@ moment. Stop the producer on the new cluster and apply `overlays/maintenance`; s
 the three volumes back into the old cluster's claims, chowned to `0:0` for `root-sockets`; create the
 three Secrets there again from the new cluster's copies; apply `root-sockets-maintenance`, check the
 tip, and start the producer.
+
+## Executed on 2026-09-30 (M2 roll)
+
+Both nodes moved onto one build that also carries `patches-m2/`: from height 20000 every block needs an
+ML-DSA-44 signature by one fixed key, in the coinbase output that holds the witness commitment, next to
+the signet solution (`ARK0_PQ_BLOCK_HEIGHT` and `ARK0_PQ_BLOCK_PUBKEY` in the series, `ark0/NETWORK.md`
+"Rule change at height 20000 (M2)"). The producer moved onto an image whose `ark0.py` signs every block
+with that key from height 18000, from the Secret `ark0-pq-signer`, and refuses to mine an Ark-0 block
+without it; node A's templates reserve 16000 weight units for the coinbase (`10-configmap.yaml`).
+Carried out between 12:56 and 13:03 UTC, following "Rolling a workload onto a new build" and the
+maintenance sequence above, with `overlays/maintenance` and the base, as on this cluster since
+2026-09-28.
+
+### The builds
+
+| Run | Patch sets | Result |
+|---|---|---|
+| `de1-m2-0929j` | `master m05 spacing m1 m2`, 53 commits, the existing clone | `series ok`; `test_bitcoin` 750 of 756 passed, 1 passed with warnings, 5 skipped; 7 P2MR and signet functional scripts passed (`feature_signet_pqblock`, `feature_signet`, `feature_p2mr`, `feature_p2mr_mldsa44`, `feature_p2mr_signet`, `wallet_p2mr_signet`, `tool_signet_miner`); the default functional suite passed, 275 tests, 17 skipped |
+| `m2-repro-cold-0929` | the same from the files published in this repository, fresh clone, empty compiler cache (2026-09-29) | checksums and `series ok`, 53 commits; `test_bitcoin` as above; `feature_signet_pqblock` and `feature_p2mr_mldsa44` passed; none of the 488 compilations found in the cache; the five binaries are those of `de1-m2-0929j`, byte for byte |
+
+`bitcoind` hashes to `1dcb70773d4a4882fb1dfba2ef2126b5789ad9e5b76a87bec998a7098ce76684`. The cold run
+was made the way the M1 record above describes, with `/work/ccache` moved aside; the cache, and
+`/work/out/bin` and `/work/imgctx/node` with the release run's binaries and provenance, were put back
+afterwards.
+
+### Before the roll
+
+- **The live chain on the new build.** A node of the new image, started on 2026-09-29 on an empty
+  data directory outside the network's namespace, with `-debug=validation` and `connect=` to the public
+  node only, synced the chain from height 1 and kept following it. It logged the M2 rule line with the
+  key's SHA256. Shortly before the roll it was at 11180 with the same hash as both nodes; its log held
+  one `CheckSignetPQBlock` verdict per block hash, all "absent or not in the required form", and no
+  refused block.
+- **The producer image on a staging signet.** The staging signet of this candidate (`ark0-m2a`, rule
+  from height 300, signatures from 200) ran the new producer image from height 757 on: 1,671 blocks
+  up to 2427, counted before the roll, with one failed attempt (its first, which could not connect to
+  the node's RPC). Checked before the roll: its three nodes on one tip; both M2 nodes had logged blocks
+  200 to 299 with a valid signature, and had refused no block from 300 on apart from the refusal tests
+  of 2026-09-29.
+- **The key.** Its restore was rehearsed on the day of the roll: the encrypted off-site backup,
+  fetched and decrypted in memory, gives the seed whose public key is `ARK0_PQ_BLOCK_PUBKEY`, and the
+  Secret `ark0-pq-signer` holds that seed; the backup of the classical key matches the Secret
+  `ark0-signer` too.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-0954c5cca219`, new | `sha256:5698383fb5fab25302886d73baf868859420a66bb59befbaabd3183b1838c5ab` | `sha256:e3ffe032d4607b606d04c1fef605461874e0bb6578fac7e00cb15ef584ee8db6` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-0954c5cca219`, new | `sha256:299cb73b8842da748b30881e53c798fa3bc4be70e04fac604e0307daafec9409` | `sha256:19e997f0d4affb24783c7b1f2c4a7fa75d75a794f35662ae8fe89cf93100df58` |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-m1-369f88ce867e`, kept | — | both nodes' way back |
+| nothing | `p2mr-miner:v31.1-p2mr-d3ac79467cea`, kept | — | the producer's way back |
+
+The producer image's `ark0.py`, `miner_loop.sh`, entry point, `test_framework/signet_pq.py`,
+`contrib/signet/miner`, `bitcoin-cli` and `bitcoin-util` were compared by hash with their sources when
+the image was built, and again in the running producer pod after the roll: `ark0.py`, `miner_loop.sh`
+and the entry point (`contrib/k3s/miner-entrypoint.sh`) with this tree, the two Python files with the
+series' commit, the two binaries with the release build's; all equal.
+
+### The sequence
+
+All times UTC.
+
+1. **Ahead of the stop.** The three `newTag` values in `kustomization.yaml` moved to the new builds,
+   and the manifests on the host were compared by hash with this tree before and after they were
+   copied over. `render-config.sh --from-live`: the diff against the live ConfigMap was node A's
+   `blockreservedweight=16000` and its comment, nothing else. No observe or soak run was in progress.
+2. **12:56:09.** The producer scaled to zero on its own; it was gone at 12:56:40. The frozen tip, on
+   both nodes: 11184, `000000340f67aac48cb872c54238a66257a5901e6941fba95ce831eb66cf4972`.
+3. **12:56:53.** The rendered ConfigMap applied. Then `kubectl diff -k` of the maintenance overlay: the
+   two node images; the producer's image, its three `ARK0_PQ_BLOCK_*` variables and the `pq` volume
+   from the Secret `ark0-pq-signer`; the observe and soak images; nothing else.
+4. **12:57:08.** A server-side dry run of the maintenance overlay passed, and at 12:57:09 it was
+   applied. Node B started at 12:57:13 and node A at 12:57:15; both were ready at 12:57:26.
+5. **Checks on the frozen tip**, from 12:57:41 to 12:57:52, both nodes: `imageID` equal to the new
+   image's id above; the log lines
+   `Signet difficulty retargets against 90 s per block from height 8064`, `Signet blocks need an
+   ML-DSA-44 block signature from height 20000, by the key whose SHA256 is
+   eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, `P2MR consensus rules active
+   from height 1` and `P2MR ML-DSA-44 rules active from height 8600`; on node A, `Config file arg:
+   [signet] blockreservedweight="16000"`; no `Ignoring unknown configuration value`; the frozen tip,
+   and `getchaintips` as before (one `active`, and `invalid` at 127, 8712 and 8714); each node
+   connected to the other and, by name, to the public node.
+6. **12:58:16.** The ordinary overlay started the producer; its `kubectl diff -k` had been the
+   producer's `replicas` from 0 to 1, and the node pods did not roll again. Its first attempt could
+   not connect to node A's RPC; the loop retried 15 seconds later and mined 11185 at 12:58:47.
+7. **Checks after the first block.** The producer's `imageID` equal to the new image's id above; both
+   nodes on 11185, each logging `CheckSignetPQBlock: block
+   0000002f1200f41328d59d0c79aaccd21b4657691570cff642e8e31a1a6f38ce below height 20000, ML-DSA-44
+   block signature absent or not in the required form`, as it should be before 18000. The observe run
+   at 13:05:03 was the first on the new image: both nodes on the same tip, the three pods ready with no
+   restarts, the heartbeat sent.
+
+### Before and after
+
+| | 12:56:40 | 12:57:52, both nodes on the new image | 13:05:03 |
+|---|---|---|---|
+| block count, both nodes | 11184 | 11184 | 11188 |
+| best hash, both | `000000340f67aac4…66cf4972` | the same | `00000001c8e09283…502a969c` |
+| connections, each node | 3 | 2 | 3 |
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 11184 | `000000340f67aac48cb872c54238a66257a5901e6941fba95ce831eb66cf4972` | 12:54:58 | the frozen tip |
+| 11185 | `0000002f1200f41328d59d0c79aaccd21b4657691570cff642e8e31a1a6f38ce` | 12:58:33 | the first block from the new producer image |
+| 11186 | `0000006b44bea6306d9a47cc9a01d31a869e8d5891e6803e96676737a422c419` | 13:00:18 | |
+
+Node B carried the same height and hash at every reading.
+
+### The soak
+
+`soak-roll-0930`, started by hand on the new producer image, funding from node A and spending from node
+B, both on the new build:
+
+```
+2026-09-30T13:06:23Z | dc46ab96a4bad4b64fb6f7a840f8d5dc13d54207cc8e2b05629a16331c5c808f | 5ce2af6dc56186d70f38138c69c180ffeece158bf78d143dfc9e8639a8669753 | 11190/11191 | ok (index 167, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)
+```
+
+### The two external nodes
+
+Both moved onto the `bitcoind` and `bitcoin-cli` of the release package `ark0-node-m2` (checked against
+its `SHA256SUMS`; `ldd` resolved on Debian 13); the M1 binaries are kept beside them as `*.m1`. The
+public node was stopped at 13:01:52 and answered again at 13:01:59, the relay at 13:02:37 and 13:02:41.
+Each logged the rule lines above, the M2 line with the key's SHA256 among them, and followed the tip:
+at about 13:04 all four nodes held 11188,
+`00000001c8e09283dca698c5a0038493f22ca0bd4da50f426eb60e7e502a969c`.
+The relay's RPC whitelists gained three calls for the web services it backs, applied by the same
+restart: `gettransaction` for the faucet's user, `getrawmempool` and `getrawtransaction` for the web
+wallet's.
+
+### What this roll does not show yet
+
+The producer signs from height 18000 and the rule applies from 20000. What to check then, on all four
+nodes: at 18000, that each node's validation log calls the signatures valid; from 20000, that blocks
+without a valid signature are refused (`bad-signet-pqblk`) and signed blocks are accepted. A block made
+to be refused is submitted only to nodes that carry the rule. A node without it would take such a block
+as its tip, and a node with the rule that keeps a manual connection to it (`addnode` or `connect`), or
+grants it `noban`, would fetch the block and refuse it again and again: a block that fails
+`CheckBlock` is not marked invalid, and such a peer is not disconnected for sending it. On the staging
+signets, whose nodes had both, each node with the rule refused the one block the node without it had
+taken as its tip about 150,000 to 220,000 times, in bursts of under two minutes that stopped once the
+valid chain had overtaken that block there.
+
+### Rolling back this roll
+
+Below height 18000 the roll is fully reversible. Stop the producer, set the two node pins back to
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-369f88ce867e` and the producer's to
+`p2mr-miner:v31.1-p2mr-d3ac79467cea`, apply the maintenance overlay, and start the producer. The old
+producer ignores the three `ARK0_PQ_BLOCK_*` variables, and the old node builds know
+`blockreservedweight`. The external nodes get their `*.m1` binaries back the same way.
+
+From 18000 to 19999 the old producer image would still make valid blocks, but without the signature,
+and the evidence of the signatures verifying before they are enforced would stop there. From 20000 on,
+a producer without the block key stops the chain, since the nodes with the rule refuse its blocks, and
+a node rolled back to the M1 build keeps following the chain but no longer checks the signatures.
+Neither is a way back after 20000.
