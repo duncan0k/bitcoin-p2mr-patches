@@ -3,3 +3,4 @@
 43778665716cc2ce5ff079b77dbb405ad265d073914f0bf799fc9b22414c024d *0051-test-add-feature_signet_pqblock.py.patch
 95b4eb8ee99cacfdc148c980278c7922091a3f84af4eddbaaefe55c769d976d8 *0052-doc-describe-signetpqblock.patch
 702ce64bb376b24eb04698fc6fcd2fd811b95bac8efba842a9ec0443084626a0 *0053-signet-require-the-ML-DSA-44-block-signature-on-the-.patch
+380374762bd5f4e7ccfaaf79917e291bd76b3ae09f4724f6624e65647ee2bf4a *0054-test-add-feature_signet_pqblock_edges.py.patch
