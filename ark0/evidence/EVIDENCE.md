@@ -1,13 +1,14 @@
 # Evidence files
 
-Nine files: one confirmed P2MR spend, three malformed spends, the three blocks
-that carried them, the demo script tree, and one block refused under the rule
-change at height 8600 (M1, the last section). For the first eight, every
-response quoted here was produced by a node built from this patch series and
-restored from `../snapshot/ark0-blocks-1264.dat` with no network access, except
-where a response is attributed to the live nodes. `../REPRODUCE.md` is the
-procedure that produces them. The M1 block lies far above the snapshot, so the
-responses to it come from nodes that follow the live chain.
+Fourteen files: one confirmed P2MR spend, three malformed spends, the three
+blocks that carried them, the demo script tree, one block refused under the
+rule change at height 8600 (M1), and five blocks refused under the rule change
+at height 20000 (M2, the last section). For the first eight, every response
+quoted here was produced by a node built from this patch series and restored
+from `../snapshot/ark0-blocks-1264.dat` with no network access, except where a
+response is attributed to the live nodes. `../REPRODUCE.md` is the procedure
+that produces them. The M1 and M2 blocks lie far above the snapshot, so the
+responses to them come from nodes that follow the live chain.
 
 All of these files contain public data only: raw transactions, raw blocks,
 public keys, script hashes and Merkle roots. No private key material is
@@ -299,3 +300,36 @@ at 8713; `../NETWORK.md` gives the three commands. A new node that had synced
 from the public node answered `submitblock` with
 `block-script-verify-flag-failed (Invalid ML-DSA-44 signature)` and returned to
 its tip afterwards.
+
+## `m2_badblock_*.hex`: the five blocks refused under M2
+
+Five complete blocks at height TBD, above the height 20000 from which Ark-0
+requires an ML-DSA-44 block signature (`../NETWORK.md`, "Rule change at height
+20000 (M2)"), all built on `TBD` (height TBD) on TBD UTC. Each has valid proof
+of work and a valid classical signet solution, made with the challenge key as
+the block producer makes it. In the coinbase output that holds the witness
+commitment, each has the push below after the commitment, in place of a valid
+ML-DSA-44 block signature, which is the only thing wrong with it. The other
+key's seed is the SHA256 of the public string `ark0 m2 negative blocks at
+20000: another ML-DSA-44 key, public, test only`, so it controls nothing.
+
+| File | Block hash | The push after the witness commitment |
+|---|---|---|
+| `m2_badblock_nopush.hex` | `TBD` | absent: the signet solution follows the commitment directly |
+| `m2_badblock_flipped.hex` | `TBD` | the block's valid push, with bit 0 of its byte 100 (counting from 0; byte 95 of the signature) flipped |
+| `m2_badblock_otherkey.hex` | `TBD` | a valid signature of the block by the other key |
+| `m2_badblock_trailing.hex` | `TBD` | the block's valid push, followed by `OP_0` |
+| `m2_badblock_nonpush.hex` | `TBD` | `OP_1NEGATE` in place of the push |
+
+On TBD each of the operator's four nodes was given each block with
+`submitblock` and answered `bad-signet-pqblk`. None of them kept a chain tip or
+a header for any of the blocks: `getchaintips` did not change, and
+`getblockheader` answered `Block not found` for each hash. Each node logged,
+for each block:
+
+```
+TBD
+```
+
+`../NETWORK.md` gives the command that replays them on a node of your own, and
+why only a node with the rule may be given them.

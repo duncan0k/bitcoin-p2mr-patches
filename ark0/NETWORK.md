@@ -209,6 +209,53 @@ The nodes built with `patches-m2/` enforce it, the operator's among them, and
 - **The height is a rule of this network and will not change.** The series is
   in `patches-m2/` (`README.md`, "Experimental M2 series").
 
+### What the chain shows
+
+The block producer has signed every block since height 18000. For each block
+from 18000 to 19999, nodes A and B, the two the operator runs in its cluster,
+logged that its ML-DSA-44 block signature was valid, and so did the public node
+and the relay, which had the same logging switched on for the purpose, for the
+blocks from 18000 to TBD:
+
+```
+CheckSignetPQBlock: block <hash> below height 20000, ML-DSA-44 block signature valid
+```
+
+| Height | Block | What happened |
+|---|---|---|
+| 18000 | `TBD` | The first block with an ML-DSA-44 block signature, TBD UTC. |
+| 20000 | `TBD` | The first block under the rule, TBD UTC. |
+
+At height TBD the operator built five blocks on `TBD`, each with valid proof of
+work and a valid classical signet solution, and with an ML-DSA-44 block
+signature that is missing or wrong in one of five ways. Each of the four nodes
+the operator runs refused each of them with `bad-signet-pqblk` and kept nothing
+of any, neither a chain tip nor a header:
+
+| File | Block | The push after the witness commitment |
+|---|---|---|
+| `evidence/m2_badblock_nopush.hex` | `TBD` | absent: the signet solution follows the commitment directly |
+| `evidence/m2_badblock_flipped.hex` | `TBD` | the block's valid push, with bit 0 of its byte 100 (counting from 0; byte 95 of the signature) flipped |
+| `evidence/m2_badblock_otherkey.hex` | `TBD` | a valid signature of the block by another key, derived from a public string; it controls nothing |
+| `evidence/m2_badblock_trailing.hex` | `TBD` | the block's valid push, followed by `OP_0` |
+| `evidence/m2_badblock_nonpush.hex` | `TBD` | `OP_1NEGATE` in place of the push |
+
+Give these blocks only to a node built with `patches-m2/`. A node without the
+rule checks nothing new and takes each of them as a valid block. A node with
+the rule refuses each of them at any height of its own chain and as often as
+it is given it, with nothing to set aside first: it reads the height from the
+coinbase (BIP 34) and checks the signature before it stores anything, and it
+keeps no record of a block that fails. Run, in this directory, with that
+node's `bitcoin-cli` (and its `-datadir`, if it has one of its own):
+
+```bash
+for f in evidence/m2_badblock_*.hex; do bitcoin-cli submitblock "$(cat "$f")"; done
+```
+
+Each answer is `bad-signet-pqblk`. For each hash in the table,
+`bitcoin-cli getblockheader <hash>` then still answers `Block not found`, and
+`bitcoin-cli getchaintips` is unchanged.
+
 ## Parameters
 
 | Parameter | Value |
@@ -363,6 +410,6 @@ chain instead, see `JOIN.md`.
 | `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
-| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, and the block refused under M1 |
+| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, and the five refused under M2 |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
 | `SHA256SUMS` | checksums for everything above |
