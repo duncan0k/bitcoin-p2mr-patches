@@ -1,0 +1,60 @@
+# Job template for one M3 development build (m3-build.sh). m3-run.sh substitutes
+# the __TOKEN__ placeholders. Everything it writes is under /work/m3-*.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m3-build-__RUN_ID__
+  namespace: p2mr-build
+  labels:
+    app.kubernetes.io/part-of: p2mr
+    app.kubernetes.io/component: m3-build
+    p2mr.run-id: "__RUN_ID__"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 14400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: p2mr
+        app.kubernetes.io/component: m3-build
+        p2mr.run-id: "__RUN_ID__"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: build
+          image: __BUILDER_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/opt/scripts/m3-build.sh"]
+          env:
+            - { name: WORK, value: "/work" }
+            - { name: RUN_ID, value: "__RUN_ID__" }
+            - { name: PATCH_SETS, value: "__PATCH_SETS__" }
+            - { name: BUILD_JOBS, value: "__BUILD_JOBS__" }
+            - { name: EXTRA_CMAKE_ARGS, value: "__EXTRA_CMAKE_ARGS__" }
+            - { name: RUN_UNIT_TESTS, value: "__RUN_UNIT_TESTS__" }
+            - { name: UNIT_TEST_ARGS, value: "__UNIT_TEST_ARGS__" }
+            - { name: FUNCTIONAL_TESTS, value: "__FUNCTIONAL_TESTS__" }
+            - { name: RUN_DEFAULT_FUNCTIONAL, value: "__RUN_DEFAULT_FUNCTIONAL__" }
+            - { name: FUNCTIONAL_JOBS, value: "__FUNCTIONAL_JOBS__" }
+            - { name: FUNCTIONAL_EXTRA_ARGS, value: "__FUNCTIONAL_EXTRA_ARGS__" }
+            - { name: M3_PATCH_LIMIT, value: "__M3_PATCH_LIMIT__" }
+            - { name: FUZZ_TARGET, value: "__FUZZ_TARGET__" }
+            - { name: FUZZ_INPUTS, value: "__FUZZ_INPUTS__" }
+            - { name: M3_IMGCTX, value: "__M3_IMGCTX__" }
+            - { name: CCACHE_DIR, value: "/work/m3-ccache" }
+            - { name: CCACHE_MAXSIZE, value: "15G" }
+          resources:
+            requests: { cpu: "__CPU__", memory: "__MEMORY__" }
+            limits: { cpu: "__CPU__", memory: "__MEMORY__" }
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: scripts, mountPath: /opt/scripts, readOnly: true }
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: p2mr-work
+        - name: scripts
+          configMap:
+            name: m3-build-scripts
+            defaultMode: 0755

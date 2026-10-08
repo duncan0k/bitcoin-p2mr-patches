@@ -18,6 +18,11 @@
 #
 # Then build it with ./build-image.sh miner.
 #
+# CONTEXT_ROOT, BUILT_TREE and BUILT_BIN change where the context goes and where
+# the built tree and the published binaries are read from (imgctx, /work/src and
+# /work/out/bin unless set): the M3 development images are staged in m3-imgctx
+# from an M3 run (m3-dev/README.md), apart from everything the release images use.
+#
 # --self-test exercises the key material scanner below against files it makes
 # itself and exits. It reaches no cluster, copies nothing, and does not need the
 # producer scripts to be present.
@@ -26,6 +31,13 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 PRODUCER_DIR="$HERE/ark0/producer"
+CONTEXT_ROOT="${CONTEXT_ROOT:-imgctx}"
+BUILT_TREE="${BUILT_TREE:-/work/src}"
+BUILT_BIN="${BUILT_BIN:-/work/out/bin}"
+case "$CONTEXT_ROOT" in
+    img|-*|*[!a-z0-9-]*) die "CONTEXT_ROOT must be one directory name of lower-case letters, digits and dashes, not img" ;;
+esac
+MINER_CTX="/work/$CONTEXT_ROOT/miner"
 
 # The two scripts read their keys from files at run time and are expected to
 # carry none themselves. They are about to be baked into an image other people
@@ -251,34 +263,35 @@ ensure_workspace
 log "collecting the pieces already on the volume"
 in_shell sh -c '
 set -eu
-test -f /work/src/contrib/signet/miner || { echo "no built tree at /work/src" >&2; exit 1; }
-test -x /work/out/bin/bitcoin-cli || { echo "no binaries at /work/out/bin" >&2; exit 1; }
+src="$1" bin="$2" ctx="$3"
+test -f "$src/contrib/signet/miner" || { echo "no built tree at $src" >&2; exit 1; }
+test -x "$bin/bitcoin-cli" || { echo "no binaries at $bin" >&2; exit 1; }
 # /work/out/bin is written only by a build that passed every check it was asked
 # to run, and the provenance beside the binaries is what says so. Carry it into
 # the image context so build-image.sh can require it here too.
-test -f /work/out/bin/PROVENANCE.txt || {
-    echo "no PROVENANCE.txt beside /work/out/bin: those binaries were not published by a passing build" >&2
+test -f "$bin/PROVENANCE.txt" || {
+    echo "no PROVENANCE.txt beside $bin: those binaries were not published by a passing build" >&2
     exit 1
 }
-rm -rf /work/imgctx/miner
-mkdir -p /work/imgctx/miner/bin \
-         /work/imgctx/miner/bitcoin/contrib/signet \
-         /work/imgctx/miner/bitcoin/test/functional \
-         /work/imgctx/miner/demo
-cp /work/src/contrib/signet/miner /work/imgctx/miner/bitcoin/contrib/signet/miner
-cp -r /work/src/test/functional/test_framework /work/imgctx/miner/bitcoin/test/functional/
-find /work/imgctx/miner/bitcoin -name __pycache__ -type d -prune -exec rm -rf {} +
-cp /work/out/bin/bitcoin-cli /work/out/bin/bitcoin-util /work/imgctx/miner/bin/
-cp /work/out/bin/PROVENANCE.txt /work/imgctx/miner/PROVENANCE.txt
-'
+rm -rf "$ctx"
+mkdir -p "$ctx/bin" \
+         "$ctx/bitcoin/contrib/signet" \
+         "$ctx/bitcoin/test/functional" \
+         "$ctx/demo"
+cp "$src/contrib/signet/miner" "$ctx/bitcoin/contrib/signet/miner"
+cp -r "$src/test/functional/test_framework" "$ctx/bitcoin/test/functional/"
+find "$ctx/bitcoin" -name __pycache__ -type d -prune -exec rm -rf {} +
+cp "$bin/bitcoin-cli" "$bin/bitcoin-util" "$ctx/bin/"
+cp "$bin/PROVENANCE.txt" "$ctx/PROVENANCE.txt"
+' sh "$BUILT_TREE" "$BUILT_BIN" "$MINER_CTX"
 
 log "copying the producer scripts from ark0/producer"
-push_file "$PRODUCER_DIR/ark0.py" /work/imgctx/miner/demo
-push_file "$PRODUCER_DIR/miner_loop.sh" /work/imgctx/miner/demo
+push_file "$PRODUCER_DIR/ark0.py" "$MINER_CTX/demo"
+push_file "$PRODUCER_DIR/miner_loop.sh" "$MINER_CTX/demo"
 
 log "copying the Dockerfile and the entry point"
-push_file "$HERE/Dockerfile.miner" /work/imgctx/miner
-push_file "$HERE/miner-entrypoint.sh" /work/imgctx/miner
+push_file "$HERE/Dockerfile.miner" "$MINER_CTX"
+push_file "$HERE/miner-entrypoint.sh" "$MINER_CTX"
 
 log "staged"
-in_shell sh -c 'find /work/imgctx/miner -maxdepth 3 -not -path "*/test_framework/*" | sort; du -sh /work/imgctx/miner'
+in_shell sh -c 'find "$1" -maxdepth 3 -not -path "*/test_framework/*" | sort; du -sh "$1"' sh "$MINER_CTX"

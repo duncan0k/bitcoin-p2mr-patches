@@ -14,6 +14,12 @@
 # successful build: build.sh stages them at /work/imgctx/node/bin, so run it
 # after a build Job has finished.
 #
+# CONTEXT_ROOT names another directory of the work volume to take the contexts
+# from, in place of imgctx; the kaniko tarball then goes to its img/ and the
+# build pod is kaniko-<root>-<target>, so that nothing the release images use is
+# touched. The M3 development images are staged that way, in m3-imgctx
+# (m3-dev/README.md).
+#
 # --self-test checks the image reference normalisation in common.sh against its
 # table and exits. It reaches no cluster and changes nothing, so it needs
 # neither KUBECTL nor root.
@@ -22,6 +28,12 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 TARGET="${1:-}"
+CONTEXT_ROOT="${CONTEXT_ROOT:-imgctx}"
+case "$CONTEXT_ROOT" in
+    imgctx) POD_PREFIX="kaniko"; IMG_SUBPATH="img" ;;
+    img|-*|*[!a-z0-9-]*) die "CONTEXT_ROOT must be one directory name of lower-case letters, digits and dashes, not img" ;;
+    *) POD_PREFIX="kaniko-$CONTEXT_ROOT"; IMG_SUBPATH="$CONTEXT_ROOT/img" ;;
+esac
 
 # BASE_IMAGE is the name and series; the immutable suffix is added below, once
 # the provenance that names the source has been read.
@@ -34,18 +46,18 @@ case "$TARGET" in
         ;;
     builder)
         BASE_IMAGE="$BUILDER_IMAGE"
-        CONTEXT_SUBPATH="imgctx/builder"
+        CONTEXT_SUBPATH="$CONTEXT_ROOT/builder"
         DOCKERFILE="Dockerfile.builder"
         ;;
     node)
         # Filled in below from the provenance of the build being packaged.
         BASE_IMAGE=""
-        CONTEXT_SUBPATH="imgctx/node"
+        CONTEXT_SUBPATH="$CONTEXT_ROOT/node"
         DOCKERFILE="Dockerfile.node"
         ;;
     miner)
         BASE_IMAGE="$MINER_IMAGE"
-        CONTEXT_SUBPATH="imgctx/miner"
+        CONTEXT_SUBPATH="$CONTEXT_ROOT/miner"
         DOCKERFILE="Dockerfile.miner"
         ;;
     *)
@@ -53,7 +65,7 @@ case "$TARGET" in
         ;;
 esac
 
-POD="kaniko-$TARGET"
+POD="$POD_PREFIX-$TARGET"
 TAR_NAME="p2mr-$TARGET.tar"
 
 ensure_workspace
@@ -137,13 +149,13 @@ require_verified_provenance() {
 }
 
 if [ "$TARGET" = "node" ]; then
-    in_shell test -x /work/imgctx/node/bin/bitcoind \
-        || die "/work/imgctx/node/bin/bitcoind is missing; run a build Job first"
-    require_verified_provenance /work/imgctx/node
+    in_shell test -x "/work/$CONTEXT_ROOT/node/bin/bitcoind" \
+        || die "/work/$CONTEXT_ROOT/node/bin/bitcoind is missing; run a build Job first"
+    require_verified_provenance "/work/$CONTEXT_ROOT/node"
     # The tag follows the build. Node A and node B run deliberately different
     # series, so the name has to come from what was compiled and tested rather
     # than from whoever is typing.
-    PATCH_SETS_BUILT="$(provenance_field /work/imgctx/node 'patch sets verified')"
+    PATCH_SETS_BUILT="$(provenance_field "/work/$CONTEXT_ROOT/node" 'patch sets verified')"
     if [ -n "${NODE_IMAGE:-}" ]; then
         BASE_IMAGE="$NODE_IMAGE"
         log "NODE_IMAGE is set: naming this $BASE_IMAGE rather than the tag for" \
@@ -155,12 +167,12 @@ if [ "$TARGET" = "node" ]; then
     fi
 fi
 if [ "$TARGET" = "miner" ]; then
-    in_shell test -f /work/imgctx/miner/demo/ark0.py \
-        || die "/work/imgctx/miner is not staged; run ./stage-miner.sh first"
+    in_shell test -f "/work/$CONTEXT_ROOT/miner/demo/ark0.py" \
+        || die "/work/$CONTEXT_ROOT/miner is not staged; run ./stage-miner.sh first"
     # stage-miner.sh copies the provenance across from the published binaries it
     # took the CLI and the utility from, so the producer image is traceable to
     # the same build as a node image, and is held to the same three conditions.
-    require_verified_provenance /work/imgctx/miner
+    require_verified_provenance "/work/$CONTEXT_ROOT/miner"
 fi
 
 # An image this script imports is never replaced. Every build produces its own
@@ -310,6 +322,7 @@ trap remove_import_ref EXIT
 log "building $IMAGE from $CONTEXT_SUBPATH/$DOCKERFILE"
 log "importing it as $IMPORT_REF first; $IMAGE is only named if this agrees with it"
 $KUBECTL -n "$NS" delete pod "$POD" --ignore-not-found --wait=true > /dev/null
+[ "$CONTEXT_ROOT" = "imgctx" ] || in_shell mkdir -p "/work/$IMG_SUBPATH"
 if [ -n "${REGISTRY_MIRROR:-}" ]; then
     MIRROR_SED=(-e "s|__REGISTRY_MIRROR_ARG__|--registry-mirror=$REGISTRY_MIRROR|g")
 else
@@ -321,6 +334,7 @@ sed "${MIRROR_SED[@]}" \
     -e "s|__CONTEXT_SUBPATH__|$CONTEXT_SUBPATH|g" \
     -e "s|__DOCKERFILE__|$DOCKERFILE|g" \
     -e "s|__TAR_NAME__|$TAR_NAME|g" \
+    -e "s|__IMG_SUBPATH__|$IMG_SUBPATH|g" \
     "$HERE/kaniko.yaml" | $KUBECTL apply -f - > /dev/null
 
 log "waiting for $POD"
@@ -340,12 +354,12 @@ done
 $KUBECTL -n "$NS" logs "$POD" | tail -15
 
 HOST_PATH="$(pvc_host_path)"
-log "importing $HOST_PATH/img/$TAR_NAME as $IMPORT_REF"
+log "importing $HOST_PATH/$IMG_SUBPATH/$TAR_NAME as $IMPORT_REF"
 IMPORT_ARMED=1
-$CTR images import "$HOST_PATH/img/$TAR_NAME"
+$CTR images import "$HOST_PATH/$IMG_SUBPATH/$TAR_NAME"
 
 # The tarball is only needed for the import; the image now lives in containerd.
-in_shell rm -f "/work/img/$TAR_NAME"
+in_shell rm -f "/work/$IMG_SUBPATH/$TAR_NAME"
 $KUBECTL -n "$NS" delete pod "$POD" --ignore-not-found > /dev/null
 
 # One snapshot, taken here rather than before the build. A build takes an hour

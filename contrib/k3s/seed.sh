@@ -17,7 +17,7 @@ set -euo pipefail
 ensure_workspace
 
 log "clearing the patch directories"
-in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1 /work/patches/m2 /work/patches/m2a /work/patches/m2b
+in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1 /work/patches/m2 /work/patches/m2a /work/patches/m2b /work/patches/m3
 
 log "copying the consensus series (patches/) to /work/patches/master"
 push_dir "$REPO_ROOT/patches" /work/patches/master
@@ -60,13 +60,22 @@ for set_name in m2 m2a m2b; do
     fi
 done
 
+# M3: leaf version 0xe0 and its tripwire outputs, on m2.
+if [ -d "$REPO_ROOT/patches-m3" ]; then
+    log "copying the M3 series (patches-m3/) to /work/patches/m3"
+    push_dir "$REPO_ROOT/patches-m3" /work/patches/m3
+    push_file "$REPO_ROOT/SHA256SUMS-m3" /work/patches/m3
+else
+    log "patches-m3/ is absent on this branch, skipping the M3 series"
+fi
+
 log "copying the image build contexts"
 push_file "$HERE/Dockerfile.builder" /work/imgctx/builder
 push_file "$HERE/Dockerfile.node" /work/imgctx/node
 in_shell mkdir -p /work/imgctx/node/bin /work/img
 
 log "verifying the checksums on the volume"
-for set_name in master m05 spacing m1 m2 m2a m2b; do
+for set_name in master m05 spacing m1 m2 m2a m2b m3; do
     if in_shell test -d "/work/patches/$set_name"; then
         # sha256sum's own exit status, on its own, with nothing downstream of
         # it. The previous version ended in `| tail -3`, so the pipeline

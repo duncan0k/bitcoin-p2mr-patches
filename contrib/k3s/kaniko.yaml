@@ -65,7 +65,7 @@ spec:
           subPath: __CONTEXT_SUBPATH__
         - name: work
           mountPath: /img
-          subPath: img
+          subPath: __IMG_SUBPATH__
   volumes:
     - name: work
       persistentVolumeClaim:
