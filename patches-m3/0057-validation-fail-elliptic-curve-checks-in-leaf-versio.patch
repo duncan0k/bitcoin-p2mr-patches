@@ -1,0 +1,101 @@
+From a7702e9b215b2099f409c68428fc3c6b59fef205 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 22:33:09 -0600
+Subject: [PATCH 57/65] validation: fail elliptic curve checks in leaf version
+ 0xe0 once a tripwire output is missing
+
+ConnectBlock adds SCRIPT_VERIFY_P2MR_EC_DISABLED to the script flags of a
+block when the P2MR tripwire rules apply to it and a tripwire output is not
+present in the UTXO set the block builds on. It decides this once per block,
+right after GetBlockScriptFlags and before any of the block's transactions
+is applied, from the view it is given, which is still the parent's: so a
+block that spends a tripwire output keeps elliptic curve checks working for
+all its inputs, before and after that spend, and they fail from the next
+block on. Every caller connects on a view of its own -- ConnectTip,
+TestBlockValidity for templates and proposals, VerifyDB at level 4, and the
+background chainstate of an assumeutxo snapshot -- so each one decides from
+the UTXO set of the block it checks, not from the active chain tip.
+
+An output is present while it is unspent and was created below the height
+of the rules (IsP2MRTripwirePresent). An output that never existed counts as
+missing, so the rules then fail from their height on rather than never; and
+an output a deep reorganization moved to that height or above stays missing,
+so that only a reorganization that undoes its spend, or its move, gives the
+elliptic curve checks back. GetCoin reads through the caches to the
+database; the state needs nothing persisted beyond the UTXO set, so restarts,
+-reindex, -reindex-chainstate and pruning keep it.
+
+P2MRECDisabledAfter gives the state for the block after a given one; the
+mempool, RPC and logs added later in this series use it too.
+---
+ src/validation.cpp | 28 ++++++++++++++++++++++++++++
+ src/validation.h   |  9 +++++++++
+ 2 files changed, 37 insertions(+)
+
+diff --git a/src/validation.cpp b/src/validation.cpp
+index ec56ef7..8039c55 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2342,6 +2342,27 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+     return flags;
+ }
+ 
++bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, const Consensus::Params& params)
++{
++    // GetCoin reads through a cache to the database. The creation height is what keeps an output
++    // that a deep reorganization moved to the rules' height or above from counting again.
++    const std::optional<Coin> coin{view.GetCoin(outpoint)};
++    return coin && coin->nHeight < params.P2MRTripwireHeight;
++}
++
++bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman)
++{
++    // The condition GetBlockScriptFlags sets SCRIPT_VERIFY_P2MR_TRIPWIRE on.
++    if (!DeploymentActiveAfter(pindex, chainman, Consensus::DEPLOYMENT_P2MR) ||
++        !DeploymentActiveAfter(pindex, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
++        return false;
++    }
++    const Consensus::Params& params{chainman.GetConsensus()};
++    return std::ranges::any_of(params.p2mr_tripwires, [&](const Consensus::P2MRTripwire& tripwire) {
++        return !IsP2MRTripwirePresent(view, tripwire.outpoint, params);
++    });
++}
++
+ 
+ /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
+  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
+@@ -2537,6 +2558,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state,
+ 
+     // Get the script flags for this block
+     script_verify_flags flags{GetBlockScriptFlags(*pindex, m_chainman)};
++    // Elliptic curve checks in P2MR leaves of leaf version 0xe0 fail in this block once a tripwire
++    // output is missing from the UTXO set it builds on (doc/p2mr-tripwire.md). The view still is that
++    // set: no transaction of this block has been applied to it yet. Decided once for the whole
++    // block, so a spend of a tripwire output in it leaves the checks of its other inputs alone.
++    if (P2MRECDisabledAfter(pindex->pprev, view, m_chainman)) {
++        flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
++    }
+ 
+     const auto time_2{SteadyClock::now()};
+     m_chainman.time_forks += time_2 - time_1;
+diff --git a/src/validation.h b/src/validation.h
+index 7aeaafe..4c0924b 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -1405,4 +1405,13 @@ bool IsBIP30Unspendable(const uint256& block_hash, int block_height);
+ // Returns the script flags which should be checked for a given block
+ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
+ 
++/** Whether a tripwire output of the P2MR tripwire rules (doc/p2mr-tripwire.md) is present in a UTXO
++ *  set: unspent, and created below the height of those rules. */
++bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, const Consensus::Params& params);
++
++/** Whether elliptic curve signature checks in P2MR leaves of leaf version 0xe0 fail in the block
++ *  after `pindex` (doc/p2mr-tripwire.md): the P2MR tripwire rules apply to that block, and a
++ *  tripwire output is missing from `view`, the UTXO set after `pindex`. */
++bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
++
+ #endif // BITCOIN_VALIDATION_H
+-- 
+2.49.0.windows.1
+

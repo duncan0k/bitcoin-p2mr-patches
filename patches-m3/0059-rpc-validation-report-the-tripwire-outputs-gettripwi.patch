@@ -1,0 +1,232 @@
+From 4e244cc0da8594864ae234846f0baf204c3fc993 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 22:39:13 -0600
+Subject: [PATCH 59/65] rpc, validation: report the tripwire outputs
+ (gettripwireinfo) and log their spends
+
+gettripwireinfo returns, from one cs_main snapshot of the active chainstate,
+the tip it reads the state at (tip_hash, tip_height), the activation height
+and the leaf version of the P2MR tripwire rules, each tripwire output with
+its state, and ec_disabled_next_block. The state is "unspent" while the
+output is an unspent output created below the activation height, and
+"missing" otherwise: the UTXO set does not tell a spent output from one that
+never existed or was created too late, so the RPC names no spending
+transaction. The outputs the code fixes for the Ark-0 signet also carry the
+x-only key their leaf checks and a label; an output given by an option has
+neither, since an outpoint does not say which key it is locked to. Where the
+rules are not enabled the RPC fails.
+
+The node logs, only for the active chainstate and only where the chain has
+tripwire outputs:
+- at startup, the state of the outputs at the tip and whether elliptic curve
+  checks in leaf version 0xe0 fail in the next block;
+- when a block reaches the activation height, the same;
+- for each input of a block that spends a tripwire output, once ConnectTip
+  has connected the block and set the tip: the output, the spending
+  transaction, the block, and the height from which elliptic curve checks
+  fail, the activation height or the next block, whichever is higher, or
+  that they already do. ConnectBlock also checks proposals, candidates that
+  turn out invalid and blocks VerifyDB connects again, and the background
+  chainstate of an assumeutxo snapshot connects blocks the active chain
+  already has, so none of those log a spend.
+---
+ src/init.cpp           |  5 +++
+ src/rpc/blockchain.cpp | 69 ++++++++++++++++++++++++++++++++++++++++++
+ src/test/fuzz/rpc.cpp  |  1 +
+ src/validation.cpp     | 36 ++++++++++++++++++++++
+ src/validation.h       |  5 +++
+ 5 files changed, 116 insertions(+)
+
+diff --git a/src/init.cpp b/src/init.cpp
+index a86008c..c348446 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -2087,6 +2087,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+         LOCK(chainman.GetMutex());
+         const auto& tip{*Assert(chainman.ActiveTip())};
+         LogInfo("block tree size = %u", chainman.BlockIndex().size());
++        // The P2MR tripwire outputs (doc/p2mr-tripwire.md), whose state only the UTXO set holds.
++        if (!chainman.GetConsensus().p2mr_tripwires.empty() && DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
++            LogInfo("P2MR tripwire state at height %d: %s", tip.nHeight,
++                    DescribeP2MRTripwireState(&tip, chainman.ActiveChainstate().CoinsTip(), chainman));
++        }
+         chain_active_height = tip.nHeight;
+         best_block_time = tip.GetBlockTime();
+         if (tip_info) {
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index f2290b2..15dca2c 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -37,6 +37,7 @@
+ #include <rpc/server_util.h>
+ #include <rpc/util.h>
+ #include <script/descriptor.h>
++#include <script/interpreter.h>
+ #include <serialize.h>
+ #include <streams.h>
+ #include <sync.h>
+@@ -1541,6 +1542,73 @@ RPCHelpMan getdeploymentinfo()
+     };
+ }
+ 
++static RPCHelpMan gettripwireinfo()
++{
++    return RPCHelpMan{
++        "gettripwireinfo",
++        "Returns the state of the experimental P2MR tripwire rules (doc/p2mr-tripwire.md) at the active chain tip.\n"
++        "From their height on, elliptic curve signature checks in P2MR leaves of leaf version 0xe0 fail in every block "
++        "whose parent leaves a tripwire output missing.\n",
++        {},
++        RPCResult{
++            RPCResult::Type::OBJ, "", "",
++            {
++                {RPCResult::Type::STR_HEX, "tip_hash", "the hash of the active chain tip the state is read at"},
++                {RPCResult::Type::NUM, "tip_height", "the height of that tip"},
++                {RPCResult::Type::NUM, "height", "the height from which the rules apply"},
++                {RPCResult::Type::STR_HEX, "leaf_version", "the leaf version the rules apply to"},
++                {RPCResult::Type::ARR, "tripwires", "the tripwire outputs", {
++                    {RPCResult::Type::OBJ, "", "", {
++                        {RPCResult::Type::STR, "outpoint", "the output, as txid:vout"},
++                        {RPCResult::Type::STR, "state", "\"unspent\" while it is an unspent output created below the height of the rules; "
++                                                        "\"missing\" otherwise: spent, never created, or created at or above that height, which the UTXO set does not tell apart"},
++                        {RPCResult::Type::STR_HEX, "key", /*optional=*/true, "the x-only key the output's leaf checks (only for the outputs the code fixes, on the Ark-0 signet)"},
++                        {RPCResult::Type::STR, "label", /*optional=*/true, "what the output is for (only for the outputs the code fixes, on the Ark-0 signet)"},
++                    }},
++                }},
++                {RPCResult::Type::BOOL, "ec_disabled_next_block", "whether elliptic curve signature checks in those leaves fail in the next block"},
++            }},
++        RPCExamples{
++            HelpExampleCli("gettripwireinfo", "")
++            + HelpExampleRpc("gettripwireinfo", "")
++        },
++        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
++{
++    ChainstateManager& chainman = EnsureAnyChainman(request.context);
++    if (!DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
++        throw JSONRPCError(RPC_MISC_ERROR, "The P2MR tripwire rules are not enabled on this network");
++    }
++    const Consensus::Params& consensus{chainman.GetConsensus()};
++    // One snapshot: the tip, the outputs and the state for the next block are read under one lock.
++    LOCK(cs_main);
++    Chainstate& active_chainstate{chainman.ActiveChainstate()};
++    const CBlockIndex& tip{*CHECK_NONFATAL(active_chainstate.m_chain.Tip())};
++    const CCoinsViewCache& coins{active_chainstate.CoinsTip()};
++
++    UniValue tripwires(UniValue::VARR);
++    for (const Consensus::P2MRTripwire& tripwire : consensus.p2mr_tripwires) {
++        UniValue entry(UniValue::VOBJ);
++        entry.pushKV("outpoint", strprintf("%s:%u", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n));
++        entry.pushKV("state", IsP2MRTripwirePresent(coins, tripwire.outpoint, consensus) ? "unspent" : "missing");
++        // An outpoint does not tell which key its output's leaf checks: only the outputs the code
++        // fixes come with one.
++        if (!tripwire.key.empty()) entry.pushKV("key", HexStr(tripwire.key));
++        if (!tripwire.label.empty()) entry.pushKV("label", tripwire.label);
++        tripwires.push_back(std::move(entry));
++    }
++
++    UniValue result(UniValue::VOBJ);
++    result.pushKV("tip_hash", tip.GetBlockHash().GetHex());
++    result.pushKV("tip_height", tip.nHeight);
++    result.pushKV("height", consensus.P2MRTripwireHeight);
++    result.pushKV("leaf_version", strprintf("%02x", P2MR_LEAF_TRIPWIRED));
++    result.pushKV("tripwires", std::move(tripwires));
++    result.pushKV("ec_disabled_next_block", P2MRECDisabledAfter(&tip, coins, chainman));
++    return result;
++},
++    };
++}
++
+ /** Comparison function for sorting the getchaintips heads.  */
+ struct CompareBlocksByHeight
+ {
+@@ -3512,6 +3580,7 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
+         {"blockchain", &getchaintips},
+         {"blockchain", &getdifficulty},
+         {"blockchain", &getdeploymentinfo},
++        {"blockchain", &gettripwireinfo},
+         {"blockchain", &gettxout},
+         {"blockchain", &gettxoutsetinfo},
+         {"blockchain", &pruneblockchain},
+diff --git a/src/test/fuzz/rpc.cpp b/src/test/fuzz/rpc.cpp
+index e8daf9d..d1f63b5 100644
+--- a/src/test/fuzz/rpc.cpp
++++ b/src/test/fuzz/rpc.cpp
+@@ -153,6 +153,7 @@ const std::vector<std::string> RPC_COMMANDS_SAFE_FOR_FUZZING{
+     "getrawmempool",
+     "getrawtransaction",
+     "getrpcinfo",
++    "gettripwireinfo",
+     "gettxout",
+     "gettxoutsetinfo",
+     "gettxspendingprevout",
+diff --git a/src/validation.cpp b/src/validation.cpp
+index bc24b4c..c46c1f7 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2443,6 +2443,18 @@ bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, cons
+     });
+ }
+ 
++std::string DescribeP2MRTripwireState(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman)
++{
++    const Consensus::Params& params{chainman.GetConsensus()};
++    std::vector<std::string> outputs;
++    for (const Consensus::P2MRTripwire& tripwire : params.p2mr_tripwires) {
++        outputs.push_back(strprintf("%s:%u %s", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n,
++                                    IsP2MRTripwirePresent(view, tripwire.outpoint, params) ? "unspent" : "missing"));
++    }
++    return strprintf("tripwire outputs %s; elliptic curve checks in leaf version 0x%02x are %s for the next block",
++                     util::Join(outputs, ", "), P2MR_LEAF_TRIPWIRED, P2MRECDisabledAfter(pindex, view, chainman) ? "disabled" : "enabled");
++}
++
+ 
+ /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
+  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
+@@ -3308,6 +3320,30 @@ bool Chainstate::ConnectTip(
+         });
+     }
+ 
++    // The tripwire outputs this block spends, now that they are spent in the active chain, and the
++    // state of all of them when the block reaches the activation height (doc/p2mr-tripwire.md).
++    // Nowhere else: ConnectBlock also checks proposals, candidates that turn out invalid and blocks
++    // VerifyDB connects again, and the background chainstate of an assumeutxo snapshot connects
++    // blocks the active chain already has.
++    const Consensus::Params& consensus{m_chainman.GetConsensus()};
++    if (this == &m_chainman.ActiveChainstate() && !consensus.p2mr_tripwires.empty() &&
++        DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
++        for (const CTransactionRef& tx : block_to_connect->vtx) {
++            for (const CTxIn& txin : tx->vin) {
++                if (std::ranges::none_of(consensus.p2mr_tripwires, [&](const Consensus::P2MRTripwire& tripwire) { return tripwire.outpoint == txin.prevout; })) continue;
++                LogInfo("P2MR tripwire %s:%u spent by %s in block %s (height %d): elliptic curve checks in leaf version 0x%02x are %s",
++                        txin.prevout.hash.ToString(), txin.prevout.n, tx->GetHash().ToString(), pindexNew->GetBlockHash().ToString(),
++                        pindexNew->nHeight, P2MR_LEAF_TRIPWIRED,
++                        ec_disabled_before ? std::string{"already disabled"} :
++                                             strprintf("disabled from height %d", std::max(consensus.P2MRTripwireHeight, pindexNew->nHeight + 1)));
++            }
++        }
++        if (pindexNew->nHeight == consensus.P2MRTripwireHeight) {
++            LogInfo("P2MR tripwire rules active from height %d, reached by block %s: %s", pindexNew->nHeight,
++                    pindexNew->GetBlockHash().ToString(), DescribeP2MRTripwireState(pindexNew, CoinsTip(), m_chainman));
++        }
++    }
++
+     const auto time_6{SteadyClock::now()};
+     m_chainman.time_post_connect += time_6 - time_5;
+     m_chainman.time_total += time_6 - time_1;
+diff --git a/src/validation.h b/src/validation.h
+index 5b9f8b9..da73c7d 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -1415,4 +1415,9 @@ bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, co
+  *  tripwire output is missing from `view`, the UTXO set after `pindex`. */
+ bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
+ 
++/** The tripwire outputs of the P2MR tripwire rules in `view`, the UTXO set after `pindex`, each
++ *  unspent or missing, and whether elliptic curve checks in leaf version 0xe0 fail in the next
++ *  block, as the logs describe them (doc/p2mr-tripwire.md). */
++std::string DescribeP2MRTripwireState(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
++
+ #endif // BITCOIN_VALIDATION_H
+-- 
+2.49.0.windows.1
+

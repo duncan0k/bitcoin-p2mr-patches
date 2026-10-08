@@ -1,0 +1,324 @@
+From 0599b753beda112322bab494baf4ed40ea83c3dc Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 23:35:09 -0600
+Subject: [PATCH 64/65] doc: describe P2MR leaf version 0xe0 and its tripwire
+ outputs
+
+doc/p2mr-tripwire.md describes the experiment and where it comes from,
+where leaf version 0xe0 executes, which outputs count as present, the
+order of the checks once elliptic curve checks are disabled, the
+activation on each network with -signetmldsa44 and -signettripwire,
+the policy and the mempool around the height and the trigger,
+gettripwireinfo and the logs, what a wallet should do, and the tests.
+It says what the drill does not show.
+
+doc/p2mr.md and doc/p2mr-mldsa44.md point to it, and the latter lists
+-signetmldsa44 among the ways OP_CHECKMLDSA44 activates.
+---
+ doc/p2mr-mldsa44.md  |   9 +-
+ doc/p2mr-tripwire.md | 230 +++++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr.md          |  10 +-
+ 3 files changed, 242 insertions(+), 7 deletions(-)
+ create mode 100644 doc/p2mr-tripwire.md
+
+diff --git a/doc/p2mr-mldsa44.md b/doc/p2mr-mldsa44.md
+index 1fda83f..3a16651 100644
+--- a/doc/p2mr-mldsa44.md
++++ b/doc/p2mr-mldsa44.md
+@@ -17,8 +17,9 @@ still authorized by its classical signet challenge.
+ `OP_CHECKMLDSA44` is byte `0xf0`, which BIP 342 defines as `OP_SUCCESS240`. The byte executes
+ as `OP_CHECKMLDSA44` only when all of these hold:
+ 
+-- the script is a P2MR leaf that is executed: leaf version `0xc0`, at depth one or more
+-  (a leaf at depth zero is not executed at all);
++- the script is a P2MR leaf that is executed: leaf version `0xc0`, or `0xe0` once it executes
++  ([p2mr-tripwire.md](p2mr-tripwire.md)), at depth one or more (a leaf at depth zero is not
++  executed at all);
+ - `SCRIPT_VERIFY_P2MR_MLDSA44` applies, i.e. the rules are active for the block (see
+   [Activation](#activation)).
+ 
+@@ -118,7 +119,9 @@ The rules are a buried deployment, `p2mr_mldsa44` in `getdeploymentinfo`. They r
+   is a rule of that network, so there is no option to change it; once a build that carries a
+   height has been published, the height and the validation weight above do not change on that
+   network.
+-- On any other signet, the default signet, testnet3, testnet4 and mainnet they never activate.
++- On another custom signet they apply from `-signetmldsa44=<height>`, which requires
++  `-signetchallenge` and which the Ark-0 signet refuses ([p2mr-tripwire.md](p2mr-tripwire.md)).
++- On the default signet, testnet3, testnet4 and mainnet they never activate.
+ - On regtest they apply from genesis, or from `-testactivationheight=p2mr_mldsa44@<height>`.
+ 
+ When the rules are enabled, the node logs `P2MR ML-DSA-44 rules active from height <height>` at
+diff --git a/doc/p2mr-tripwire.md b/doc/p2mr-tripwire.md
+new file mode 100644
+index 0000000..8b5b931
+--- /dev/null
++++ b/doc/p2mr-tripwire.md
+@@ -0,0 +1,230 @@
++# P2MR leaf version 0xe0 and its tripwire outputs
++
++This build adds a P2MR leaf version, `0xe0`, whose elliptic curve signature checks stop working
++once one of a few designated outputs, the *tripwire outputs*, is missing from the UTXO set (see
++[p2mr.md](p2mr.md) for P2MR). It is an experiment for the Ark-0 test signet: a drill of disabling
++elliptic curve checks inside one leaf version, with a tripwire output whose key the operator
++holds and spends at an announced time.
++
++It follows the tripwire idea (P2XX-T) in Pieter Wuille's mail of 2026-06-25,
++[Giving teeth to expected EC disabling: P2XX(-T)(-ML)](https://groups.google.com/g/bitcoindev/c/aWYtPLVPZ3U),
++with two differences of its own: what the rules constrain is one experimental leaf version, and
++the trigger is the spend of designated outputs, where the mail's trigger is any input that
++successfully executes `<NUMS> OP_CHECKSIG`. Anthony Towns's reply in
++[that thread](https://gnusha.org/pi/bitcoindev/aj9SkwXqdRbuVZxH@erisian.com.au/T/) proposes a
++proof in the coinbase instead, and Sjors Provoost's
++[Sjors/bitcoin#121](https://github.com/Sjors/bitcoin/pull/121) implements one in a node. This
++build is not part of BIP 360 or BIP 361, and it is not proposed for mainnet.
++
++What it shows is narrow: a node with these rules refuses, at the block level, any elliptic curve
++signature in a leaf of version `0xe0` from the block after the one that spends a tripwire output,
++or from the height of the rules if that comes later. It does not
++show that any elliptic curve key is broken, and it cannot tell when one will be. Leaves of version
++`0xc0`, P2TR, witness v0 and legacy scripts are not affected. On a signet with a single block
++signer, it says nothing about how miners or a wider network would adopt such a rule.
++
++## Where leaf version 0xe0 executes
++
++The control block of a leaf of version `0xe0` starts with `0xe1` (P2MR requires the low bit to be
++set). A spend through such a leaf:
++
++- at depth zero (a control block of one byte) succeeds without executing the leaf, at every
++  height, like a P2MR leaf of any version. Wallets must never create such an output;
++- at depth one or more, below the height of the rules (see [Activation](#activation)), succeeds
++  without executing the leaf, as a leaf of an unknown version. Policy refuses such spends (see
++  [Policy](#policy)), and no coins should be sent to such leaves before the height;
++- at depth one or more, from the height on (`SCRIPT_VERIFY_P2MR_TRIPWIRE`), executes the leaf
++  exactly as a leaf of version `0xc0`: BIP 342 rules, the validation weight budget, the
++  `OP_SUCCESSx` scan, the signature message and `OP_CHECKMLDSA44` ([p2mr-mldsa44.md](p2mr-mldsa44.md)).
++
++The tapleaf hash commits to the leaf version, so a signature made for a leaf of version `0xc0`
++is not valid in a leaf of version `0xe0` with the same script, nor the other way round.
++
++## Tripwire outputs
++
++The rules come with a list of outpoints. For a block at or above the height, elliptic curve checks
++in leaves of version `0xe0` are disabled when, in the UTXO set its parent leaves, any of those
++outpoints is not *present*. An outpoint is present when it is unspent **and** was created below
++the height of the rules (`Coin::nHeight`). So an outpoint is missing when:
++
++- it was spent: the block that spends it is still checked with the checks enabled, and they are
++  disabled from the next block on;
++- it never existed, for instance after a reset of the chain: the checks are disabled from the
++  height on. Missing state fails closed;
++- the transaction that created it was moved to the height or above by a deep reorganization.
++
++The checks are enabled again only by a reorganization that undoes the spend (or the move) and
++brings the original output back. The state is the UTXO set itself: undo data restores it in a
++reorganization, and restarts, `-reindex`, `-reindex-chainstate`, pruning and the background
++chainstate of an assumeutxo snapshot need nothing else. Each `ConnectBlock` reads it from the view
++it connects the block to, before applying any transaction, so `TestBlockValidity`, `VerifyDB` and
++the background chainstate each decide on their own UTXO set.
++
++The Ark-0 signet is to have two tripwire outputs, each a P2MR output of two leaves of version
++`0xc0` at depth one, `<P> OP_CHECKSIG` and `OP_RETURN`: one with `P` the NUMS point `H` of BIP 341
++(`XOnlyPubKey::NUMS_H`), which nobody can spend, and the drill output, whose key the operator holds.
++
++## Execution
++
++Once the checks are disabled (`SCRIPT_VERIFY_P2MR_EC_DISABLED`), `OP_CHECKSIG`,
++`OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` in an executed leaf of version `0xe0` fail the script
++(`P2MR_EC_DISABLED`) when the public key is 32 bytes and the signature is not empty. The script
++fails; no false is pushed, so `OP_NOT` cannot turn the result around. The order of the checks,
++which decides the error reported:
++
++1. `OP_CHECKSIGADD` parses its number first (`SCRIPTNUM`), as before.
++2. A non-empty signature uses up 50 units of the validation weight budget
++   (`TAPSCRIPT_VALIDATION_WEIGHT`), as before.
++3. An empty public key fails (`TAPSCRIPT_EMPTY_PUBKEY`), as before.
++4. A 32-byte public key with a non-empty signature fails (`P2MR_EC_DISABLED`), whatever the
++   signature: valid, invalid, of a wrong size or with a wrong hash type. The signature is never
++   checked, so no signature cache entry can make it pass.
++
++Checks done before the script runs come first: a witness element over 520 bytes fails as
++`PUSH_SIZE`. Not affected: an empty signature (`OP_CHECKSIG` pushes false, `OP_CHECKSIGVERIFY`
++fails, `OP_CHECKSIGADD` adds nothing), public keys of other sizes (they succeed as upgradable key
++types, which policy refuses), and `OP_CHECKMLDSA44`. A leaf that requires both an ML-DSA-44 and a
++Schnorr signature (template S2 of [p2mr-mldsa44.md](p2mr-mldsa44.md) in a leaf of version `0xe0`)
++cannot be spent at all once the checks are disabled.
++
++The rules are a soft fork: for the same parameters and the same parent, a block valid under them
++is valid without them.
++
++## Activation
++
++The rules are a buried deployment, `p2mr_tripwire` in `getdeploymentinfo`. They require P2MR.
++Wherever there are tripwire outputs, the height of the rules is above the height of
++`OP_CHECKMLDSA44`, so that the ML-DSA-44 leaf of a hybrid output (see [Wallets](#wallets)) is
++checked by the time its other leaf can fail.
++
++| Network | Height | Tripwire outputs |
++| --- | --- | --- |
++| Ark-0 signet | `ARK0_TRIPWIRE_HEIGHT` in `src/kernel/chainparams.h` | `ARK0_TRIPWIRE_OUTPOINTS` in `src/kernel/chainparams.cpp` |
++| other custom signets | `-signettripwire` | `-signettripwire` |
++| default signet, testnet3, testnet4, mainnet | never | none |
++| regtest | 0, or `-testactivationheight=p2mr_tripwire@<height>`, or `-signettripwire` | none, or `-signettripwire` |
++
++On the Ark-0 signet (challenge
++`5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`) the height and the
++outputs are rules of that network, fixed in the code; there is no option to change them, and once
++a build that carries them has been published they do not change. **This build does not set them
++yet**: `ARK0_TRIPWIRE_HEIGHT` is `std::numeric_limits<int>::max()` and the list is empty, so the
++rules never apply there. The commit that sets them adds both outputs, created below the height.
++
++Other custom signets, the networks for drills, take two options, which require `-signetchallenge`
++and which the Ark-0 signet refuses:
++
++    -signetmldsa44=<height>
++    -signettripwire=<height>@<txid:vout>[,<txid:vout>...]
++
++`-signetmldsa44` activates `OP_CHECKMLDSA44` from `<height>` (on other custom signets it never
++activates otherwise). `-signettripwire` activates these rules from `<height>` with the outpoints
++given as tripwire outputs; it requires `-signetmldsa44` with a lower height. A node refuses to start
++otherwise. Every node of such a network must use the same values: nodes with different ones
++follow different chains. On regtest `-signettripwire` takes the same form, requires the
++`p2mr_mldsa44` height to be lower, and cannot be combined with
++`-testactivationheight=p2mr_tripwire`. Mainnet and the testnets refuse both options at startup,
++whatever their value, and regtest refuses `-signetmldsa44`, rather than ignore them.
++
++At startup a node logs the rules and their state, for operators to compare:
++
++    Signet P2MR tripwire rules from height <height> in leaf version 0xe0; tripwire outputs <txid:vout> (BIP-341 NUMS) and <txid:vout> (drill key SHA256 <hash>)
++    P2MR tripwire state at height <tip>: tripwire outputs <txid:vout> unspent, <txid:vout> missing; elliptic curve checks in leaf version 0xe0 are disabled for the next block
++
++The labels and key hashes are only known for the outputs the code fixes; for outpoints given by
++an option only the outpoints are logged. On regtest the first line has no `Signet` prefix.
++
++A node without the rules keeps following the chain. A node that upgrades late reads the right
++state from its UTXO set, but does not check again the blocks it accepted before, like any soft
++fork: if one of them broke the rules, the late node stays on a chain that a node with the rules
++from the start rejects.
++
++## Policy
++
++- **Before activation**: while the next block is below the height, the mempool refuses spends
++  through leaves of version `0xe0` at depth one or more, as spends of an unknown leaf version
++  (`Taproot version reserved for soft-fork upgrades`), also with `-acceptnonstdtxn`.
++- **Standardness**: at every height, leaves of version `0xe0` follow the rules of leaves of version
++  `0xc0`: at most 80 bytes per witness element, the exemption of the signature chunks of templates
++  S1 and S2 at their exact sizes, and no other leaf using `OP_CHECKMLDSA44` at depth one or more.
++  Below the height this is stricter than a node without these rules for a spend at depth zero,
++  which nothing executes, with a witness element above 80 bytes: such a node takes it, this one
++  does not. That is policy only, the blocks either accepts are the same, and no transaction in
++  the mempool has to be checked again when the chain reaches the height.
++- **The mempool follows the next block**: script checks of the mempool add
++  `SCRIPT_VERIFY_P2MR_EC_DISABLED` when the confirmed UTXO set leaves a tripwire output missing for
++  the next block. A tripwire spend that is only in the mempool changes nothing. A refused spend
++  reads `mempool-script-verify-flag-failed (Elliptic curve signature checks are disabled in this leaf)`.
++- **When the checks become disabled**: after a block that disables them is connected and the
++  tip updated, every mempool transaction that spends through a leaf of version `0xe0` at depth one
++  or more is checked again with the flags of the next block, its inputs read through the mempool.
++  Those that fail are removed with their descendants; spends through ML-DSA-44 leaves stay. During
++  a reorganization this happens once the transactions of the disconnected blocks are back in the
++  mempool, whenever the checks are disabled for the next block of the new tip, whatever they were
++  before. Each transaction of a package or a TRUC pair is checked on its own; descendants go with
++  their ancestors.
++- **Reorganizations below the height**: when the next block is below the height again, spends
++  through leaves of version `0xe0` at depth one or more are removed, with their descendants.
++- **The other way round**: when a reorganization brings the tripwire outputs back, nothing is
++  removed, and transactions removed earlier are not added back.
++
++## RPC and logs
++
++`gettripwireinfo` returns, from one snapshot of the active chain:
++
++- `tip_hash` and `tip_height`: the tip the state is read at;
++- `height` and `leaf_version` (`"e0"`): the rules;
++- `tripwires`: for each output, `outpoint` and `state`, which is `unspent` (present) or `missing`
++  (spent, never created, or created at or above the height: the UTXO set does not tell them
++  apart). On the Ark-0 signet the outputs the code fixes also have `key` (the x-only key of the
++  leaf) and `label` (`BIP-341 NUMS` or `drill`);
++- `ec_disabled_next_block`: whether the checks are disabled for the next block.
++
++It fails on networks where the rules are not enabled. It does not tell which transaction spent a
++tripwire output; a block explorer can find it in its own index.
++
++The node logs a spend of a tripwire output once the block that spends it is part of the active
++chain, and only there: not for proposals, candidate blocks that turn out invalid, blocks `VerifyDB`
++connects again, or the background chainstate of an assumeutxo snapshot.
++
++    P2MR tripwire <txid:vout> spent by <txid> in block <hash> (height <N>): elliptic curve checks in leaf version 0xe0 are disabled from height <max(height of the rules, N + 1)>
++    P2MR tripwire <txid:vout> spent by <txid> in block <hash> (height <N>): elliptic curve checks in leaf version 0xe0 are already disabled
++
++When the active chain reaches the height of the rules, the node logs their state:
++
++    P2MR tripwire rules active from height <height>, reached by block <hash>: tripwire outputs <txid:vout> unspent, ...; elliptic curve checks in leaf version 0xe0 are enabled for the next block
++
++## Wallets
++
++Bitcoin Core's wallet does not create or sign leaves of version `0xe0`. A wallet that does should:
++
++- use one template, S3: a tree of exactly two leaves, both of version `0xe0` and both at depth one,
++  one `<x-only key> OP_CHECKSIG` and one template S1 of [p2mr-mldsa44.md](p2mr-mldsa44.md). Never a
++  single leaf (depth zero), and never both checks in one leaf;
++- hand out such addresses only once the tip it has observed is at least six blocks past the height
++  of the rules, and refuse when it cannot read the state. On transactions it builds to fund them,
++  set `nLockTime` to the height and the `nSequence` of at least one input below `0xffffffff`, so
++  that no reorganization can confirm them below the height;
++- count an output as constrained only when its tree is exactly S3 and it confirmed at or above the
++  height; one confirmed below the height is not protected;
++- spend through the Schnorr leaf while `ec_disabled_next_block` is false, and through the
++  ML-DSA-44 leaf once it is true. Read the state again before broadcasting, and after a rejection or
++  a spend that left the mempool; decide by the state, not by the text of the rejection.
++
++## Tests
++
++- `src/test/data/script_tests.json`, block `P2MR leaf version 0xe0 tests`, written by
++  `test/util/generate_p2mr_tripwire_script_tests.py`: each combination of
++  `P2MR_TRIPWIRE` and `P2MR_EC_DISABLED`, the order of the checks, depth zero, the annex, the
++  control byte, signatures across leaf versions, and leaves of other versions, P2TR, legacy and
++  witness v0 scripts under `P2MR_EC_DISABLED`.
++- `src/test/data/script_tests.json`, the block above it, `P2MR tripwired leaf (version 0xe0) rows
++  signed by p2mr-ts`: rows signed by another implementation, the TypeScript library
++  [p2mr-ts](https://github.com/duncan0k/p2mr-ts), whose `scripts/generate-tripwire-crossimpl.ts`
++  writes them; the generator above leaves them in place.
++- `src/test/p2mr_tripwire_tests.cpp`: the parameters of each network, the options and the state,
++  and that `ConnectBlock` decides on the view it is given, which the background chainstate of an
++  assumeutxo snapshot relies on and which the functional test cannot show: the regtest snapshot
++  it loads has no spend of a leaf of version `0xe0` in its history.
++- `test/functional/feature_p2mr_tripwire.py`: activation, the trigger, the mempool, reorganizations,
++  the caches, restarts, pruning, assumeutxo, a late upgrade, the logs and the RPC.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index 3e30e01..78f59df 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -7,7 +7,8 @@ This build implements the Pay-to-Merkle-Root (P2MR) spending rules of
+ The scope is the consensus and policy treatment of witness v2 outputs, plus the wallet support
+ needed to receive and spend such outputs. P2MR itself adds no post-quantum signature algorithm;
+ the experimental `OP_CHECKMLDSA44` described in [p2mr-mldsa44.md](p2mr-mldsa44.md) checks ML-DSA-44
+-signatures in P2MR leaves.
++signatures in P2MR leaves, and [p2mr-tripwire.md](p2mr-tripwire.md) describes leaf version `0xe0`,
++whose elliptic curve checks stop working once a tripwire output is spent.
+ 
+ ## Output format
+ 
+@@ -54,7 +55,8 @@ Let `q` be the 32-byte witness program.
+    meaning.
+ 10. For any other leaf version the spend succeeds without executing the script.
+     `SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION` makes this non-standard, so such spends
+-    are rejected by the mempool but accepted in blocks.
++    are rejected by the mempool but accepted in blocks. Leaf version `0xe0` is executed like `0xc0`
++    once the P2MR tripwire rules apply ([p2mr-tripwire.md](p2mr-tripwire.md)).
+ 11. The signature message is the BIP 342 common signature message, unchanged. It commits to the
+     actual `OP_2 <root>` scriptPubKey through the spent scripts hash.
+ 
+@@ -90,8 +92,8 @@ mempool-only failure whenever any non-mandatory flag is set). Script check failu
+ disconnect or ban a peer.
+ 
+ Relay policy for P2MR spends matches Taproot script path spends: witness stack items are limited to
+-`MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE` (80 bytes) for leaf version `0xc0`, and annexes are
+-non-standard.
++`MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE` (80 bytes) for leaf versions `0xc0` and `0xe0`, and annexes
++are non-standard.
+ 
+ ## Wallet support
+ 
+-- 
+2.49.0.windows.1
+

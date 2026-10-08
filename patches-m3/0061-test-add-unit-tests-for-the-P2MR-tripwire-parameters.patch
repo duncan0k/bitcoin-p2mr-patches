@@ -1,0 +1,388 @@
+From 0696b0a32e850e7e7b06bc089a8ff6052158fdad Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 23:34:33 -0600
+Subject: [PATCH 61/65] test: add unit tests for the P2MR tripwire parameters,
+ options and state
+
+p2mr_tripwire_tests checks:
+
+- the heights and tripwire outputs of each network: none yet on Ark-0,
+  never on the other signets, the testnets and mainnet without the
+  option, and genesis without tripwire outputs on regtest unless
+  -testactivationheight moves it;
+- -signetmldsa44 and -signettripwire on a custom signet, with the log of
+  the rules, and every way they are refused: without -signetchallenge,
+  on Ark-0, without -signetmldsa44 or at or below its height, with a
+  malformed value, height 0 or an outpoint named twice;
+- -signettripwire on regtest, which -testactivationheight=p2mr_tripwire
+  cannot accompany and which needs the p2mr_mldsa44 height below it;
+- -signetmldsa44 on mainnet, the testnets and regtest, and
+  -signettripwire on mainnet and the testnets, refused whatever their
+  value;
+- which outputs are present and whether elliptic curve checks fail in
+  the next block: an output never created, created below the height,
+  spent, created again at the height, and created again below it; and
+  never without tripwire outputs;
+- that ConnectBlock reads the state from the view it is given, the UTXO
+  set the block builds on, as the background chainstate of an assumeutxo
+  snapshot needs: a block with a Schnorr spend of a 0xe0 leaf is valid on
+  a view where the tripwire output is present, and invalid on the active
+  chain's, where it is missing.
+---
+ src/test/CMakeLists.txt          |   1 +
+ src/test/p2mr_tripwire_tests.cpp | 331 +++++++++++++++++++++++++++++++
+ 2 files changed, 332 insertions(+)
+ create mode 100644 src/test/p2mr_tripwire_tests.cpp
+
+diff --git a/src/test/CMakeLists.txt b/src/test/CMakeLists.txt
+index 8803cbf..46ed7b1 100644
+--- a/src/test/CMakeLists.txt
++++ b/src/test/CMakeLists.txt
+@@ -74,6 +74,7 @@ add_executable(test_bitcoin
+   node_warnings_tests.cpp
+   orphanage_tests.cpp
+   p2mr_mldsa44_tests.cpp
++  p2mr_tripwire_tests.cpp
+   pcp_tests.cpp
+   peerman_tests.cpp
+   pmt_tests.cpp
+diff --git a/src/test/p2mr_tripwire_tests.cpp b/src/test/p2mr_tripwire_tests.cpp
+new file mode 100644
+index 0000000..4c9425d
+--- /dev/null
++++ b/src/test/p2mr_tripwire_tests.cpp
+@@ -0,0 +1,331 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <chain.h>
++#include <chainparams.h>
++#include <coins.h>
++#include <common/args.h>
++#include <consensus/amount.h>
++#include <consensus/params.h>
++#include <consensus/validation.h>
++#include <deploymentstatus.h>
++#include <kernel/chainparams.h>
++#include <key.h>
++#include <primitives/block.h>
++#include <primitives/transaction.h>
++#include <pubkey.h>
++#include <script/interpreter.h>
++#include <script/script.h>
++#include <sync.h>
++#include <test/util/common.h>
++#include <test/util/logging.h>
++#include <test/util/setup_common.h>
++#include <tinyformat.h>
++#include <uint256.h>
++#include <util/chaintype.h>
++#include <validation.h>
++
++#include <boost/test/unit_test.hpp>
++
++#include <limits>
++#include <memory>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace {
++constexpr int NEVER{std::numeric_limits<int>::max()};
++const std::string ARK0_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"};
++const std::string TXID_A(64, 'a');
++const std::string TXID_B(64, 'b');
++const std::string OUTPOINT_A{TXID_A + ":0"};
++const std::string OUTPOINT_B{TXID_B + ":1"};
++
++std::unique_ptr<const CChainParams> MakeParams(ChainType chain, const std::vector<std::pair<std::string, std::string>>& settings)
++{
++    ArgsManager args;
++    for (const auto& [name, value] : settings) args.ForceSetArg(name, value);
++    return CreateChainParams(args, chain);
++}
++
++void Fails(ChainType chain, const std::vector<std::pair<std::string, std::string>>& settings, const std::string& message)
++{
++    BOOST_CHECK_EXCEPTION(MakeParams(chain, settings), std::runtime_error, HasReason{message});
++}
++
++//! Regtest with two tripwire outputs, rules from height 100.
++struct TripwireTestingSetup : public TestingSetup {
++    TripwireTestingSetup()
++        : TestingSetup{ChainType::REGTEST, {.extra_args = {"-signettripwire=100@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0,"
++                                                           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1"}}} {}
++};
++
++//! The 100 blocks of TestChain100Setup, with rules from height 50 and a tripwire output the chain
++//! never creates.
++struct UncreatedTripwireSetup : public TestChain100Setup {
++    UncreatedTripwireSetup()
++        : TestChain100Setup{ChainType::REGTEST, {.extra_args = {"-signettripwire=50@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0"}}} {}
++};
++} // namespace
++
++BOOST_FIXTURE_TEST_SUITE(p2mr_tripwire_tests, BasicTestingSetup)
++
++// The height and the tripwire outputs are rules of the network they apply to (doc/p2mr-tripwire.md).
++BOOST_AUTO_TEST_CASE(heights)
++{
++    // On Ark-0 neither is set yet, which keeps the rules off there; a commit of its own sets both.
++    BOOST_CHECK_EQUAL(ARK0_TRIPWIRE_HEIGHT, NEVER);
++    const auto ark0{MakeParams(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}})};
++    BOOST_CHECK_EQUAL(ark0->GetConsensus().P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
++    BOOST_CHECK(ark0->GetConsensus().p2mr_tripwires.empty());
++    BOOST_CHECK(!DeploymentEnabled(ark0->GetConsensus(), Consensus::DEPLOYMENT_P2MR_TRIPWIRE));
++
++    // Another signet without the option, the default signet, the testnets and mainnet never activate them.
++    const auto never{[](const std::unique_ptr<const CChainParams>& params) {
++        BOOST_CHECK_EQUAL(params->GetConsensus().P2MRTripwireHeight, NEVER);
++        BOOST_CHECK(params->GetConsensus().p2mr_tripwires.empty());
++    }};
++    never(MakeParams(ChainType::SIGNET, {{"-signetchallenge", "51"}}));
++    never(MakeParams(ChainType::SIGNET, {}));
++    never(MakeParams(ChainType::MAIN, {}));
++    never(MakeParams(ChainType::TESTNET, {}));
++    never(MakeParams(ChainType::TESTNET4, {}));
++
++    // Regtest executes leaf version 0xe0 from genesis, without tripwire outputs, unless
++    // -testactivationheight moves it.
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {})->GetConsensus().P2MRTripwireHeight, 0);
++    BOOST_CHECK(MakeParams(ChainType::REGTEST, {})->GetConsensus().p2mr_tripwires.empty());
++    const auto moved{MakeParams(ChainType::REGTEST, {{"-testactivationheight", "p2mr_tripwire@7"}})};
++    BOOST_CHECK_EQUAL(moved->GetConsensus().DeploymentHeight(Consensus::DEPLOYMENT_P2MR_TRIPWIRE), 7);
++    BOOST_CHECK(moved->GetConsensus().p2mr_tripwires.empty());
++}
++
++BOOST_AUTO_TEST_CASE(signet_options)
++{
++    std::unique_ptr<const CChainParams> params;
++    {
++        ASSERT_DEBUG_LOG("Signet P2MR tripwire rules from height 10 in leaf version 0xe0; tripwire outputs " + OUTPOINT_A + " and " + OUTPOINT_B);
++        params = MakeParams(ChainType::SIGNET, {{"-signetchallenge", "51"}, {"-signetmldsa44", "5"}, {"-signettripwire", "10@" + OUTPOINT_A + "," + OUTPOINT_B}});
++    }
++    const Consensus::Params& consensus{params->GetConsensus()};
++    BOOST_CHECK_EQUAL(consensus.P2MRMLDSA44Height, 5);
++    BOOST_CHECK_EQUAL(consensus.P2MRTripwireHeight, 10);
++    BOOST_REQUIRE_EQUAL(consensus.p2mr_tripwires.size(), 2U);
++    BOOST_CHECK(consensus.p2mr_tripwires[0].outpoint == COutPoint(*Txid::FromHex(TXID_A), 0));
++    BOOST_CHECK(consensus.p2mr_tripwires[1].outpoint == COutPoint(*Txid::FromHex(TXID_B), 1));
++    // An outpoint does not tell the key its output's leaf checks.
++    for (const auto& tripwire : consensus.p2mr_tripwires) BOOST_CHECK(tripwire.key.empty() && tripwire.label.empty());
++
++    // -signetmldsa44 on its own activates OP_CHECKMLDSA44 and nothing else.
++    const auto mldsa44{MakeParams(ChainType::SIGNET, {{"-signetchallenge", "51"}, {"-signetmldsa44", "5"}})};
++    BOOST_CHECK_EQUAL(mldsa44->GetConsensus().P2MRMLDSA44Height, 5);
++    BOOST_CHECK_EQUAL(mldsa44->GetConsensus().P2MRTripwireHeight, NEVER);
++
++    const std::pair<std::string, std::string> challenge{"-signetchallenge", "51"}, m1{"-signetmldsa44", "5"};
++    Fails(ChainType::SIGNET, {{"-signetmldsa44", "5"}}, "-signetmldsa44 requires -signetchallenge.");
++    Fails(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}, m1},
++          "-signetmldsa44 cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++    Fails(ChainType::SIGNET, {challenge, {"-signetmldsa44", "x"}}, "-signetmldsa44 must be a height, not 'x'.");
++    Fails(ChainType::SIGNET, {challenge, {"-signetmldsa44", "0"}}, "-signetmldsa44 height must be at least 1 and below 2147483647, not 0.");
++    Fails(ChainType::SIGNET, {{"-signettripwire", "10@" + OUTPOINT_A}}, "-signettripwire requires -signetchallenge.");
++    Fails(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}, {"-signettripwire", "10@" + OUTPOINT_A}},
++          "-signettripwire cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++    // Leaf version 0xe0 needs OP_CHECKMLDSA44 active below its own height.
++    Fails(ChainType::SIGNET, {challenge, {"-signettripwire", "10@" + OUTPOINT_A}}, "-signettripwire requires -signetmldsa44.");
++    Fails(ChainType::SIGNET, {challenge, {"-signetmldsa44", "10"}, {"-signettripwire", "10@" + OUTPOINT_A}},
++          "-signettripwire height must be above the -signetmldsa44 height 10, not 10.");
++    for (const std::string& value : {std::string{"10"}, std::string{"10@"}, "@" + OUTPOINT_A, "x@" + OUTPOINT_A, "10@" + TXID_A,
++                                     "10@" + TXID_A + ":x", "10@" + TXID_A + ":-1", "10@" + TXID_A.substr(2) + ":0",
++                                     "10@" + OUTPOINT_A + ",", "10@" + OUTPOINT_A + ";" + OUTPOINT_B}) {
++        Fails(ChainType::SIGNET, {challenge, m1, {"-signettripwire", value}},
++              "-signettripwire must be <height>@<txid:vout>[,<txid:vout>...], not '" + value + "'.");
++    }
++    Fails(ChainType::SIGNET, {challenge, m1, {"-signettripwire", "0@" + OUTPOINT_A}},
++          "-signettripwire height must be at least 1 and below 2147483647, not 0.");
++    Fails(ChainType::SIGNET, {challenge, m1, {"-signettripwire", "10@" + OUTPOINT_A + "," + OUTPOINT_A}},
++          "-signettripwire names " + OUTPOINT_A + " more than once.");
++}
++
++BOOST_AUTO_TEST_CASE(regtest_options)
++{
++    std::unique_ptr<const CChainParams> params;
++    {
++        ASSERT_DEBUG_LOG("P2MR tripwire rules from height 5 in leaf version 0xe0; tripwire outputs " + OUTPOINT_A);
++        params = MakeParams(ChainType::REGTEST, {{"-signettripwire", "5@" + OUTPOINT_A}});
++    }
++    BOOST_CHECK_EQUAL(params->GetConsensus().P2MRTripwireHeight, 5);
++    BOOST_REQUIRE_EQUAL(params->GetConsensus().p2mr_tripwires.size(), 1U);
++    BOOST_CHECK(params->GetConsensus().p2mr_tripwires[0].outpoint == COutPoint(*Txid::FromHex(TXID_A), 0));
++
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_tripwire@7"}, {"-signettripwire", "5@" + OUTPOINT_A}},
++          "-signettripwire sets the height of p2mr_tripwire, which -testactivationheight cannot set too.");
++    // OP_CHECKMLDSA44 is active from genesis on regtest, unless -testactivationheight moves it.
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_mldsa44@5"}, {"-signettripwire", "5@" + OUTPOINT_A}},
++          "-signettripwire height must be above the p2mr_mldsa44 height 5, not 5.");
++    Fails(ChainType::REGTEST, {{"-signettripwire", "0@" + OUTPOINT_A}},
++          "-signettripwire height must be at least 1 and below 2147483647, not 0.");
++}
++
++// On the chains they are not for, the options are refused whatever their value, not ignored.
++BOOST_AUTO_TEST_CASE(options_elsewhere)
++{
++    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4, ChainType::REGTEST}) {
++        Fails(chain, {{"-signetmldsa44", "5"}}, "-signetmldsa44 can only be used with signet.");
++        Fails(chain, {{"-signetmldsa44", "garbage"}}, "-signetmldsa44 can only be used with signet.");
++    }
++    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4}) {
++        Fails(chain, {{"-signettripwire", "10@" + OUTPOINT_A}}, "-signettripwire can only be used with signet or regtest.");
++        Fails(chain, {{"-signettripwire", "garbage"}}, "-signettripwire can only be used with signet or regtest.");
++    }
++}
++
++// A tripwire output is present while it is unspent and was created below the height of the rules;
++// from that height on, a missing one makes elliptic curve checks in leaf version 0xe0 fail.
++BOOST_FIXTURE_TEST_CASE(state, TripwireTestingSetup)
++{
++    const ChainstateManager& chainman{*m_node.chainman};
++    const Consensus::Params& params{chainman.GetConsensus()};
++    BOOST_REQUIRE_EQUAL(params.P2MRTripwireHeight, 100);
++    BOOST_REQUIRE_EQUAL(params.p2mr_tripwires.size(), 2U);
++    const COutPoint a{params.p2mr_tripwires[0].outpoint};
++    const COutPoint b{params.p2mr_tripwires[1].outpoint};
++
++    // Tips whose next block is just below the height, and at it.
++    CBlockIndex below;
++    below.nHeight = 98;
++    CBlockIndex at;
++    at.nHeight = 99;
++
++    CCoinsView empty;
++    CCoinsViewCache coins{&empty};
++    const auto describe{[&](const std::string& state_a, const std::string& state_b, const std::string& checks) {
++        return strprintf("tripwire outputs %s:0 %s, %s:1 %s; elliptic curve checks in leaf version 0xe0 are %s for the next block",
++                         TXID_A, state_a, TXID_B, state_b, checks);
++    }};
++
++    // Outputs that were never created are missing: the rules fail closed, from their height on.
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, a, params));
++    BOOST_CHECK(!P2MRECDisabledAfter(&below, coins, chainman));
++    BOOST_CHECK(P2MRECDisabledAfter(&at, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRTripwireState(&at, coins, chainman), describe("missing", "missing", "disabled"));
++
++    // Created below the height and unspent, they are present.
++    const CTxOut output{1000, CScript{} << OP_TRUE};
++    coins.AddCoin(a, Coin{output, 50, false}, false);
++    coins.AddCoin(b, Coin{output, 99, false}, false);
++    BOOST_CHECK(IsP2MRTripwirePresent(coins, a, params));
++    BOOST_CHECK(IsP2MRTripwirePresent(coins, b, params));
++    BOOST_CHECK(!P2MRECDisabledAfter(&at, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRTripwireState(&at, coins, chainman), describe("unspent", "unspent", "enabled"));
++
++    // One spent is enough, from the height on.
++    BOOST_CHECK(coins.SpendCoin(b));
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, b, params));
++    BOOST_CHECK(!P2MRECDisabledAfter(&below, coins, chainman));
++    BOOST_CHECK(P2MRECDisabledAfter(&at, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRTripwireState(&at, coins, chainman), describe("unspent", "missing", "disabled"));
++
++    // Created again at the height or above, as after a deep reorganization, it stays missing.
++    coins.AddCoin(b, Coin{output, 100, false}, false);
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, b, params));
++    BOOST_CHECK(P2MRECDisabledAfter(&at, coins, chainman));
++
++    // Only the output created below the height counts again.
++    BOOST_CHECK(coins.SpendCoin(b));
++    coins.AddCoin(b, Coin{output, 99, false}, false);
++    BOOST_CHECK(IsP2MRTripwirePresent(coins, b, params));
++    BOOST_CHECK(!P2MRECDisabledAfter(&at, coins, chainman));
++}
++
++// Without tripwire outputs, as on regtest by default, elliptic curve checks never fail.
++BOOST_FIXTURE_TEST_CASE(no_tripwires, RegTestingSetup)
++{
++    const ChainstateManager& chainman{*m_node.chainman};
++    BOOST_REQUIRE_EQUAL(chainman.GetConsensus().P2MRTripwireHeight, 0);
++    BOOST_REQUIRE(chainman.GetConsensus().p2mr_tripwires.empty());
++    CBlockIndex tip;
++    tip.nHeight = 500;
++    CCoinsView empty;
++    CCoinsViewCache coins{&empty};
++    BOOST_CHECK(!P2MRECDisabledAfter(&tip, coins, chainman));
++}
++
++// ConnectBlock reads the state from the view it is given, the UTXO set the block builds on, not
++// from the active chain: the background chainstate of an assumeutxo snapshot connects blocks the
++// active chain has passed, on its own coins (doc/p2mr-tripwire.md).
++BOOST_FIXTURE_TEST_CASE(state_from_view, UncreatedTripwireSetup)
++{
++    ChainstateManager& chainman{*m_node.chainman};
++    const Consensus::Params& params{chainman.GetConsensus()};
++    BOOST_REQUIRE_EQUAL(params.p2mr_tripwires.size(), 1U);
++    const COutPoint tripwire{params.p2mr_tripwires[0].outpoint};
++    BOOST_REQUIRE(tripwire == COutPoint(*Txid::FromHex(TXID_A), 0));
++
++    // A P2MR output of two leaves at depth one, <key> OP_CHECKSIG of version 0xe0 and OP_RETURN,
++    // funded in block 101.
++    const XOnlyPubKey key{coinbaseKey.GetPubKey()};
++    const CScript leaf{CScript{} << ToByteVector(key) << OP_CHECKSIG};
++    const uint256 leaf_hash{ComputeTapleafHash(P2MR_LEAF_TRIPWIRED, leaf)};
++    const uint256 fail_hash{ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << OP_RETURN)};
++    const CScript script_pubkey{CScript{} << OP_2 << ToByteVector(ComputeTapbranchHash(leaf_hash, fail_hash))};
++    const CMutableTransaction funding{CreateValidMempoolTransaction(m_coinbase_txns[0], 0, /*input_height=*/1, coinbaseKey,
++                                                                    script_pubkey, 1 * COIN, /*submit=*/false)};
++    CreateAndProcessBlock({funding}, CScript{} << OP_TRUE);
++
++    // Block 102 spends it through the leaf of version 0xe0, with a Schnorr signature.
++    CMutableTransaction spend;
++    spend.vin.emplace_back(COutPoint{funding.GetHash(), 0});
++    spend.vout.emplace_back(funding.vout[0].nValue - 1000, CScript{} << OP_TRUE);
++    PrecomputedTransactionData txdata;
++    txdata.Init(spend, {funding.vout[0]}, /*force=*/true);
++    ScriptExecutionData execdata;
++    execdata.m_annex_init = true;
++    execdata.m_annex_present = false;
++    execdata.m_tapleaf_hash = leaf_hash;
++    execdata.m_tapleaf_hash_init = true;
++    execdata.m_codeseparator_pos = 0xFFFFFFFF;
++    execdata.m_codeseparator_pos_init = true;
++    uint256 sighash;
++    BOOST_REQUIRE(SignatureHashSchnorr(sighash, execdata, spend, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL));
++    std::vector<unsigned char> sig(64);
++    BOOST_REQUIRE(coinbaseKey.SignSchnorr(sighash, sig, /*merkle_root=*/nullptr, /*aux=*/uint256{}));
++    std::vector<unsigned char> control{static_cast<unsigned char>(P2MR_LEAF_TRIPWIRED | 1)};
++    control.insert(control.end(), fail_hash.begin(), fail_hash.end());
++    spend.vin[0].scriptWitness.stack = {sig, std::vector<unsigned char>(leaf.begin(), leaf.end()), control};
++    const CBlock block{CreateBlock({spend}, CScript{} << OP_TRUE, chainman.ActiveChainstate())};
++
++    LOCK(cs_main);
++    Chainstate& chainstate{chainman.ActiveChainstate()};
++    CBlockIndex* tip{chainstate.m_chain.Tip()};
++    BOOST_REQUIRE_EQUAL(tip->nHeight, 101);
++    // As TestBlockValidity checks a block: on a dummy index, with a cache on top of the coins.
++    const uint256 hash{block.GetHash()};
++    CBlockIndex index{block};
++    index.pprev = tip;
++    index.nHeight = tip->nHeight + 1;
++    index.phashBlock = &hash;
++
++    // In a view where the tripwire output is present, created below the height and unspent, the
++    // signature check executes and the block is valid.
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        view.AddCoin(tripwire, Coin{CTxOut{1000, CScript{} << OP_TRUE}, 1, false}, /*possible_overwrite=*/false);
++        BOOST_REQUIRE(!P2MRECDisabledAfter(tip, view, chainman));
++        BlockValidationState state;
++        const bool valid{chainstate.ConnectBlock(block, state, &index, view, /*fJustCheck=*/true)};
++        BOOST_CHECK_MESSAGE(valid, state.ToString());
++    }
++    // In the active chain's, where it is missing, the same block fails, past the caches the first
++    // check filled.
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        BOOST_REQUIRE(P2MRECDisabledAfter(tip, view, chainman));
++        BlockValidationState state;
++        BOOST_CHECK(!chainstate.ConnectBlock(block, state, &index, view, /*fJustCheck=*/true));
++        BOOST_CHECK_EQUAL(state.GetRejectReason(), "block-script-verify-flag-failed (Elliptic curve signature checks are disabled in this leaf)");
++    }
++}
++
++BOOST_AUTO_TEST_SUITE_END()
+-- 
+2.49.0.windows.1
+

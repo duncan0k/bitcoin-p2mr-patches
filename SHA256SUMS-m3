@@ -1,0 +1,11 @@
+e511eae0a3cf6ba77bb4b10568ad6e326a5acdca65156d45fc8aa649688ceec6 *0055-script-add-P2MR-leaf-version-0xe0-whose-elliptic-cur.patch
+650668878fb3fb27d76b26d88725a922bab32db8ef01aa59a9c53ade5d0681a0 *0056-consensus-deploy-P2MR-leaf-version-0xe0-with-tripwir.patch
+508110835746c602a450c390d8a8c03c2a96d18dcfdb27f2503543961908cd9c *0057-validation-fail-elliptic-curve-checks-in-leaf-versio.patch
+ced0beb476a09d6ecc438f45419d2da82b22fcbd56613fc43a35ab4ac4fb7e6a *0058-policy-relay-spends-of-leaf-version-0xe0-once-active.patch
+fb89a199b7d865ed58ab7a99aa80f68f38c421865af5151f9bd0e46c705fe8b7 *0059-rpc-validation-report-the-tripwire-outputs-gettripwi.patch
+c731783ca951cd48450a7a1c2ebf38a38a6bbf4facaf5d9ceea782e3e1ea1dc2 *0060-test-add-script-tests-for-P2MR-leaf-version-0xe0.patch
+c83904c78ec7f6d215cfcd5583f808f4e2a42bd5e64907b96f3848a8f9ec3f3b *0061-test-add-unit-tests-for-the-P2MR-tripwire-parameters.patch
+5a3c01c2633c453115dd2c76471838b89d17c6fc398b47be017170eba09ba5f5 *0062-test-add-P2MR-leaf-version-0xe0-script-test-rows-sig.patch
+c74ce2ed0b182b542a769c6c84bdb9097f46854a0006fb6cb1b8f5560733b128 *0063-test-add-feature_p2mr_tripwire.py.patch
+7615c8eaec8dd8d1fc49d08502ba9471377b5d319d3815425863344f5c9ec197 *0064-doc-describe-P2MR-leaf-version-0xe0-and-its-tripwire.patch
+0a4b8ef002be2b4e4e3ddcdfb55c2d3369871011d755b7b29c7916d45769cca1 *0065-consensus-set-the-two-P2MR-tripwire-outputs-of-the-A.patch

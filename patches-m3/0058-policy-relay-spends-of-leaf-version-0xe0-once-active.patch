@@ -1,0 +1,332 @@
+From e4914821fbd4b2c568ef63285320cba23d450537 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 22:37:23 -0600
+Subject: [PATCH 58/65] policy: relay spends of leaf version 0xe0 once active,
+ and check them again when a tripwire goes
+
+- SCRIPT_VERIFY_P2MR_TRIPWIRE joins the mandatory, and so the standard,
+  script verification flags, but the mempool leaves it out while the next
+  block is below the activation height. There leaf version 0xe0 is still an
+  unknown leaf version, and DISCOURAGE_UPGRADABLE_TAPROOT_VERSION keeps every
+  spend through one at depth one or more out of the mempool, -acceptnonstdtxn
+  or not. SCRIPT_VERIFY_P2MR_EC_DISABLED is not a deployment and is in
+  neither set.
+- Both script checks of the mempool add SCRIPT_VERIFY_P2MR_EC_DISABLED when
+  elliptic curve checks in such leaves fail in the next block, which they
+  read from the confirmed UTXO set: a tripwire output spent only in the
+  mempool changes nothing until a block confirms the spend. A spend that
+  fails is refused with "mempool-script-verify-flag-failed (Elliptic curve
+  signature checks are disabled in this leaf)". The script execution cache
+  keys on the flags and the new check comes before the signature cache, so
+  neither cache carries a result across the change.
+- When a block makes those checks fail for the next one, the spends through
+  such leaves in the mempool are checked again under the mempool's flags for
+  the next block, their inputs read through the mempool, and those that fail
+  are removed with their descendants by the existing removeForReorg. A block
+  connected on its own does this in ConnectTip, after the coins, the mempool
+  and the tip all are the block's. During a reorganization ConnectTip does
+  not: the parents some spends need are in disconnectpool then, out of the
+  mempool's reach, which could let a spend through or remove a valid one,
+  and the lock points of other transactions can still refer to a
+  disconnected block, which removeForReorg asserts against.
+  MaybeUpdateMempoolForReorg does it instead, once it has put the
+  disconnected transactions back and mended the dependencies and the lock
+  points, whenever the reorganized chain leaves the checks failing,
+  whatever they did before, so that a resurrected parent's elliptic curve
+  child goes too. ActivateBestChainStep tells ConnectTip whether it
+  disconnected blocks first: disconnectpool cannot tell, since a block
+  connected may confirm every transaction of the one it replaces and leave
+  it empty.
+- A reorganization that puts the next block below the activation height
+  removes the spends through leaf version 0xe0 at depth one or more with
+  their descendants, as one below the height of OP_CHECKMLDSA44 removes the
+  spends that execute that opcode, which now looks at leaves of version 0xe0
+  as well.
+- P2MR spends through leaf version 0xe0 have the standardness rules of 0xc0
+  at every height: 80-byte witness elements, except for the signature chunks
+  of the two OP_CHECKMLDSA44 templates, byte for byte, at depth one or more;
+  any other script that uses the opcode is not standard. Below the
+  activation height that is stricter than a build without these rules for a
+  spend at depth zero, which nothing executes, with a witness element above
+  80 bytes. It is policy only, and it leaves the mempool without a boundary
+  at the activation height past which the transactions in it would have to
+  be checked again.
+
+The flags the mempool checks with are now in one place, MempoolScriptFlags,
+which PolicyScriptChecks and the checks above share.
+---
+ src/policy/policy.cpp |   9 ++-
+ src/policy/policy.h   |   3 +-
+ src/validation.cpp    | 134 +++++++++++++++++++++++++++++++++++++-----
+ src/validation.h      |   3 +-
+ 4 files changed, 130 insertions(+), 19 deletions(-)
+
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index c948c5c..89d0447 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -405,8 +405,13 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 // Control block must be 1 + 32m bytes with m <= 128; already invalid by consensus rules
+                 return false;
+             }
+-            if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
+-                // Leaf version 0xc0 (aka Tapscript, see BIP 342)
++            const uint8_t leaf_version{static_cast<uint8_t>(control_block[0] & TAPROOT_LEAF_MASK)};
++            if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || leaf_version == P2MR_LEAF_TRIPWIRED) {
++                // Leaf version 0xc0 (aka Tapscript, see BIP 342), and 0xe0, which executes as 0xc0 does once
++                // the P2MR tripwire rules apply (doc/p2mr-tripwire.md). Before that, the mempool's script checks
++                // turn its spends at depth one or more away as spends of an unknown leaf version. The limits
++                // below hold at every height, at depth zero too, where a node without these rules has none:
++                // policy with no boundary at that height, past which the mempool would need checking again.
+                 // A leaf that is executed (m >= 1) may use OP_CHECKMLDSA44 only as one of its two templates,
+                 // whose ML-DSA-44 signature chunks may then have their sizes (doc/p2mr-mldsa44.md).
+                 std::optional<size_t> sig_chunks_at;
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index 4aa8dcc..d249515 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -110,7 +110,8 @@ static constexpr script_verify_flags MANDATORY_SCRIPT_VERIFY_FLAGS{SCRIPT_VERIFY
+                                                              SCRIPT_VERIFY_WITNESS |
+                                                              SCRIPT_VERIFY_TAPROOT |
+                                                              SCRIPT_VERIFY_P2MR |
+-                                                             SCRIPT_VERIFY_P2MR_MLDSA44};
++                                                             SCRIPT_VERIFY_P2MR_MLDSA44 |
++                                                             SCRIPT_VERIFY_P2MR_TRIPWIRE};
+ 
+ /**
+  * Standard script verification flags that standard transactions will comply
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 8039c55..bc24b4c 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -298,23 +298,88 @@ static bool IsCurrentForFeeEstimation(Chainstate& active_chainstate) EXCLUSIVE_L
+     return true;
+ }
+ 
+-/** Whether an input of the transaction executes a P2MR leaf (leaf version 0xc0, depth one or
+- *  more) that has OP_CHECKMLDSA44 among its opcodes (doc/p2mr-mldsa44.md). */
+-static bool SpendsP2MRMLDSA44Leaf(const CTransaction& tx, const CCoinsView& view)
++/** Whether an input of the transaction spends a P2MR output through a leaf at depth one or more
++ *  whose leaf version and script `match` accepts. */
++template <typename F>
++static bool SpendsP2MRLeaf(const CTransaction& tx, const CCoinsView& view, F match)
+ {
+     for (const CTxIn& txin : tx.vin) {
+         std::span<const std::vector<unsigned char>> stack{txin.scriptWitness.stack};
+         if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) stack = stack.first(stack.size() - 1);
+         if (stack.size() < 2) continue;
+         const std::vector<unsigned char>& control{stack.back()};
+-        if (control.size() <= P2MR_CONTROL_BASE_SIZE || (control[0] & TAPROOT_LEAF_MASK) != TAPROOT_LEAF_TAPSCRIPT) continue;
+-        if (!HasMLDSA44Opcode(stack[stack.size() - 2])) continue;
++        if (control.size() <= P2MR_CONTROL_BASE_SIZE || !match(control[0] & TAPROOT_LEAF_MASK, stack[stack.size() - 2])) continue;
+         const std::optional<Coin> coin{view.GetCoin(txin.prevout)};
+         if (coin && coin->out.scriptPubKey.IsPayToMerkleRoot()) return true;
+     }
+     return false;
+ }
+ 
++/** Whether an input of the transaction executes a P2MR leaf (leaf version 0xc0, or 0xe0, depth one
++ *  or more) that has OP_CHECKMLDSA44 among its opcodes (doc/p2mr-mldsa44.md). */
++static bool SpendsP2MRMLDSA44Leaf(const CTransaction& tx, const CCoinsView& view)
++{
++    return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char> script) {
++        return (leaf_version == TAPROOT_LEAF_TAPSCRIPT || leaf_version == P2MR_LEAF_TRIPWIRED) && HasMLDSA44Opcode(script);
++    });
++}
++
++/** Whether an input of the transaction spends a P2MR output through a leaf of version 0xe0 at depth
++ *  one or more, which executes once the P2MR tripwire rules apply (doc/p2mr-tripwire.md). */
++static bool SpendsP2MRTripwiredLeaf(const CTransaction& tx, const CCoinsView& view)
++{
++    return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char>) {
++        return leaf_version == P2MR_LEAF_TRIPWIRED;
++    });
++}
++
++/** The script verification flags the mempool checks a transaction with: the standard ones, as they
++ *  apply to the block after `tip`, whose UTXO set `coins` is. */
++static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoinsView& coins, const ChainstateManager& chainman)
++{
++    script_verify_flags flags{STANDARD_SCRIPT_VERIFY_FLAGS};
++    // Until OP_CHECKMLDSA44 is active for the next block, its byte stays the OP_SUCCESSx that
++    // DISCOURAGE_OP_SUCCESS keeps out of the mempool, whatever the signature
++    // (doc/p2mr-mldsa44.md): a P2MR leaf that is not yet protected is not relayed as if it were.
++    if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
++        flags &= ~SCRIPT_VERIFY_P2MR_MLDSA44;
++    }
++    // Likewise, until leaf version 0xe0 executes in the next block, it stays the unknown leaf version
++    // that DISCOURAGE_UPGRADABLE_TAPROOT_VERSION keeps out of the mempool (doc/p2mr-tripwire.md).
++    if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
++        flags &= ~SCRIPT_VERIFY_P2MR_TRIPWIRE;
++    }
++    // Elliptic curve checks in those leaves fail as they will in the next block. Whether a tripwire
++    // output is missing is read from the confirmed UTXO set: a spend of one that is only in the
++    // mempool changes nothing until a block confirms it.
++    if (P2MRECDisabledAfter(tip, coins, chainman)) {
++        flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
++    }
++    return flags;
++}
++
++/**
++ * Whether a mempool transaction that spends a P2MR leaf of version 0xe0 fails the script checks
++ * under `flags`, the mempool's for the next block, once elliptic curve checks in such leaves fail
++ * there (doc/p2mr-tripwire.md). Its inputs are read through `view`, the confirmed UTXO set with the
++ * mempool on top, which the caller has made consistent with the chain. Every other transaction
++ * passes untouched.
++ */
++static bool TripwiredSpendFails(const CTransaction& tx, CCoinsViewMemPool& view, script_verify_flags flags, ValidationCache& validation_cache)
++    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
++{
++    AssertLockHeld(::cs_main);
++    if (!SpendsP2MRTripwiredLeaf(tx, view)) return false;
++    CCoinsViewCache inputs{&view};
++    // An input that cannot be read cannot be checked, and the next block could not include the
++    // transaction either.
++    if (!std::ranges::all_of(tx.vin, [&](const CTxIn& txin) { return inputs.HaveCoin(txin.prevout); })) return true;
++    PrecomputedTransactionData txdata;
++    TxValidationState state;
++    // As PolicyScriptChecks checks a transaction.
++    return !CheckInputScripts(tx, state, inputs, flags, /*cacheSigStore=*/true, /*cacheFullScriptStore=*/false, txdata, validation_cache);
++}
++
+ void Chainstate::MaybeUpdateMempoolForReorg(
+     DisconnectedBlockTransactions& disconnectpool,
+     bool fAddToMempool)
+@@ -361,6 +426,19 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // there would include them without the protection they were accepted under.
+     const bool remove_mldsa44_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44) &&
+                                      !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)};
++    // Likewise below its activation height leaf version 0xe0 is an unknown leaf version again, which
++    // executes nothing (doc/p2mr-tripwire.md): its spends at depth one or more are removed.
++    const bool remove_tripwired_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE) &&
++                                       !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)};
++    // And where the reorganized chain leaves elliptic curve checks in such leaves failing for the
++    // next block, every spend through one is checked again, whatever the state was before: ConnectTip
++    // checks none during a reorganization, because the parents some of these spends need were in
++    // disconnectpool, out of reach, and the lock points of other transactions could still refer to
++    // a disconnected block. The parents are back now, the dependencies are mended, and the filter
++    // below mends the lock points of the transactions it keeps.
++    const bool recheck_tripwired_spends{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
++    const script_verify_flags tripwired_flags{recheck_tripwired_spends ? MempoolScriptFlags(m_chain.Tip(), CoinsTip(), m_chainman) : SCRIPT_VERIFY_NONE};
++    CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
+ 
+     // Predicate to use for filtering transactions in removeForReorg.
+     // Checks whether the transaction is still final and, if it spends a coinbase output, mature.
+@@ -375,7 +453,9 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+         AssertLockHeld(::cs_main);
+         const CTransaction& tx = it->GetTx();
+ 
+-        if (remove_mldsa44_spends && SpendsP2MRMLDSA44Leaf(tx, CCoinsViewMemPool{&CoinsTip(), *m_mempool})) return true;
++        if (remove_mldsa44_spends && SpendsP2MRMLDSA44Leaf(tx, mempool_view)) return true;
++        if (remove_tripwired_spends && SpendsP2MRTripwiredLeaf(tx, mempool_view)) return true;
++        if (recheck_tripwired_spends && TripwiredSpendFails(tx, mempool_view, tripwired_flags, m_chainman.m_validation_cache)) return true;
+ 
+         // The transaction must be final.
+         if (!CheckFinalTxAtTip(*Assert(m_chain.Tip()), tx)) return true;
+@@ -1169,13 +1249,7 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
+     const CTransaction& tx = *ws.m_ptx;
+     TxValidationState& state = ws.m_state;
+ 
+-    script_verify_flags scriptVerifyFlags{STANDARD_SCRIPT_VERIFY_FLAGS};
+-    // Until OP_CHECKMLDSA44 is active for the next block, its byte stays the OP_SUCCESSx that
+-    // DISCOURAGE_OP_SUCCESS keeps out of the mempool, whatever the signature
+-    // (doc/p2mr-mldsa44.md): a P2MR leaf that is not yet protected is not relayed as if it were.
+-    if (!DeploymentActiveAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
+-        scriptVerifyFlags &= ~SCRIPT_VERIFY_P2MR_MLDSA44;
+-    }
++    const script_verify_flags scriptVerifyFlags{MempoolScriptFlags(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)};
+ 
+     // Check input scripts and signatures.
+     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
+@@ -1215,6 +1289,12 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
+     // invalid blocks (using TestBlockValidity), however allowing such
+     // transactions into the mempool can be exploited as a DoS attack.
+     script_verify_flags currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
++    // Elliptic curve checks in P2MR leaves of version 0xe0 fail as in PolicyScriptChecks, as they will
++    // in the next block (doc/p2mr-tripwire.md). Where the tip is just below the activation height
++    // the flags above leave such leaves unexecuted, and the flag added here has nothing to act on.
++    if (P2MRECDisabledAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)) {
++        currentBlockScriptVerifyFlags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
++    }
+     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
+                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
+         LogError("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s", hash.ToString(), state.ToString());
+@@ -3125,6 +3205,9 @@ public:
+  * Connect a new block to m_chain. block_to_connect is either nullptr or a pointer to a CBlock
+  * corresponding to pindexNew, to bypass loading it again from disk.
+  *
++ * reorganizing tells whether the same step of ActivateBestChain disconnected blocks before this
++ * one, so that MaybeUpdateMempoolForReorg runs once it has connected its blocks.
++ *
+  * The block is added to connectTrace if connection succeeds.
+  */
+ bool Chainstate::ConnectTip(
+@@ -3132,12 +3215,16 @@ bool Chainstate::ConnectTip(
+     CBlockIndex* pindexNew,
+     std::shared_ptr<const CBlock> block_to_connect,
+     ConnectTrace& connectTrace,
+-    DisconnectedBlockTransactions& disconnectpool)
++    DisconnectedBlockTransactions& disconnectpool,
++    bool reorganizing)
+ {
+     AssertLockHeld(cs_main);
+     if (m_mempool) AssertLockHeld(m_mempool->cs);
+ 
+     assert(pindexNew->pprev == m_chain.Tip());
++    // Whether elliptic curve checks in P2MR leaves of version 0xe0 fail in this block, before it
++    // changes the UTXO set they depend on (doc/p2mr-tripwire.md).
++    const bool ec_disabled_before{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
+     // Read block from disk.
+     const auto time_1{SteadyClock::now()};
+     if (!block_to_connect) {
+@@ -3204,6 +3291,23 @@ bool Chainstate::ConnectTip(
+     m_chainman.UpdateIBDStatus();
+     UpdateTip(pindexNew);
+ 
++    // When this block makes elliptic curve checks in P2MR leaves of version 0xe0 fail for the next one,
++    // check the spends through such leaves in the mempool again, now that the coins and the tip are
++    // both this block's (doc/p2mr-tripwire.md). Those that fail go, with their descendants. During a
++    // reorganization MaybeUpdateMempoolForReorg does this instead, after it has put the transactions
++    // of the disconnected blocks back, since the inputs of some spends are among them, and mended the
++    // lock points that refer to those blocks. The caller tells whether this is one: disconnectpool
++    // can be empty by now, once the blocks connected have confirmed all it held.
++    if (m_mempool && !reorganizing && !ec_disabled_before && P2MRECDisabledAfter(pindexNew, CoinsTip(), m_chainman)) {
++        const script_verify_flags flags{MempoolScriptFlags(pindexNew, CoinsTip(), m_chainman)};
++        CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
++        m_mempool->removeForReorg(m_chain, [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
++            AssertLockHeld(m_mempool->cs);
++            AssertLockHeld(::cs_main);
++            return TripwiredSpendFails(it->GetTx(), mempool_view, flags, m_chainman.m_validation_cache);
++        });
++    }
++
+     const auto time_6{SteadyClock::now()};
+     m_chainman.time_post_connect += time_6 - time_5;
+     m_chainman.time_total += time_6 - time_1;
+@@ -3358,7 +3462,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
+ 
+         // Connect new blocks.
+         for (CBlockIndex* pindexConnect : vpindexToConnect | std::views::reverse) {
+-            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
++            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool, /*reorganizing=*/fBlocksDisconnected)) {
+                 if (state.IsInvalid()) {
+                     // The block violates a consensus rule.
+                     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
+diff --git a/src/validation.h b/src/validation.h
+index 4c0924b..5b9f8b9 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -857,7 +857,8 @@ protected:
+         CBlockIndex* pindexNew,
+         std::shared_ptr<const CBlock> block_to_connect,
+         ConnectTrace& connectTrace,
+-        DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
++        DisconnectedBlockTransactions& disconnectpool,
++        bool reorganizing) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
+ 
+     void InvalidBlockFound(CBlockIndex* pindex, const BlockValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+     CBlockIndex* FindMostWorkChain() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+-- 
+2.49.0.windows.1
+

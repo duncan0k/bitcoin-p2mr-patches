@@ -1,0 +1,224 @@
+From de803361731cc5ce2d411977befad53a298ae57a Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 22:28:38 -0600
+Subject: [PATCH 55/65] script: add P2MR leaf version 0xe0, whose elliptic
+ curve checks can be disabled
+
+Leaf version 0xe0 (P2MR_LEAF_TRIPWIRED, control byte 0xe1) executes in a
+P2MR leaf of depth one or more as leaf version 0xc0 does, when the new
+SCRIPT_VERIFY_P2MR_TRIPWIRE flag is set: the same tapscript rules,
+validation weight budget, OP_SUCCESSx pre-scan and signature message, with
+the leaf version in the tapleaf hash, and OP_CHECKMLDSA44 where
+SCRIPT_VERIFY_P2MR_MLDSA44 is set too. Without the flag it stays an unknown
+leaf version, and in P2TR it is one whatever the flags. No deployment sets
+the flag yet.
+
+The second new flag, SCRIPT_VERIFY_P2MR_EC_DISABLED, makes a signature
+check with a 32-byte public key and a non-empty signature fail the script in
+such a leaf, with the new error SCRIPT_ERR_P2MR_EC_DISABLED ("Elliptic curve
+signature checks are disabled in this leaf"). The check sits in
+EvalChecksigTapscript after the validation weight is charged and the public
+key size is looked at, and before CheckSchnorrSignature, so neither the
+signature nor the signature cache is consulted, and OP_NOT cannot turn the
+outcome around. Empty signatures, empty and other-size public keys,
+OP_CHECKMLDSA44, leaf version 0xc0, P2TR, legacy and witness v0 scripts are
+unaffected.
+
+ScriptExecutionData gains m_tripwired_leaf, false unless set, which only the
+P2MR branch sets, for a leaf of version 0xe0 at depth one or more with
+SCRIPT_VERIFY_P2MR_TRIPWIRE. The two flag names are P2MR_TRIPWIRE and
+P2MR_EC_DISABLED.
+
+The script_flags fuzz target, whose check is that removing flags from a
+pass or adding flags to a failure keeps the result, no longer adds or
+removes SCRIPT_VERIFY_P2MR, SCRIPT_VERIFY_P2MR_MLDSA44 and
+SCRIPT_VERIFY_P2MR_TRIPWIRE: each turns a script that a DISCOURAGE flag
+refuses into one that executes, so either change can turn the result
+around. The first two came with earlier patches and break the check in
+the same way. SCRIPT_VERIFY_P2MR_EC_DISABLED only makes more scripts fail,
+and is fuzzed.
+
+See doc/p2mr-tripwire.md, added later in this series.
+---
+ src/script/interpreter.cpp     | 20 +++++++++++++++++---
+ src/script/interpreter.h       | 27 +++++++++++++++++++++++++--
+ src/script/script_error.cpp    |  2 ++
+ src/script/script_error.h      |  3 +++
+ src/test/fuzz/script_flags.cpp |  8 ++++++++
+ src/test/script_tests.cpp      |  1 +
+ 6 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 924806c..76afc86 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -355,7 +355,9 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
+      *  The following validation sequence is consensus critical. Please note how --
+      *    upgradable public key versions precede other rules;
+      *    the script execution fails when using empty signature with invalid public key;
+-     *    the script execution fails when using non-empty invalid signature.
++     *    the script execution fails when using non-empty invalid signature;
++     *    in a tripwired P2MR leaf with SCRIPT_VERIFY_P2MR_EC_DISABLED, the script execution
++     *    fails when using any non-empty signature with a 32-byte public key.
+      */
+     success = !sig.empty();
+     if (success) {
+@@ -370,6 +372,11 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
+     if (pubkey.size() == 0) {
+         return set_error(serror, SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY);
+     } else if (pubkey.size() == 32) {
++        // Once a tripwire output is missing, elliptic curve checks in leaf version 0xe0 fail rather
++        // than push false, whatever the signature, before it is looked at (doc/p2mr-tripwire.md).
++        if (success && execdata.m_tripwired_leaf && (flags & SCRIPT_VERIFY_P2MR_EC_DISABLED)) {
++            return set_error(serror, SCRIPT_ERR_P2MR_EC_DISABLED);
++        }
+         if (success && !checker.CheckSchnorrSignature(sig, pubkey, sigversion, execdata, serror)) {
+             return false; // serror is set
+         }
+@@ -2151,13 +2158,18 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion,
+             // The leaf sits at depth zero (m = 0): succeed without executing the script.
+             return set_success(serror);
+         }
+-        if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
+-            // Tapscript (leaf version 0xc0)
++        const uint8_t leaf_version{static_cast<uint8_t>(control[0] & TAPROOT_LEAF_MASK)};
++        // Leaf version 0xe0 executes as 0xc0 does once SCRIPT_VERIFY_P2MR_TRIPWIRE is set (doc/p2mr-tripwire.md).
++        const bool tripwired{leaf_version == P2MR_LEAF_TRIPWIRED && (flags & SCRIPT_VERIFY_P2MR_TRIPWIRE)};
++        if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || tripwired) {
++            // Tapscript (leaf version 0xc0, or 0xe0)
+             exec_script = CScript(script.begin(), script.end());
+             execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
+             execdata.m_validation_weight_left_init = true;
+             // Where OP_CHECKMLDSA44 can execute (doc/p2mr-mldsa44.md).
+             execdata.m_p2mr_leaf = true;
++            // Where elliptic curve checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
++            execdata.m_tripwired_leaf = tripwired;
+             return ExecuteWitnessScript(stack, exec_script, flags, SigVersion::TAPSCRIPT, checker, execdata, serror);
+         }
+         if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
+@@ -2366,6 +2378,8 @@ const std::map<std::string, script_verify_flag_name>& ScriptFlagNamesToEnum()
+         FLAG_NAME(TAPROOT),
+         FLAG_NAME(P2MR),
+         FLAG_NAME(P2MR_MLDSA44),
++        FLAG_NAME(P2MR_TRIPWIRE),
++        FLAG_NAME(P2MR_EC_DISABLED),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_PUBKEYTYPE),
+         FLAG_NAME(DISCOURAGE_OP_SUCCESS),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_TAPROOT_VERSION),
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index f796eb4..b08e12f 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -157,10 +157,24 @@ enum class script_verify_flag_name : uint8_t {
+ 
+     // Experimental ML-DSA-44 signature checks in P2MR tapscript leaves: byte 0xf0
+     // (OP_SUCCESS240) executes as OP_CHECKMLDSA44 in a leaf of depth one or more
+-    // with leaf version 0xc0. See doc/p2mr-mldsa44.md.
++    // with leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. See
++    // doc/p2mr-mldsa44.md.
+     //
+     SCRIPT_VERIFY_P2MR_MLDSA44,
+ 
++    // Experimental P2MR leaf version 0xe0 (P2MR_LEAF_TRIPWIRED): a leaf of depth one
++    // or more with this leaf version executes as tapscript, as leaf version 0xc0 does.
++    // Without the flag it stays an unknown leaf version. See doc/p2mr-tripwire.md.
++    //
++    SCRIPT_VERIFY_P2MR_TRIPWIRE,
++
++    // In P2MR leaves of leaf version 0xe0 that execute, a signature check with a
++    // 32-byte public key and a non-empty signature fails the script. Not a deployment:
++    // validation sets it for a block once a tripwire output is missing from the UTXO
++    // set the block builds on. See doc/p2mr-tripwire.md.
++    //
++    SCRIPT_VERIFY_P2MR_EC_DISABLED,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+@@ -248,8 +262,13 @@ struct ScriptExecutionData
+     //! The hash of the corresponding output
+     std::optional<uint256> m_output_hash;
+ 
+-    //! Whether the script is a P2MR leaf that is executed: leaf version 0xc0 at depth one or more.
++    //! Whether the script is a P2MR leaf that is executed: leaf version 0xc0 at depth one or more,
++    //! or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE.
+     bool m_p2mr_leaf = false;
++
++    //! Whether the script is a P2MR leaf of leaf version 0xe0 that is executed, whose elliptic
++    //! curve signature checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
++    bool m_tripwired_leaf{false};
+ };
+ 
+ /** Signature hash sizes */
+@@ -273,6 +292,10 @@ static constexpr size_t P2MR_CONTROL_NODE_SIZE = 32;
+ static constexpr size_t P2MR_CONTROL_MAX_NODE_COUNT = 128;
+ static constexpr size_t P2MR_CONTROL_MAX_SIZE = P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE * P2MR_CONTROL_MAX_NODE_COUNT;
+ static_assert(P2MR_CONTROL_MAX_SIZE == 4097);
++/** Experimental P2MR leaf version (doc/p2mr-tripwire.md), control byte 0xe1: executed as
++ *  tapscript with SCRIPT_VERIFY_P2MR_TRIPWIRE, and its elliptic curve signature checks fail
++ *  with SCRIPT_VERIFY_P2MR_EC_DISABLED. In P2TR it stays an unknown leaf version. */
++static constexpr uint8_t P2MR_LEAF_TRIPWIRED{0xe0};
+ 
+ /** OP_CHECKMLDSA44 (doc/p2mr-mldsa44.md) takes the ML-DSA-44 public key as three stack
+  *  elements of these sizes, and the signature as five: the last one may carry one more
+diff --git a/src/script/script_error.cpp b/src/script/script_error.cpp
+index 054f9f7..1641a80 100644
+--- a/src/script/script_error.cpp
++++ b/src/script/script_error.cpp
+@@ -115,6 +115,8 @@ std::string ScriptErrorString(const ScriptError serror)
+             return "Invalid ML-DSA-44 signature hash type";
+         case SCRIPT_ERR_MLDSA44_SIG:
+             return "Invalid ML-DSA-44 signature";
++        case SCRIPT_ERR_P2MR_EC_DISABLED:
++            return "Elliptic curve signature checks are disabled in this leaf";
+         case SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT:
+             return "Too much signature validation relative to witness weight";
+         case SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG:
+diff --git a/src/script/script_error.h b/src/script/script_error.h
+index 3dc1ddb..7d94dfe 100644
+--- a/src/script/script_error.h
++++ b/src/script/script_error.h
+@@ -84,6 +84,9 @@ typedef enum ScriptError_t
+     SCRIPT_ERR_MLDSA44_SIG_SIZE,
+     SCRIPT_ERR_MLDSA44_SIG_HASHTYPE,
+     SCRIPT_ERR_MLDSA44_SIG,
++
++    /* Tripwired P2MR leaves (doc/p2mr-tripwire.md) */
++    SCRIPT_ERR_P2MR_EC_DISABLED,
+     SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT,
+     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
+     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
+diff --git a/src/test/fuzz/script_flags.cpp b/src/test/fuzz/script_flags.cpp
+index 3ab5880..c92c961 100644
+--- a/src/test/fuzz/script_flags.cpp
++++ b/src/test/fuzz/script_flags.cpp
+@@ -40,6 +40,14 @@ FUZZ_TARGET(script_flags)
+ 
+         script_verify_flags fuzzed_flags;
+         ds >> fuzzed_flags;
++        // Each of these flags makes a script execute that without it meets an upgrade hook, which a
++        // DISCOURAGE flag refuses: a P2MR output is an unknown witness program
++        // (DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM), OP_CHECKMLDSA44 is OP_SUCCESS240
++        // (DISCOURAGE_OP_SUCCESS), a P2MR leaf of version 0xe0 has an unknown leaf version
++        // (DISCOURAGE_UPGRADABLE_TAPROOT_VERSION). Removing one can turn a pass into a failure and
++        // adding one a failure into a pass, so the check below leaves them alone.
++        // SCRIPT_VERIFY_P2MR_EC_DISABLED only makes more scripts fail, and is fuzzed.
++        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE);
+ 
+         std::vector<CTxOut> spent_outputs;
+         for (unsigned i = 0; i < tx.vin.size(); ++i) {
+diff --git a/src/test/script_tests.cpp b/src/test/script_tests.cpp
+index 748428c..06eb831 100644
+--- a/src/test/script_tests.cpp
++++ b/src/test/script_tests.cpp
+@@ -98,6 +98,7 @@ static ScriptErrorDesc script_errors[]={
+     {SCRIPT_ERR_MLDSA44_SIG_SIZE, "MLDSA44_SIG_SIZE"},
+     {SCRIPT_ERR_MLDSA44_SIG_HASHTYPE, "MLDSA44_SIG_HASHTYPE"},
+     {SCRIPT_ERR_MLDSA44_SIG, "MLDSA44_SIG"},
++    {SCRIPT_ERR_P2MR_EC_DISABLED, "P2MR_EC_DISABLED"},
+     {SCRIPT_ERR_DISCOURAGE_OP_SUCCESS, "DISCOURAGE_OP_SUCCESS"},
+     {SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE, "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"},
+     {SCRIPT_ERR_SCHNORR_SIG_SIZE, "SCHNORR_SIG_SIZE"},
+-- 
+2.49.0.windows.1
+

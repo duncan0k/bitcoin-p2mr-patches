@@ -1,0 +1,228 @@
+From dde712fa22f9021b888bc1067fb249223e76d55f Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Tue, 6 Oct 2026 00:28:43 -0600
+Subject: [PATCH 65/65] consensus: set the two P2MR tripwire outputs of the
+ Ark-0 signet
+
+ARK0_TRIPWIRE_OUTPOINTS gets the two outputs created on the Ark-0 signet
+at height 15748, 10,000 sats each. Both are P2MR outputs of two leaves of
+version 0xc0 at depth one, <key> OP_CHECKSIG and OP_RETURN:
+
+- 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1,
+  labelled "BIP-341 NUMS", whose key is the NUMS point H of BIP 341
+  (XOnlyPubKey::NUMS_H), which no one can spend;
+- 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0,
+  labelled "drill", whose key,
+  2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f, the
+  operator holds, to spend it when the drill is triggered.
+
+ARK0_TRIPWIRE_HEIGHT is set to 30000, so the rules apply on Ark-0 from
+that height. A static_assert keeps it above
+ARK0_TRIPWIRE_CREATION_HEIGHT, 15748: an output only counts as present
+when it was created below the height of the rules. A unit test rebuilds
+each output's scriptPubKey from its key and the two leaves and compares
+it with the one on that chain.
+
+The heights test checks Ark-0's parameters against the constants, with
+the rules enabled exactly when ARK0_TRIPWIRE_HEIGHT is not
+std::numeric_limits<int>::max(), so that setting the height changes the
+constant, its comment and its sentence in doc/p2mr-tripwire.md only.
+---
+ doc/p2mr-tripwire.md             | 21 ++++++++++-----
+ src/kernel/chainparams.cpp       | 26 +++++++++++++-----
+ src/kernel/chainparams.h         | 14 ++++++----
+ src/test/p2mr_tripwire_tests.cpp | 46 +++++++++++++++++++++++++++++---
+ 4 files changed, 85 insertions(+), 22 deletions(-)
+
+diff --git a/doc/p2mr-tripwire.md b/doc/p2mr-tripwire.md
+index 8b5b931..3c52891 100644
+--- a/doc/p2mr-tripwire.md
++++ b/doc/p2mr-tripwire.md
+@@ -60,9 +60,14 @@ chainstate of an assumeutxo snapshot need nothing else. Each `ConnectBlock` read
+ it connects the block to, before applying any transaction, so `TestBlockValidity`, `VerifyDB` and
+ the background chainstate each decide on their own UTXO set.
+ 
+-The Ark-0 signet is to have two tripwire outputs, each a P2MR output of two leaves of version
+-`0xc0` at depth one, `<P> OP_CHECKSIG` and `OP_RETURN`: one with `P` the NUMS point `H` of BIP 341
+-(`XOnlyPubKey::NUMS_H`), which nobody can spend, and the drill output, whose key the operator holds.
++The Ark-0 signet has two tripwire outputs, both created at height 15748
++(`ARK0_TRIPWIRE_CREATION_HEIGHT`), each a P2MR output of two leaves of version `0xc0` at depth one,
++`<P> OP_CHECKSIG` and `OP_RETURN`:
++
++| Label | Outpoint | `P` |
++| --- | --- | --- |
++| `BIP-341 NUMS` | `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` | the NUMS point `H` of BIP 341 (`XOnlyPubKey::NUMS_H`), which nobody can spend |
++| `drill` | `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0` | `2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f`, whose private key the operator holds |
+ 
+ ## Execution
+ 
+@@ -107,9 +112,10 @@ checked by the time its other leaf can fail.
+ On the Ark-0 signet (challenge
+ `5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`) the height and the
+ outputs are rules of that network, fixed in the code; there is no option to change them, and once
+-a build that carries them has been published they do not change. **This build does not set them
+-yet**: `ARK0_TRIPWIRE_HEIGHT` is `std::numeric_limits<int>::max()` and the list is empty, so the
+-rules never apply there. The commit that sets them adds both outputs, created below the height.
++a build that carries them has been published they do not change. The rules apply there from the
++height `ARK0_TRIPWIRE_HEIGHT`, which is **30000**, with the outputs listed under
++[Tripwire outputs](#tripwire-outputs). A `static_assert` keeps the height above 15748, the height
++that created both outputs, so that both are present from the start.
+ 
+ Other custom signets, the networks for drills, take two options, which require `-signetchallenge`
+ and which the Ark-0 signet refuses:
+@@ -222,7 +228,8 @@ Bitcoin Core's wallet does not create or sign leaves of version `0xe0`. A wallet
+   signed by p2mr-ts`: rows signed by another implementation, the TypeScript library
+   [p2mr-ts](https://github.com/duncan0k/p2mr-ts), whose `scripts/generate-tripwire-crossimpl.ts`
+   writes them; the generator above leaves them in place.
+-- `src/test/p2mr_tripwire_tests.cpp`: the parameters of each network, the options and the state,
++- `src/test/p2mr_tripwire_tests.cpp`: the parameters of each network, the Ark-0 outputs against
++  their scriptPubKeys on that chain, the options and the state,
+   and that `ConnectBlock` decides on the view it is given, which the background chainstate of an
+   assumeutxo snapshot relies on and which the functional test cannot show: the regtest snapshot
+   it loads has no spend of a leaf of version `0xe0` in its history.
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 2a4e9aa..74626fc 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -90,12 +90,26 @@ static constexpr auto ARK0_PQ_BLOCK_PUBKEY{
+     "fc8974a6e31d3270043e779b5e3bdabd40f01cfc0f7438937d505a2897cdf0dc"_hex_u8};
+ static_assert(ARK0_PQ_BLOCK_PUBKEY.size() == MLDSA44_PUBKEY_SIZE);
+ 
+-//! The tripwire outputs of the Ark-0 signet (doc/p2mr-tripwire.md), each with the x-only key its
+-//! leaf checks and a label: one whose leaf checks the BIP-341 NUMS point, XOnlyPubKey::NUMS_H,
+-//! labelled "BIP-341 NUMS", which no one can spend, and the drill output, labelled "drill", whose
+-//! key the operator holds. Not set yet, like ARK0_TRIPWIRE_HEIGHT: the commit that sets that height
+-//! adds both outputs, which are created below it.
+-static const std::vector<Consensus::P2MRTripwire> ARK0_TRIPWIRE_OUTPOINTS{};
++//! The x-only key of the leaf of the Ark-0 drill tripwire output, which the operator holds.
++static constexpr auto ARK0_TRIPWIRE_DRILL_KEY{"2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f"_hex_u8};
++
++//! The tripwire outputs of the Ark-0 signet (doc/p2mr-tripwire.md), both created at height
++//! ARK0_TRIPWIRE_CREATION_HEIGHT, each a P2MR output of two leaves of version 0xc0 at depth one,
++//! <key> OP_CHECKSIG and OP_RETURN, with that key and a label: the one whose key is the BIP-341
++//! NUMS point, XOnlyPubKey::NUMS_H, which no one can spend, labelled "BIP-341 NUMS", and the drill
++//! output, labelled "drill", whose key the operator holds and spends to trigger the drill.
++static const std::vector<Consensus::P2MRTripwire> ARK0_TRIPWIRE_OUTPOINTS{
++    {
++        .outpoint = COutPoint{Txid{"4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0"}, 1},
++        .key = {XOnlyPubKey::NUMS_H.begin(), XOnlyPubKey::NUMS_H.end()},
++        .label = "BIP-341 NUMS",
++    },
++    {
++        .outpoint = COutPoint{Txid{"8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495"}, 0},
++        .key = {ARK0_TRIPWIRE_DRILL_KEY.begin(), ARK0_TRIPWIRE_DRILL_KEY.end()},
++        .label = "drill",
++    },
++};
+ 
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
+ {
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 652836e..bcdd31f 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -51,15 +51,19 @@ inline constexpr int ARK0_PQ_BLOCK_HEIGHT{20000};
+  * (doc/p2mr-tripwire.md). Like the heights above, a rule of that network, fixed here
+  * rather than given by an option.
+  *
+- * Not set yet: std::numeric_limits<int>::max() keeps the rules off on Ark-0. A commit of
+- * its own sets the height, together with the two tripwire outputs, once both are
+- * confirmed below it. Once set, it does not change after a build carrying it has left
+- * the network's own nodes.
++ * Set in the same commit as the tripwire outputs, above the height that created them.
++ * Once set, it does not change after a build carrying it has left the network's own
++ * nodes.
+  */
+-inline constexpr int ARK0_TRIPWIRE_HEIGHT{std::numeric_limits<int>::max()};
++inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
+ // Leaf version 0xe0 runs OP_CHECKMLDSA44, which has to be active before the leaves are.
+ static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
+ 
++/** Height of the block that created both tripwire outputs of the Ark-0 signet. */
++inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
++// An output counts as present only when it was created below the height of the rules.
++static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_CREATION_HEIGHT);
++
+ /** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
+ 
+diff --git a/src/test/p2mr_tripwire_tests.cpp b/src/test/p2mr_tripwire_tests.cpp
+index 4c9425d..165aace 100644
+--- a/src/test/p2mr_tripwire_tests.cpp
++++ b/src/test/p2mr_tripwire_tests.cpp
+@@ -24,10 +24,13 @@
+ #include <tinyformat.h>
+ #include <uint256.h>
+ #include <util/chaintype.h>
++#include <util/strencodings.h>
+ #include <validation.h>
+ 
+ #include <boost/test/unit_test.hpp>
+ 
++#include <algorithm>
++#include <cstddef>
+ #include <limits>
+ #include <memory>
+ #include <stdexcept>
+@@ -75,12 +78,13 @@ BOOST_FIXTURE_TEST_SUITE(p2mr_tripwire_tests, BasicTestingSetup)
+ // The height and the tripwire outputs are rules of the network they apply to (doc/p2mr-tripwire.md).
+ BOOST_AUTO_TEST_CASE(heights)
+ {
+-    // On Ark-0 neither is set yet, which keeps the rules off there; a commit of its own sets both.
+-    BOOST_CHECK_EQUAL(ARK0_TRIPWIRE_HEIGHT, NEVER);
++    // On Ark-0 the height and the tripwire outputs are the constants (the outputs are checked in
++    // ark0_tripwire_outputs): the rules are off while ARK0_TRIPWIRE_HEIGHT is NEVER, and on once a
++    // commit of its own sets the height.
+     const auto ark0{MakeParams(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}})};
+     BOOST_CHECK_EQUAL(ark0->GetConsensus().P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
+-    BOOST_CHECK(ark0->GetConsensus().p2mr_tripwires.empty());
+-    BOOST_CHECK(!DeploymentEnabled(ark0->GetConsensus(), Consensus::DEPLOYMENT_P2MR_TRIPWIRE));
++    BOOST_CHECK_EQUAL(ark0->GetConsensus().p2mr_tripwires.size(), 2U);
++    BOOST_CHECK_EQUAL(DeploymentEnabled(ark0->GetConsensus(), Consensus::DEPLOYMENT_P2MR_TRIPWIRE), ARK0_TRIPWIRE_HEIGHT != NEVER);
+ 
+     // Another signet without the option, the default signet, the testnets and mainnet never activate them.
+     const auto never{[](const std::unique_ptr<const CChainParams>& params) {
+@@ -102,6 +106,40 @@ BOOST_AUTO_TEST_CASE(heights)
+     BOOST_CHECK(moved->GetConsensus().p2mr_tripwires.empty());
+ }
+ 
++// The two tripwire outputs of Ark-0, created at ARK0_TRIPWIRE_CREATION_HEIGHT. Each scriptPubKey,
++// rebuilt from the key and the two leaves of version 0xc0 at depth one, <key> OP_CHECKSIG and
++// OP_RETURN, is the one on that chain, so that a key copied wrong shows up here.
++BOOST_AUTO_TEST_CASE(ark0_tripwire_outputs)
++{
++    struct Expected {
++        std::string outpoint, label, key, script_pubkey;
++    };
++    const std::vector<Expected> expected{
++        {"4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1", "BIP-341 NUMS",
++         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
++         "52202883f815a950fc2eb0d9d39f293f95e20d100a893c92d9122d958490b7a0d117"},
++        {"8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0", "drill",
++         "2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f",
++         "5220c1f0ac831a7ec446dfff7b35697fc9821ce29c109443d5bad4bcb988080c1e7a"},
++    };
++    const auto ark0{MakeParams(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}})};
++    const std::vector<Consensus::P2MRTripwire>& tripwires{ark0->GetConsensus().p2mr_tripwires};
++    BOOST_REQUIRE_EQUAL(tripwires.size(), expected.size());
++    BOOST_CHECK(std::ranges::equal(tripwires[0].key, XOnlyPubKey::NUMS_H));
++    const CScript fail_leaf{CScript{} << OP_RETURN};
++    for (size_t i{0}; i < expected.size(); ++i) {
++        const Consensus::P2MRTripwire& tripwire{tripwires[i]};
++        BOOST_CHECK_EQUAL(strprintf("%s:%u", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n), expected[i].outpoint);
++        BOOST_CHECK_EQUAL(tripwire.label, expected[i].label);
++        BOOST_CHECK_EQUAL(HexStr(tripwire.key), expected[i].key);
++        const CScript checksig_leaf{CScript{} << tripwire.key << OP_CHECKSIG};
++        const uint256 root{ComputeTapbranchHash(ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, checksig_leaf),
++                                                ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, fail_leaf))};
++        BOOST_CHECK_EQUAL(HexStr(CScript{} << OP_2 << ToByteVector(root)), expected[i].script_pubkey);
++    }
++    BOOST_CHECK_GT(ARK0_TRIPWIRE_HEIGHT, ARK0_TRIPWIRE_CREATION_HEIGHT);
++}
++
+ BOOST_AUTO_TEST_CASE(signet_options)
+ {
+     std::unique_ptr<const CChainParams> params;
+-- 
+2.49.0.windows.1
+

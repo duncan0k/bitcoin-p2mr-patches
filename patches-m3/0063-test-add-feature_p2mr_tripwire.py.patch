@@ -1,0 +1,958 @@
+From e41d5bda01cfcd4e615a96d92a4ad35c436b7dbe Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Mon, 5 Oct 2026 23:35:00 -0600
+Subject: [PATCH 63/65] test: add feature_p2mr_tripwire.py
+
+A functional test of P2MR leaf version 0xe0 and its tripwire outputs on
+regtest, with three of them (two the test can spend, one locked to the
+NUMS point) and six nodes: two with the rules (one with
+-acceptnonstdtxn=1), one without them until it upgrades late, a pruned
+one, one with other parameters, and one that loads the regtest
+assumeutxo snapshot at height 299. It covers:
+
+- the activation boundary: the next block's flags at tips H-2, H-1 and
+  H; below H a block takes a 0xe0 spend with an invalid signature and
+  the mempool refuses even valid ones, at depth zero both take them; a
+  reorg below H empties both mempools of such spends;
+- after H, Schnorr and ML-DSA-44 spends of 0xe0 leaves confirm, an
+  invalid ML-DSA-44 signature fails in the mempool and in a block, and
+  0xe0 leaves follow the policy of 0xc0 leaves, which they do at every
+  height and at depth zero too: a spend there with a witness element
+  above 80 bytes is refused below H and after it, and a node with
+  -acceptnonstdtxn takes it into a valid block both times;
+- the block that spends a tripwire output, with Schnorr spends of 0xe0
+  leaves before and after the spend, all valid, while the same spends
+  fail in the next block, in the mempool and in proposals, past the
+  script and signature caches filled before; a spend only in the
+  mempool changes nothing;
+- the mempool when a block disables the checks: Schnorr spends go with
+  their descendants, through unconfirmed parents, a package, TRUC and
+  mixed inputs, ML-DSA-44 spends stay; and after a reorg to a branch
+  that spends the other tripwire output, a parent that comes back to
+  the mempool keeps its ML-DSA-44 child and loses its Schnorr one, and
+  getblocktemplate still works;
+- a reorganization whose first block repeats the transactions of the
+  block it replaces, coinbase included, so that nothing is left to put
+  back, and whose next block spends a tripwire output: the node keeps a
+  child whose relative lock refers to the replaced block, and drops the
+  Schnorr spend;
+- invalidateblock and reconsiderblock over the trigger, both outputs
+  missing, one of them back, the creation of the outputs moved by a
+  reorg to H or above, the NUMS output, an output that never existed,
+  and a node whose height of the rules is above the trigger;
+- the logs, which name a spend only once its block is in the active
+  chain (not for a proposal, an invalid candidate or the background
+  chainstate of a snapshot), and gettripwireinfo;
+- VerifyDB at level 4, restarts with -reindex and -reindex-chainstate,
+  pruning, the snapshot chainstate and its background chainstate, a
+  late upgrade over a chain with and without a block that breaks the
+  rules, and the options a node refuses to start with, also on the
+  chains they are not for.
+
+feature_p2mr_signet.py checks that neither of its signets has the rules
+without -signettripwire, and that gettripwireinfo says so.
+---
+ test/functional/feature_p2mr_signet.py   |   8 +-
+ test/functional/feature_p2mr_tripwire.py | 851 +++++++++++++++++++++++
+ test/functional/test_runner.py           |   1 +
+ 3 files changed, 859 insertions(+), 1 deletion(-)
+ create mode 100644 test/functional/feature_p2mr_tripwire.py
+
+diff --git a/test/functional/feature_p2mr_signet.py b/test/functional/feature_p2mr_signet.py
+index 673466e..7ce8f32 100755
+--- a/test/functional/feature_p2mr_signet.py
++++ b/test/functional/feature_p2mr_signet.py
+@@ -12,7 +12,7 @@ accepted together with -signetchallenge.
+ """
+ 
+ from test_framework.test_framework import BitcoinTestFramework
+-from test_framework.util import assert_equal
++from test_framework.util import assert_equal, assert_raises_rpc_error
+ 
+ 
+ class P2MRSignetTest(BitcoinTestFramework):
+@@ -42,6 +42,12 @@ class P2MRSignetTest(BitcoinTestFramework):
+         assert "segwit" in deployments  # sanity: other buried deployments are listed
+         self.log.info("default signet: p2mr never activates")
+ 
++        # Without -signettripwire, neither signet has the P2MR tripwire rules (doc/p2mr-tripwire.md).
++        for node in self.nodes:
++            assert "p2mr_tripwire" not in node.getdeploymentinfo()["deployments"]
++            assert_raises_rpc_error(-1, "The P2MR tripwire rules are not enabled on this network", node.gettripwireinfo)
++        self.log.info("custom and default signet: no p2mr_tripwire, and gettripwireinfo says so")
++
+         self.log.info("-signetpowtargetspacing: <seconds>[@<height>], only with a custom challenge")
+         node = self.nodes[0]
+         self.stop_node(0)
+diff --git a/test/functional/feature_p2mr_tripwire.py b/test/functional/feature_p2mr_tripwire.py
+new file mode 100644
+index 0000000..dd9f408
+--- /dev/null
++++ b/test/functional/feature_p2mr_tripwire.py
+@@ -0,0 +1,851 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test P2MR leaf version 0xe0 and its tripwire outputs (doc/p2mr-tripwire.md).
++
++With -signettripwire=<height>@<outpoints> on regtest, P2MR leaves of leaf version 0xe0 at
++depth one or more execute from that height on as leaves of version 0xc0 do. In a block
++whose parent leaves one of the tripwire outputs missing from the UTXO set (spent, never
++created, or created at or above the height), a signature check with a 32-byte key and a
++non-empty signature in such a leaf fails. There are three tripwire outputs here: A and B,
++whose keys the test holds, and N, locked to the NUMS point.
++
++  node 0  the rules and the default policy; builds the chain up to the regtest assumeutxo
++          snapshot at 299 exactly as feature_assumeutxo.py does, before any other node
++  node 1  the rules, -acceptnonstdtxn=1
++  node 2  without the rules, as an M2 build, until it upgrades late; it stays away while
++          node 0 is offered blocks that only the rules refuse, which its peers would relay
++          to it as compact blocks before checking them
++  node 3  the rules, pruned
++  node 4  other parameters: the rules from a height above the block that spends A, then a
++          tripwire output that never existed
++  node 5  loads the snapshot with a tripwire output that block 200, below the snapshot, spends
++
++Covered: the activation boundary in the mempool and in blocks, the m=0 exception, the
++block that spends a tripwire (spends before and after the trigger in it are valid, the
++same spends one block later are not), a tripwire spend only in the mempool, removal from
++the mempool on a plain connect (chains, a package, TRUC, mixed inputs) and after a
++reorganization (a parent that comes back while its Schnorr child goes; a first block that
++repeats the transactions of the block it replaces, so that none come back), the script and
++signature caches, reorgs over the trigger, over the creation of the tripwires and below
++the height, both tripwires missing, the NUMS tripwire, the policy of 0xe0 leaves,
++templates and proposals, the logs and gettripwireinfo, VerifyDB level 4, restarts,
++-reindex, -reindex-chainstate, pruning, assumeutxo, a late upgrade, and the options.
++"""
++
++import hashlib
++import re
++
++from test_framework.blocktools import (
++    add_witness_commitment,
++    create_block,
++    create_coinbase,
++)
++from test_framework.key import compute_xonly_pubkey, sign_schnorr, tweak_add_privkey
++from test_framework.messages import COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_mldsa44 import (
++    MLDSA44_PUBKEY_CHUNK_SIZES,
++    OP_CHECKMLDSA44,
++    mldsa44_keygen,
++    mldsa44_leaf,
++    split_chunks,
++)
++from test_framework.p2mr_tripwire import (
++    EC_DISABLED_ERROR,
++    LEAF_VERSION_TRIPWIRED,
++    NUMS_H,
++    hybrid_tree,
++    mldsa44_leaf_witness,
++    schnorr_leaf_witness,
++    tripwire_tree,
++)
++from test_framework.script import (
++    CScript,
++    OP_1,
++    OP_CHECKSIG,
++    OP_DROP,
++    OP_RETURN,
++    SIGHASH_DEFAULT,
++    TaprootSignatureHash,
++    taproot_construct,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.test_node import ErrorMatch
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++H3 = 310
++NEVER = 2147483646  # the highest height -testactivationheight takes
++START_HEIGHT = 199
++SNAPSHOT_BASE_HEIGHT = 299
++SNAPSHOT_BASE_HASH = "7cc695046fec709f8c9394b6f928f81e81fd3ac20977bb68760fa1faa7916ea2"
++SNAPSHOT_H3 = 150
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++
++
++def seckey(tag):
++    return hashlib.sha256(b"feature_p2mr_tripwire " + tag).digest()
++
++
++SEC_A, SEC_B, SEC_U = seckey(b"tripwire a"), seckey(b"tripwire b"), seckey(b"user")
++PUB_A, PUB_B, PUB_U = (compute_xonly_pubkey(key)[0] for key in (SEC_A, SEC_B, SEC_U))
++PQ_PUB, PQ_SEC = mldsa44_keygen(seckey(b"ml-dsa-44"))
++
++TREE_A = tripwire_tree(PUB_A)
++TREE_B = tripwire_tree(PUB_B)
++TREE_N = tripwire_tree(NUMS_H)
++# Template S3: a Schnorr leaf and an ML-DSA-44 leaf, both of leaf version 0xe0 at depth one.
++HYBRID = hybrid_tree(PUB_U, PQ_PUB)
++# M1's template S2 (ML-DSA-44 AND Schnorr in one leaf) in a leaf of version 0xe0.
++MIXED = p2mr_construct([("mix", mldsa44_leaf(PQ_PUB, PUB_U), LEAF_VERSION_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++# A single leaf tree has m=0: the leaf is not executed at any height.
++LONE = p2mr_construct([("ec", CScript([PUB_U, OP_CHECKSIG]), LEAF_VERSION_TRIPWIRED)])
++# Drops one witness item, for the 80-byte stack item limit of policy.
++ITEM = p2mr_construct([("drop", CScript([OP_DROP, OP_1]), LEAF_VERSION_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++# Uses OP_CHECKMLDSA44 but is not one of its templates.
++OTHER = p2mr_construct([("pq", CScript([OP_1, OP_DROP] + split_chunks(PQ_PUB, MLDSA44_PUBKEY_CHUNK_SIZES) + [OP_CHECKMLDSA44]),
++                         LEAF_VERSION_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++# Elliptic curve checks elsewhere: a P2MR leaf of version 0xc0 and a P2TR key path.
++CSIG_C0 = p2mr_construct([("csig", CScript([PUB_U, OP_CHECKSIG])), ("fail", CScript([OP_RETURN]))])
++TAP = taproot_construct(PUB_U, [])
++
++DISCOURAGED = "mempool-script-verify-flag-failed (Taproot version reserved for soft-fork upgrades)"
++NONSTANDARD = "bad-witness-nonstandard"
++MEMPOOL_EC = f"mempool-script-verify-flag-failed ({EC_DISABLED_ERROR})"
++BLOCK_EC = f"block-script-verify-flag-failed ({EC_DISABLED_ERROR})"
++
++
++def output(tx, n=0):
++    return {"txid": tx.txid_int, "vout": n, "value": tx.vout[n].nValue, "script_pubkey": tx.vout[n].scriptPubKey}
++
++
++def outpoint(utxo):
++    return f"{utxo['txid']:064x}:{utxo['vout']}"
++
++
++def ec_witness(tree=HYBRID, name="ec", *, key=SEC_U, corrupt=False):
++    """Spend a leaf <xonly> OP_CHECKSIG; corrupt flips one bit of the signature."""
++    leaf = tree.leaves[name]
++
++    def make(tx, spent, index):
++        stack = schnorr_leaf_witness(key, leaf, tx, spent, index)
++        if corrupt:
++            stack[0] = bytes([stack[0][0] ^ 1]) + stack[0][1:]
++        return stack
++    return make
++
++
++def pq_witness(tree=HYBRID, name="pq", *, mutate=None):
++    """Spend an ML-DSA-44 leaf; mutate edits the whole witness stack."""
++    leaf = tree.leaves[name]
++
++    def make(tx, spent, index):
++        stack = mldsa44_leaf_witness(PQ_SEC, leaf, tx, spent, index)
++        return stack if mutate is None else mutate(stack)
++    return make
++
++
++def flip_bit(stack):
++    return stack[:2] + [bytes([stack[2][0] ^ 1]) + stack[2][1:]] + stack[3:]
++
++
++def mixed_witness(tx, spent, index):
++    leaf = MIXED.leaves["mix"]
++    return [schnorr_leaf_witness(SEC_U, leaf, tx, spent, index)[0]] + mldsa44_leaf_witness(PQ_SEC, leaf, tx, spent, index)
++
++
++def lone_witness(tx, spent, index):
++    leaf = LONE.leaves["ec"]
++    return [bytes(leaf.script), leaf.control_block]
++
++
++def lone_item_witness(size):
++    leaf = LONE.leaves["ec"]
++    return lambda tx, spent, index: [b"\x01" * size, bytes(leaf.script), leaf.control_block]
++
++
++def item_witness(size):
++    leaf = ITEM.leaves["drop"]
++    return lambda tx, spent, index: [b"\x01" * size, bytes(leaf.script), leaf.control_block]
++
++
++def keypath_witness(tx, spent, index):
++    msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index)
++    return [sign_schnorr(tweak_add_privkey(SEC_U, TAP.tweak), msg)]
++
++
++# What each output funded before the rules activate is for.
++OUTPUTS = {
++    "boundary_ec": HYBRID, "boundary_pq": HYBRID, "boundary_invalid": HYBRID, "boundary_other": OTHER,
++    "lone_1": LONE, "lone_2": LONE, "lone_3": LONE, "lone_81_1": LONE, "lone_81_2": LONE,
++    "after_pq": HYBRID, "item_80": ITEM, "item_81": ITEM, "extra": HYBRID, "mixed_1": MIXED, "mixed_2": MIXED,
++    "old_ec": HYBRID, "same_ec": HYBRID,
++    "cache_ec": HYBRID, "kept_pq": HYBRID, "parent_ec": HYBRID, "parent_pq": HYBRID, "package": HYBRID,
++    "truc_ec": HYBRID, "truc_pq": HYBRID, "mixed_ec": HYBRID, "mixed_pq": HYBRID, "before": HYBRID, "after": HYBRID,
++    "late_pq": HYBRID, "csig_c0": CSIG_C0, "tap": TAP,
++    "node4_1": HYBRID, "node4_2": HYBRID, "node4_3": HYBRID, "node2": HYBRID, "pruned_ec": HYBRID, "pruned_pq": HYBRID,
++}
++
++
++class P2MRTripwireTest(BitcoinTestFramework):
++    def set_test_params(self):
++        # The cached chain up to 199, which the regtest assumeutxo snapshot at 299 builds on.
++        self.num_nodes = 6
++        self.rpc_timeout = 120
++        noban = "-whitelist=noban@127.0.0.1"
++        self.base_args = [
++            [noban],
++            [noban, "-acceptnonstdtxn=1"],
++            [noban, f"-testactivationheight=p2mr_tripwire@{NEVER}"],
++            [noban, "-fastprune", "-prune=1"],
++            [noban],
++            [noban],
++        ]
++        self.extra_args = [list(args) for args in self.base_args]
++
++    def setup_network(self):
++        # Disconnected, and without the block setup_nodes() mines on the cached chain: node 0 builds
++        # the snapshot chain on its own, and node 5 only gets its headers.
++        self.add_nodes(self.num_nodes, self.extra_args)
++        self.start_nodes()
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def sync_main(self):
++        self.sync_blocks(self.main)
++
++    def mine(self, count=1):
++        return self.generate(self.wallet, count, sync_fun=self.sync_main)
++
++    def connect_main(self, *nodes):
++        """Connect node 0 to the other main nodes, or to those given, and sync."""
++        for node in nodes or self.main[1:]:
++            self.connect_nodes(0, node.index)
++        self.sync_main()
++
++    def disconnect_main(self):
++        for node in self.main[1:]:
++            self.disconnect_nodes(0, node.index)
++
++    def wallet_witness(self, tx, spent, index):
++        return list(self.wallet_stack)
++
++    def wallet_input(self):
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        return ({"txid": int(utxo["txid"], 16), "vout": utxo["vout"], "value": int(utxo["value"] * COIN),
++                 "script_pubkey": self.wallet.get_output_script()}, self.wallet_witness)
++
++    def spend(self, inputs, *, outputs=None, version=2):
++        """Build a transaction from (utxo, witness function) pairs; one output to the wallet by default."""
++        tx = CTransaction()
++        tx.version = version
++        tx.vin = [CTxIn(COutPoint(utxo["txid"], utxo["vout"]), b"", 0xfffffffd) for utxo, _ in inputs]
++        total = sum(utxo["value"] for utxo, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(utxo["value"], utxo["script_pubkey"]) for utxo, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for index, (_, make) in enumerate(inputs):
++            tx.wit.vtxinwit[index].scriptWitness.stack = make(tx, spent, index)
++        return tx
++
++    def fund(self, script_pubkeys):
++        """Create one confirmed output for each scriptPubKey, all in one transaction."""
++        utxo, witness = self.wallet_input()
++        outputs = [CTxOut(FUND_SATS, spk) for spk in script_pubkeys]
++        outputs.append(CTxOut(utxo["value"] - FUND_SATS * len(outputs) - FEE_SATS, self.wallet.get_output_script()))
++        tx = self.spend([(utxo, witness)], outputs=outputs)
++        self.wallet.sendrawtransaction(from_node=self.nodes[0], tx_hex=tx.serialize().hex())
++        self.mine()
++        return tx, [output(tx, n) for n in range(len(script_pubkeys))]
++
++    def build_block(self, txs, *, node=None, prev=None, nudge=0):
++        node = node or self.nodes[0]
++        prev = prev or node.getbestblockhash()
++        header = node.getblockheader(prev)
++        block = create_block(int(prev, 16), create_coinbase(header["height"] + 1), header["mediantime"] + 1 + nudge, txlist=txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def submit(self, block, expected=None, *, node=None):
++        assert_equal((node or self.nodes[0]).submitblock(block.serialize().hex()), expected)
++
++    def propose(self, block):
++        return self.nodes[0].getblocktemplate({"mode": "proposal", "data": block.serialize().hex()})
++
++    def accept(self, tx, node=0):
++        self.nodes[node].sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in self.nodes[node].getrawmempool()
++
++    def reject(self, tx, reason, node=0):
++        assert_raises_rpc_error(-26, reason, self.nodes[node].sendrawtransaction, tx.serialize().hex(), 0)
++
++    def mempool(self, node=0):
++        return set(self.nodes[node].getrawmempool())
++
++    def assert_next(self, *, active, disabled, nodes=None):
++        """The deployment and the state as they apply to the next block."""
++        for node in nodes or [self.nodes[i] for i in (0, 1, 3)]:
++            assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_tripwire"]["active"], active)
++            assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], disabled)
++
++    def assert_state(self, states, disabled, node=None):
++        info = (node or self.nodes[0]).gettripwireinfo()
++        assert_equal([tripwire["state"] for tripwire in info["tripwires"]], states)
++        assert_equal(info["ec_disabled_next_block"], disabled)
++
++    def spent_log(self, name, tx, block_hash, height, effect):
++        return (f"P2MR tripwire {self.tripwires[name]} spent by {tx.txid_hex} in block {block_hash} (height {height}): "
++                f"elliptic curve checks in leaf version 0xe0 are {effect}")
++
++    def state_log(self, states, checks):
++        outputs = ", ".join(f"{op} {state}" for op, state in zip(self.tripwires.values(), states))
++        return f"tripwire outputs {outputs}; elliptic curve checks in leaf version 0xe0 are {checks} for the next block"
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        # The nodes that follow the chain node 0 mines; node 2 joins with its late upgrade.
++        self.main = [self.nodes[0], self.nodes[1], self.nodes[3]]
++        snapshot = self.build_snapshot_chain()
++        for i in (1, 2, 3, 4):
++            self.connect_nodes(0, i)
++        self.sync_blocks(self.nodes[:5])
++        self.wallet.rescan_utxos()
++        probe = CTransaction()
++        probe.vin = [CTxIn()]
++        self.wallet.sign_tx(probe)
++        self.wallet_stack = list(probe.wit.vtxinwit[0].scriptWitness.stack)
++
++        self.test_assumeutxo(snapshot)
++        self.create_tripwires()
++        self.test_activation()
++        self.test_after_activation()
++        self.test_resurrection()
++        self.test_reorg_onto_same_transactions()
++        self.test_trigger()
++        self.test_trigger_below_height()
++        self.test_reorg_over_trigger()
++        self.test_both_missing()
++        self.test_nums()
++        self.test_late_upgrade()
++        self.test_restarts()
++        self.test_options()
++
++    def build_snapshot_chain(self):
++        self.log.info("Mine blocks 200 to 299 as feature_assumeutxo.py does, for the snapshot regtest knows")
++        n0 = self.nodes[0]
++        assert_equal(n0.getblockcount(), START_HEIGHT)
++        n0.setmocktime(n0.getblockheader(n0.getbestblockhash())["time"])
++        self.wallet = MiniWallet(n0)
++        for i in range(SNAPSHOT_BASE_HEIGHT - START_HEIGHT):
++            if i % 3 == 0:
++                self.wallet.send_self_transfer(from_node=n0)
++            self.generate(n0, nblocks=1, sync_fun=self.no_op)
++        assert_equal(n0.getbestblockhash(), SNAPSHOT_BASE_HASH)
++        return n0.dumptxoutset("utxos.dat", "latest")["path"]
++
++    def test_assumeutxo(self, snapshot):
++        self.log.info("assumeutxo: the snapshot chainstate is past a tripwire spend the background one has not reached")
++        n0, n5 = self.nodes[0], self.nodes[5]
++        # Node 5's tripwire: the output the first transaction of block 200 spends, created far below.
++        spend = n0.getblock(n0.getblockhash(START_HEIGHT + 1), 2)["tx"][1]["vin"][0]
++        created = next(h for h in range(START_HEIGHT + 1) if n0.getblock(n0.getblockhash(h))["tx"][0] == spend["txid"])
++        assert created < SNAPSHOT_H3 < START_HEIGHT
++        tripwire = f"{spend['txid']}:{spend['vout']}"
++        with n5.assert_debug_log([f"P2MR tripwire rules from height {SNAPSHOT_H3} in leaf version 0xe0; tripwire outputs {tripwire}",
++                                  f"P2MR tripwire state at height {START_HEIGHT}: tripwire outputs {tripwire} unspent; "
++                                  "elliptic curve checks in leaf version 0xe0 are enabled for the next block"]):
++            self.restart_node(5, extra_args=self.base_args[5] + [f"-signettripwire={SNAPSHOT_H3}@{tripwire}"])
++        n5.setmocktime(n0.getblockheader(n0.getbestblockhash())["time"])
++        for height in range(START_HEIGHT + 1, SNAPSHOT_BASE_HEIGHT + 1):
++            n5.submitheader(n0.getblock(n0.getblockhash(height), 0))
++        assert_equal(n5.loadtxoutset(snapshot)["base_height"], SNAPSHOT_BASE_HEIGHT)
++        assert_equal([chainstate["blocks"] for chainstate in n5.getchainstates()["chainstates"]], [START_HEIGHT, SNAPSHOT_BASE_HEIGHT])
++        info = n5.gettripwireinfo()
++        assert_equal((info["tip_height"], info["height"], info["tripwires"], info["ec_disabled_next_block"]),
++                     (SNAPSHOT_BASE_HEIGHT, SNAPSHOT_H3, [{"outpoint": tripwire, "state": "missing"}], True))
++
++        # The snapshot chainstate decides on its own UTXO set, from the first block after the snapshot.
++        utxo, witness = self.wallet_input()
++        funding = self.spend([(utxo, witness)], outputs=[CTxOut(FUND_SATS, HYBRID.scriptPubKey), CTxOut(FUND_SATS, HYBRID.scriptPubKey),
++                                                         CTxOut(utxo["value"] - 2 * FUND_SATS - FEE_SATS, self.wallet.get_output_script())])
++        first = self.build_block([funding], node=n5)
++        self.submit(first, node=n5)
++        ec = self.spend([(output(funding, 0), ec_witness())])
++        pq = self.spend([(output(funding, 1), pq_witness())])
++        assert_equal(n5.testmempoolaccept([ec.serialize().hex()])[0]["reject-reason"], MEMPOOL_EC)
++        assert n5.testmempoolaccept([pq.serialize().hex()])[0]["allowed"]
++        self.submit(self.build_block([ec], node=n5), BLOCK_EC, node=n5)
++        assert_equal(n5.getchainstates()["chainstates"][0]["blocks"], START_HEIGHT)
++        # The other nodes continue from the same block.
++        self.submit(first)
++
++        self.log.info("assumeutxo: the background chainstate connects the spend without the log of the active chain")
++        with n5.assert_debug_log([], unexpected_msgs=[f"P2MR tripwire {tripwire} spent by"]):
++            self.connect_nodes(5, 0)
++            self.wait_until(lambda: len(n5.getchainstates()["chainstates"]) == 1)
++        self.sync_blocks(self.nodes[:6])
++        self.disconnect_nodes(5, 0)
++        self.stop_node(5)
++
++    def create_tripwires(self):
++        self.log.info("Create tripwire outputs A, B and N; start nodes 0, 1, 3 and 4 with the rules from height 310")
++        n0 = self.nodes[0]
++        # Back to the clock: block C is the first block of the test with a current time.
++        n0.setmocktime(0)
++        self.tripwire_tx, outputs = self.fund([TREE_A.scriptPubKey, TREE_B.scriptPubKey, TREE_N.scriptPubKey])
++        self.sync_blocks(self.nodes[:5])
++        # Node 2 stays at C until its late upgrade: the restart of node 0 disconnects it.
++        self.tw = dict(zip("ABN", outputs))
++        self.tripwires = {name: outpoint(utxo) for name, utxo in self.tw.items()}
++        self.c_hash, self.c_height = n0.getbestblockhash(), n0.getblockcount()
++        self.rules = [f"-signettripwire={H3}@{','.join(self.tripwires.values())}"]
++        logs = [f"P2MR tripwire rules from height {H3} in leaf version 0xe0; tripwire outputs {' and '.join(self.tripwires.values())}",
++                f"P2MR tripwire state at height {self.c_height}: " + self.state_log(["unspent"] * 3, "enabled")]
++        for i in (0, 1, 3, 4):
++            with self.nodes[i].assert_debug_log(logs):
++                self.restart_node(i, extra_args=self.base_args[i] + self.rules)
++        self.connect_main()
++
++        assert_equal(n0.gettripwireinfo(), {
++            "tip_hash": self.c_hash,
++            "tip_height": self.c_height,
++            "height": H3,
++            "leaf_version": "e0",
++            "tripwires": [{"outpoint": op, "state": "unspent"} for op in self.tripwires.values()],
++            "ec_disabled_next_block": False,
++        })
++        assert_equal(n0.getdeploymentinfo()["deployments"]["p2mr_tripwire"], {"type": "buried", "active": False, "height": H3})
++
++        _, outputs = self.fund([tree.scriptPubKey for tree in OUTPUTS.values()])
++        self.outs = dict(zip(OUTPUTS, outputs))
++
++    def test_activation(self):
++        n0, n1 = self.nodes[0], self.nodes[1]
++        o = self.outs
++        self.log.info("Below H3 already, policy holds 0xe0 leaves to the limits of 0xc0 leaves, at depth zero too")
++        self.mine(H3 - 3 - n0.getblockcount())
++        lone_81 = self.spend([(o["lone_81_1"], lone_item_witness(81))])
++        self.reject(lone_81, NONSTANDARD)
++        self.accept(lone_81, node=1)
++        blockhash = self.generate(n1, 1, sync_fun=self.sync_main)[0]
++        assert lone_81.txid_hex in n0.getblock(blockhash)["tx"]
++
++        self.log.info("Tip H3-2: the mempool turns away spends of 0xe0 leaves at depth one, not those at depth zero")
++        self.assert_next(active=False, disabled=False)
++        ec = self.spend([(o["boundary_ec"], ec_witness())])
++        pq = self.spend([(o["boundary_pq"], pq_witness())])
++        other = self.spend([(o["boundary_other"], pq_witness(OTHER))])
++        self.reject(ec, DISCOURAGED)
++        self.reject(pq, DISCOURAGED)
++        self.reject(other, DISCOURAGED, node=1)
++        lone = self.spend([(o["lone_1"], lone_witness)])
++        self.accept(lone)
++
++        self.log.info("A block below H3 takes a 0xe0 spend with an invalid signature, which is not executed there")
++        invalid = self.spend([(o["boundary_invalid"], ec_witness(corrupt=True))])
++        below = self.build_block([invalid, lone])
++        self.submit(below)
++        self.sync_main()
++
++        self.log.info("Tip H3-1: the mempool executes them")
++        self.assert_next(active=True, disabled=False)
++        self.accept(ec)
++        self.accept(pq)
++        self.reject(other, NONSTANDARD)
++        self.accept(other, node=1)
++
++        self.log.info("A reorg below H3 removes them from both mempools; the m=0 spend comes back")
++        for node in (n0, n1):
++            node.invalidateblock(below.hash_hex)
++        self.assert_next(active=False, disabled=False, nodes=[n0, n1])
++        assert not {ec.txid_hex, pq.txid_hex, invalid.txid_hex} & self.mempool()
++        assert lone.txid_hex in self.mempool()
++        assert other.txid_hex not in self.mempool(1)
++        for node in (n0, n1):
++            node.reconsiderblock(below.hash_hex)
++        assert_equal(n0.getbestblockhash(), below.hash_hex)
++        self.accept(ec)
++        self.accept(pq)
++        self.accept(other, node=1)
++
++        self.log.info("H3: the Schnorr and the ML-DSA-44 spend of 0xe0 leaves confirm")
++        with n0.assert_debug_log([f"P2MR tripwire rules active from height {H3}, reached by block ",
++                                  ": " + self.state_log(["unspent"] * 3, "enabled")]):
++            blockhash = self.mine()[0]
++        block = n0.getblock(blockhash)
++        assert_equal(block["height"], H3)
++        assert {ec.txid_hex, pq.txid_hex} <= set(block["tx"])
++        self.assert_next(active=True, disabled=False)
++        # The leaf that is no template is valid in a block, mined by node 1.
++        blockhash = self.generate(n1, 1, sync_fun=self.sync_main)[0]
++        assert other.txid_hex in n0.getblock(blockhash)["tx"]
++
++    def test_after_activation(self):
++        n0 = self.nodes[0]
++        o = self.outs
++        self.log.info("After H3: an invalid ML-DSA-44 signature in a 0xe0 leaf fails in the mempool and in a block")
++        bad = self.spend([(o["after_pq"], pq_witness(mutate=flip_bit))])
++        self.reject(bad, "mempool-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++        self.submit(self.build_block([bad]), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++
++        self.log.info("Policy: 0xe0 leaves have the stack item limit and the template exception of 0xc0 leaves")
++        item_80 = self.spend([(o["item_80"], item_witness(80))])
++        self.accept(item_80)
++        item_81 = self.spend([(o["item_81"], item_witness(81))])
++        self.reject(item_81, NONSTANDARD)
++        self.accept(item_81, node=1)
++        lone_81 = self.spend([(o["lone_81_2"], lone_item_witness(81))])
++        self.reject(lone_81, NONSTANDARD)
++        self.accept(lone_81, node=1)
++        self.reject(self.spend([(o["extra"], pq_witness(mutate=lambda stack: [b"\x01"] + stack))]), NONSTANDARD)
++        short = self.spend([(o["after_pq"], pq_witness(mutate=lambda stack: stack[:4] + [stack[4][:339]] + stack[5:]))])
++        self.reject(short, NONSTANDARD)
++        self.submit(self.build_block([short]), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature chunk size)")
++        good = [self.spend([(o["after_pq"], pq_witness())]), self.spend([(o["lone_2"], lone_witness)]),
++                self.spend([(o["mixed_1"], mixed_witness)])]
++        for tx in good:
++            self.accept(tx)
++        blockhash = self.mine()[0]
++        assert {tx.txid_hex for tx in good + [item_80]} <= set(n0.getblock(blockhash)["tx"])
++        blockhash = self.generate(self.nodes[1], 1, sync_fun=self.sync_main)[0]
++        assert {item_81.txid_hex, lone_81.txid_hex} <= set(n0.getblock(blockhash)["tx"])
++
++    def test_resurrection(self):
++        self.log.info("Reorg to a branch that spends tripwire B: a parent comes back, its Schnorr child goes")
++        n0 = self.nodes[0]
++        self.disconnect_main()
++        # The old branch confirms the parent and a Schnorr spend; its last input conflicts with the trigger.
++        conflict, conflict_witness = self.wallet_input()
++        funds, funds_witness = self.wallet_input()
++        parent = self.spend([(funds, funds_witness)], outputs=[
++            CTxOut(FUND_SATS, HYBRID.scriptPubKey), CTxOut(FUND_SATS, HYBRID.scriptPubKey),
++            CTxOut(funds["value"] - 2 * FUND_SATS - FEE_SATS, self.wallet.get_output_script())])
++        old_ec = self.spend([(self.outs["old_ec"], ec_witness())])
++        conflicting = self.spend([(conflict, conflict_witness)])
++        fork = n0.getbestblockhash()
++        old = self.build_block([parent, old_ec, conflicting])
++        self.submit(old)
++        child_ec = self.spend([(output(parent, 0), ec_witness())])
++        grandchild = self.spend([(output(child_ec), self.wallet_witness)])
++        child_pq = self.spend([(output(parent, 1), pq_witness())])
++        for tx in (child_ec, grandchild, child_pq):
++            self.accept(tx)
++
++        trigger = self.spend([(self.tw["B"], ec_witness(TREE_B, "csig", key=SEC_B)), (conflict, conflict_witness)])
++        new = self.build_block([trigger], prev=fork, nudge=1)
++        self.submit(new, "inconclusive")
++        assert_equal(n0.getbestblockhash(), old.hash_hex)
++        height = n0.getblockcount()
++        longer = self.build_block([], prev=new.hash_hex)
++        with n0.assert_debug_log([self.spent_log("B", trigger, new.hash_hex, height, f"disabled from height {height + 1}")]):
++            self.submit(longer)
++        assert_equal(n0.getbestblockhash(), longer.hash_hex)
++        self.assert_state(["unspent", "missing", "unspent"], True)
++        assert_equal(self.mempool(), {parent.txid_hex, child_pq.txid_hex})
++        template = n0.getblocktemplate({"rules": ["segwit"]})
++        assert_equal({tx["txid"] for tx in template["transactions"]}, {parent.txid_hex, child_pq.txid_hex})
++
++        n0.invalidateblock(new.hash_hex)
++        assert_equal(n0.getbestblockhash(), old.hash_hex)
++        self.assert_state(["unspent"] * 3, False)
++        assert_equal(self.mempool(), {child_pq.txid_hex})
++        self.connect_main()
++
++    def test_reorg_onto_same_transactions(self):
++        self.log.info("Reorg whose first block repeats the transactions of the block it replaces, and whose second spends B")
++        n0 = self.nodes[0]
++        self.disconnect_main()
++        before = self.mempool()
++        fork = n0.getbestblockhash()
++        # Block A confirms a parent, whose child waits in the mempool behind a relative lock of one
++        # block, with lock points that refer to A; next to it, a Schnorr spend of a 0xe0 leaf.
++        funds, funds_witness = self.wallet_input()
++        parent = self.spend([(funds, funds_witness)])
++        block_a = self.build_block([parent])
++        self.submit(block_a)
++        child = self.spend([(output(parent), self.wallet_witness)])
++        child.vin[0].nSequence = 1
++        schnorr = self.spend([(self.outs["same_ec"], ec_witness())])
++        for tx in (child, schnorr):
++            self.accept(tx)
++
++        # B1 has the transactions of A, coinbase included, at another time: once it is connected,
++        # nothing of A is left to put back in the mempool, while the child's lock points still refer
++        # to A. B2 spends B, so the reorganization ends with the checks disabled. Version 4 keeps the
++        # spend of B out of the mempool when B2 is disconnected again.
++        block_b1 = self.build_block([parent], prev=fork, nudge=1)
++        assert_equal([tx.txid_hex for tx in block_b1.vtx], [tx.txid_hex for tx in block_a.vtx])
++        self.submit(block_b1, "inconclusive")
++        trigger = self.spend([(self.tw["B"], ec_witness(TREE_B, "csig", key=SEC_B))], version=4)
++        block_b2 = self.build_block([trigger], prev=block_b1.hash_hex)
++        self.submit(block_b2)
++        assert_equal(n0.getbestblockhash(), block_b2.hash_hex)
++        self.assert_state(["unspent", "missing", "unspent"], True)
++        assert_equal(self.mempool(), before | {child.txid_hex})
++
++        n0.invalidateblock(block_b1.hash_hex)
++        assert_equal(n0.getbestblockhash(), block_a.hash_hex)
++        self.assert_state(["unspent"] * 3, False)
++        assert schnorr.txid_hex not in self.mempool()
++        self.connect_main()
++
++    def test_trigger(self):
++        n0, n4 = self.nodes[0], self.nodes[4]
++        o = self.outs
++        self.mine()
++        self.x_height = n0.getblockcount() + 1
++        self.late_height = self.x_height + 4
++        self.log.info(f"Node 4 follows with the rules from height {self.late_height}, above the trigger at {self.x_height}")
++        self.restart_node(4, extra_args=self.base_args[4] + [f"-signettripwire={self.late_height}@{','.join(self.tripwires.values())}"])
++        self.connect_nodes(0, 4)
++        self.sync_blocks([n0, n4])
++
++        self.log.info("Before the trigger: spends of 0xe0 leaves, unconfirmed chains, a package, TRUC, mixed inputs")
++        self.cache_ec = self.spend([(o["cache_ec"], ec_witness())])
++        kept_pq = self.spend([(o["kept_pq"], pq_witness())])
++        parent_ec = self.spend([(o["parent_ec"], ec_witness())])
++        child_of_ec = self.spend([(output(parent_ec), self.wallet_witness)])
++        parent_pq = self.spend([(o["parent_pq"], pq_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, HYBRID.scriptPubKey)])
++        ec_child = self.spend([(output(parent_pq), ec_witness())])
++        grandchild = self.spend([(output(ec_child), self.wallet_witness)])
++        truc_ec = self.spend([(o["truc_ec"], ec_witness())], version=3)
++        truc_ec_child = self.spend([(output(truc_ec), self.wallet_witness)], version=3)
++        truc_pq = self.spend([(o["truc_pq"], pq_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, HYBRID.scriptPubKey)], version=3)
++        truc_pq_child = self.spend([(output(truc_pq), ec_witness())], version=3)
++        mixed = self.spend([(o["mixed_ec"], ec_witness()), self.wallet_input()])
++        mixed_pq = self.spend([(o["mixed_pq"], pq_witness())])
++        shared = self.spend([(output(mixed), self.wallet_witness), (output(mixed_pq), self.wallet_witness)])
++        for tx in (self.cache_ec, kept_pq, parent_ec, child_of_ec, parent_pq, ec_child, grandchild, truc_ec, truc_ec_child,
++                   truc_pq, truc_pq_child, mixed, mixed_pq, shared):
++            self.accept(tx)
++        package_parent = self.spend([(o["package"], pq_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, HYBRID.scriptPubKey)])
++        package_child = self.spend([(output(package_parent), ec_witness())])
++        assert_equal(n0.submitpackage([package_parent.serialize().hex(), package_child.serialize().hex()])["package_msg"], "success")
++        # A block with the Schnorr spend is valid now, which also fills the script cache.
++        assert_equal(self.propose(self.build_block([self.cache_ec])), None)
++
++        self.log.info("A tripwire spend only in the mempool changes nothing")
++        self.trigger = self.spend([(self.tw["A"], ec_witness(TREE_A, "csig", key=SEC_A))])
++        self.accept(self.trigger)
++        self.assert_state(["unspent"] * 3, False)
++        self.before = self.spend([(o["before"], ec_witness())])
++        self.after = self.spend([(o["after"], ec_witness())])
++        self.accept(self.before)
++        self.accept(self.after)
++
++        self.log.info("Neither a proposal nor an invalid candidate that spends A logs the spend")
++        block = self.build_block([self.before, self.trigger, self.after])
++        invalid = self.spend([(o["csig_c0"], ec_witness(CSIG_C0, "csig", corrupt=True))])
++        with n0.assert_debug_log([], unexpected_msgs=[f"P2MR tripwire {self.tripwires['A']} spent by"]):
++            assert_equal(self.propose(block), None)
++            self.submit(self.build_block([self.trigger, invalid], nudge=1), "block-script-verify-flag-failed (Invalid Schnorr signature)")
++
++        self.log.info("Block X spends A between two Schnorr spends of 0xe0 leaves, which are both valid")
++        with n0.assert_debug_log([self.spent_log("A", self.trigger, block.hash_hex, self.x_height, f"disabled from height {self.x_height + 1}")]), \
++             n4.assert_debug_log([self.spent_log("A", self.trigger, block.hash_hex, self.x_height, f"disabled from height {self.late_height}")], timeout=5):
++            self.submit(block)
++            self.sync_blocks(self.main + [n4])
++        self.x_hash = block.hash_hex
++        self.disconnect_nodes(0, 4)
++        self.assert_state(["missing", "unspent", "unspent"], True)
++
++        self.log.info("After X the mempool keeps the ML-DSA-44 spends and drops the Schnorr ones with their descendants")
++        self.kept = {kept_pq.txid_hex, parent_pq.txid_hex, truc_pq.txid_hex, mixed_pq.txid_hex, package_parent.txid_hex}
++        assert_equal(self.mempool(), self.kept)
++        template = n0.getblocktemplate({"rules": ["segwit"]})
++        assert_equal({tx["txid"] for tx in template["transactions"]}, self.kept)
++
++        self.log.info("Block X+1: the same spends fail in the mempool, in a block and in a proposal, past both caches")
++        self.reject(self.cache_ec, MEMPOOL_EC)
++        self.submit(self.build_block([self.cache_ec]), BLOCK_EC)
++        assert_equal(self.propose(self.build_block([self.cache_ec], nudge=1)), BLOCK_EC)
++        mixed_2 = self.spend([(o["mixed_2"], mixed_witness)])
++        self.reject(mixed_2, MEMPOOL_EC)
++        self.submit(self.build_block([mixed_2]), BLOCK_EC)
++
++        self.log.info("Elliptic curve checks elsewhere, ML-DSA-44 spends and m=0 spends are not affected")
++        self.unaffected = [self.spend([(o["late_pq"], pq_witness())]), self.spend([(o["csig_c0"], ec_witness(CSIG_C0, "csig"))]),
++                           self.spend([(o["tap"], keypath_witness)]), self.spend([(o["lone_3"], lone_witness)])]
++        for tx in self.unaffected:
++            self.accept(tx)
++
++    def test_trigger_below_height(self):
++        n4 = self.nodes[4]
++        o = self.outs
++        self.log.info("Node 4: A was spent below its height of the rules; checks fail from that height on")
++        self.generate(n4, self.late_height - 2 - n4.getblockcount(), sync_fun=self.no_op)
++        self.assert_next(active=False, disabled=False, nodes=[n4])
++        self.submit(self.build_block([self.spend([(o["node4_1"], ec_witness())])], node=n4), node=n4)
++        self.assert_next(active=True, disabled=True, nodes=[n4])
++        self.submit(self.build_block([self.spend([(o["node4_2"], ec_witness())])], node=n4), BLOCK_EC, node=n4)
++        states = ["missing", "unspent", "unspent"]
++        with n4.assert_debug_log([f"P2MR tripwire rules active from height {self.late_height}, reached by block ",
++                                  ": " + self.state_log(states, "disabled")]):
++            self.submit(self.build_block([self.spend([(o["node4_2"], pq_witness())])], node=n4), node=n4)
++        self.assert_state(states, True, node=n4)
++
++        self.log.info("Node 4: a tripwire output that never existed makes checks fail from the height on")
++        never = f"{'ab' * 32}:7"
++        height = n4.getblockcount() + 3
++        self.restart_node(4, extra_args=self.base_args[4] + [f"-signettripwire={height}@{never}"])
++        info = n4.gettripwireinfo()
++        assert_equal((info["height"], info["tripwires"]), (height, [{"outpoint": never, "state": "missing"}]))
++        self.generate(n4, 1, sync_fun=self.no_op)
++        self.assert_next(active=False, disabled=False, nodes=[n4])
++        self.generate(n4, 1, sync_fun=self.no_op)
++        self.assert_next(active=True, disabled=True, nodes=[n4])
++        self.submit(self.build_block([self.spend([(o["node4_3"], ec_witness())])], node=n4), BLOCK_EC, node=n4)
++        self.stop_node(4)
++
++    def test_reorg_over_trigger(self):
++        n0 = self.nodes[0]
++        self.log.info("invalidateblock X: Schnorr spends of 0xe0 leaves are valid again, X's transactions come back")
++        self.disconnect_main()
++        n0.invalidateblock(self.x_hash)
++        self.assert_state(["unspent"] * 3, False)
++        assert {self.before.txid_hex, self.trigger.txid_hex, self.after.txid_hex} <= self.mempool()
++        self.accept(self.cache_ec)
++        self.log.info("reconsiderblock X: they fail again, and the mempool drops them")
++        n0.reconsiderblock(self.x_hash)
++        assert_equal(n0.getbestblockhash(), self.x_hash)
++        self.assert_state(["missing", "unspent", "unspent"], True)
++        assert not {self.cache_ec.txid_hex, self.before.txid_hex, self.trigger.txid_hex, self.after.txid_hex} & self.mempool()
++        self.connect_main()
++        blockhash = self.mine()[0]
++        assert self.kept | {tx.txid_hex for tx in self.unaffected} <= set(n0.getblock(blockhash)["tx"])
++
++    def test_both_missing(self):
++        n0 = self.nodes[0]
++        self.log.info("Tripwire B spent too: both are missing")
++        trigger = self.spend([(self.tw["B"], ec_witness(TREE_B, "csig", key=SEC_B))])
++        self.accept(trigger)
++        height = n0.getblockcount() + 1
++        with n0.assert_debug_log([f"P2MR tripwire {self.tripwires['B']} spent by {trigger.txid_hex} in block ",
++                                  f" (height {height}): elliptic curve checks in leaf version 0xe0 are already disabled"]):
++            y_hash = self.mine()[0]
++        self.assert_state(["missing", "missing", "unspent"], True)
++        tip = n0.getbestblockhash()
++
++        self.log.info("A reorg that brings back B alone leaves the checks disabled")
++        self.disconnect_main()
++        n0.invalidateblock(y_hash)
++        self.assert_state(["missing", "unspent", "unspent"], True)
++        n0.reconsiderblock(y_hash)
++        self.assert_state(["missing", "missing", "unspent"], True)
++
++        self.log.info("A reorg that takes away the block creating the tripwires; they confirm again at H3, and stay missing")
++        n0.invalidateblock(self.c_hash)
++        assert_equal(n0.getblockcount(), self.c_height - 1)
++        self.assert_state(["missing"] * 3, False)
++        while n0.getblockcount() < H3 - 1:
++            self.generateblock(n0, output="raw(51)", transactions=[], sync_fun=self.no_op)
++        self.assert_state(["missing"] * 3, True)
++        self.generateblock(n0, output="raw(51)", transactions=[self.tripwire_tx.serialize().hex()], sync_fun=self.no_op)
++        assert_equal(n0.getblockcount(), H3)
++        assert_equal(n0.gettxout(f"{self.tw['A']['txid']:064x}", self.tw["A"]["vout"])["confirmations"], 1)
++        self.assert_state(["missing"] * 3, True)
++        n0.reconsiderblock(self.c_hash)
++        assert_equal(n0.getbestblockhash(), tip)
++        self.assert_state(["missing", "missing", "unspent"], True)
++        self.connect_main()
++        self.mine()
++
++    def test_nums(self):
++        self.log.info("Tripwire N, locked to the NUMS point, cannot be spent")
++        leaf, fail = TREE_N.leaves["csig"], TREE_N.leaves["fail"]
++        forged = self.spend([(self.tw["N"], lambda tx, spent, index: [bytes(range(64)), bytes(leaf.script), leaf.control_block])])
++        self.reject(forged, "mempool-script-verify-flag-failed (Invalid Schnorr signature)")
++        self.submit(self.build_block([forged]), "block-script-verify-flag-failed (Invalid Schnorr signature)")
++        returned = self.spend([(self.tw["N"], lambda tx, spent, index: [bytes(fail.script), fail.control_block])])
++        self.reject(returned, "mempool-script-verify-flag-failed (OP_RETURN was encountered)")
++
++    def test_late_upgrade(self):
++        n0, n2 = self.nodes[0], self.nodes[2]
++        self.log.info("Late upgrade: node 2 follows past the trigger without the rules; with them its state is right")
++        self.connect_nodes(0, 2)
++        self.sync_blocks([n0, n2])
++        self.restart_node(2, extra_args=self.base_args[2][:1] + self.rules)
++        assert_equal(n2.gettripwireinfo(), n0.gettripwireinfo())
++
++        self.log.info("Late upgrade: a block that breaks the rules, mined without them, stays; -reindex drops it")
++        self.restart_node(2, extra_args=self.base_args[2])
++        block = self.build_block([self.spend([(self.outs["node2"], ec_witness())])], node=n2)
++        self.submit(block, node=n2)
++        self.submit(block, BLOCK_EC)
++        self.restart_node(2, extra_args=self.base_args[2][:1] + self.rules)
++        assert_equal(n2.getbestblockhash(), block.hash_hex)
++        self.restart_node(2, extra_args=self.base_args[2][:1] + self.rules + ["-reindex"])
++        self.wait_until(lambda: {"hash": block.hash_hex, "status": "invalid"} in
++                        [{"hash": tip["hash"], "status": tip["status"]} for tip in n2.getchaintips()])
++        assert_equal(n2.getbestblockhash(), f"{block.hashPrevBlock:064x}")
++        self.main.append(n2)
++        self.connect_main(n2)
++
++    def test_restarts(self):
++        n0, n1, n3 = self.nodes[0], self.nodes[1], self.nodes[3]
++        expected = n0.gettripwireinfo()
++        self.log.info("VerifyDB level 4 connects the blocks around the trigger again, each against its own parent")
++        depth = n0.getblockcount() - (H3 - 2)
++        assert n0.verifychain(4, depth)
++        self.restart_node(0, extra_args=self.base_args[0] + self.rules + ["-checklevel=4", f"-checkblocks={depth}"])
++        assert_equal(n0.gettripwireinfo(), expected)
++        self.log.info("-reindex-chainstate and -reindex rebuild the same state")
++        for node, option in ((n0, "-reindex-chainstate"), (n1, "-reindex")):
++            self.restart_node(node.index, extra_args=self.base_args[node.index] + self.rules + [option])
++            self.wait_until(lambda: node.getbestblockhash() == expected["tip_hash"])
++            assert_equal(node.gettripwireinfo(), expected)
++        self.connect_main()
++
++        self.log.info("Pruned node: the state does not need the pruned blocks")
++        # A block of its own fills a block file, so that X's file ends early and can be pruned.
++        self.wallet.send_self_transfer(from_node=n0, target_vsize=70_000)
++        self.mine()
++        self.mine(300)
++        n3.pruneblockchain(n3.getblockcount())
++        assert n3.getblockchaininfo()["pruneheight"] > self.x_height
++        self.restart_node(3, extra_args=self.base_args[3] + self.rules)
++        assert_equal(n3.gettripwireinfo(), n0.gettripwireinfo())
++        self.submit(self.build_block([self.spend([(self.outs["pruned_ec"], ec_witness())])], node=n3), BLOCK_EC, node=n3)
++        self.submit(self.build_block([self.spend([(self.outs["pruned_pq"], pq_witness())])], node=n3), node=n3)
++        self.connect_main(n3)
++
++    def test_options(self):
++        self.log.info("Options: -signettripwire needs OP_CHECKMLDSA44 active below its height; Ark-0 takes neither option")
++        node = self.nodes[4]
++        tripwire = f"{'ab' * 32}:0"
++
++        def refused(args, message):
++            node.assert_start_raises_init_error(args, re.escape(f"Error: {message}"), match=ErrorMatch.PARTIAL_REGEX)
++        refused(["-testactivationheight=p2mr_mldsa44@20", f"-signettripwire=20@{tripwire}"],
++                "-signettripwire height must be above the p2mr_mldsa44 height 20, not 20.")
++        refused(["-testactivationheight=p2mr_tripwire@5", f"-signettripwire=20@{tripwire}"],
++                "-signettripwire sets the height of p2mr_tripwire, which -testactivationheight cannot set too.")
++        signet = ["-regtest=0", "-signet"]
++        refused(signet + ["-signetmldsa44=20"], "-signetmldsa44 requires -signetchallenge.")
++        refused(signet + ["-signetchallenge=51", f"-signettripwire=20@{tripwire}"], "-signettripwire requires -signetmldsa44.")
++        refused(signet + ["-signetchallenge=51", "-signetmldsa44=20", f"-signettripwire=20@{tripwire}"],
++                "-signettripwire height must be above the -signetmldsa44 height 20, not 20.")
++        refused(signet + [f"-signetchallenge={ARK0_CHALLENGE}", "-signetmldsa44=20"],
++                "-signetmldsa44 cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        refused(signet + [f"-signetchallenge={ARK0_CHALLENGE}", "-signetmldsa44=20", f"-signettripwire=30@{tripwire}"],
++                "-signetmldsa44 cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        refused(signet + [f"-signetchallenge={ARK0_CHALLENGE}", f"-signettripwire=30@{tripwire}"],
++                "-signettripwire cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++
++        self.log.info("Options: refused on the chains they are not for, whatever their value")
++        refused(["-regtest=0", "-signettripwire=garbage"], "-signettripwire can only be used with signet or regtest.")
++        refused(["-signetmldsa44=garbage"], "-signetmldsa44 can only be used with signet.")
++
++
++if __name__ == '__main__':
++    P2MRTripwireTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 328bb1f..be81612 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -289,6 +289,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr.py',
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
++    'feature_p2mr_tripwire.py',
+     'feature_signet_pqblock.py',
+     'wallet_p2mr.py',
+     'wallet_p2mr_multisig.py',
+-- 
+2.49.0.windows.1
+
