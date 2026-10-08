@@ -298,7 +298,7 @@ and what it does not.
 | 54 | test: add feature_signet_pqblock_edges.py | three edge cases on an `OP_TRUE` signet: a pruned node that accepted a block without the signature before it got the rule (it fails the block check at startup; `-reindex` recovers it, `-reindex-chainstate` does not), a signed block of exactly the maximum weight and one weight unit over it, and copies of a signed block that change only a witness |
 
 54 was added after the release of 2026-09-30. It changes only the functional tests, so it changes no
-binary, and the build the Ark-0 nodes run was made before it.
+binary; the M2 build released that day was made before it.
 
 It is a soft fork: a node built without `patches-m2/` accepts every block a node with it accepts and
 keeps following Ark-0, but does not check the block signatures. The operator's block producer,
