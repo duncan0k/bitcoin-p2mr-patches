@@ -24,7 +24,7 @@ patches/            10 git format-patch files, apply in order with git am
 patches-m05/        24 further patches, the M0.5 wallet series (see below)
 patches-spacing/    1 patch, the retarget spacing Ark-0 uses from height 8064 (see below)
 patches-m1/         13 further patches, the experimental M1 series, on Ark-0 from height 8600 (see below)
-patches-m2/         5 further patches, the experimental M2 series, on Ark-0 from height 20000 (see below)
+patches-m2/         6 further patches, the experimental M2 series and a later test of it, on Ark-0 from height 20000 (see below)
 patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 SHA256SUMS          checksums of the patches
@@ -277,8 +277,8 @@ git format-patch --start-number 36 51be7ca..p2mr-m1 -o patches-m1
 
 ## Experimental M2 series (`patches-m2/`)
 
-Five patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/` and `patches-m1/`, in
-that order. From a height on, they require every block of a signet to carry an ML-DSA-44 (FIPS 204)
+Six patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/` and `patches-m1/`, in
+that order: five that make the rule, and a test added later. From a height on, they require every block of a signet to carry an ML-DSA-44 (FIPS 204)
 signature by a fixed public key, in the coinbase output that holds the witness commitment, next to the
 signet solution: on a custom signet as `-signetpqblock=<pubkey>@<height>` gives them, and on Ark-0
 from height 20000 by a key fixed in the code, where the option is refused. It is an experiment of the
@@ -295,6 +295,10 @@ and what it does not.
 | 51 | test: add feature_signet_pqblock.py | activation, malformed blocks, a node without the rule following the chain, `-reindex-chainstate` and a late upgrade; and blocks made the way the Ark-0 producer makes them, under a 1-of-1 challenge like Ark-0's |
 | 52 | doc: describe -signetpqblock | `doc/signet-pqblock.md` |
 | 53 | signet: require the ML-DSA-44 block signature on the Ark-0 signet from height 20000 | `ARK0_PQ_BLOCK_HEIGHT` and `ARK0_PQ_BLOCK_PUBKEY`, whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad` |
+| 54 | test: add feature_signet_pqblock_edges.py | three edge cases on an `OP_TRUE` signet: a pruned node that accepted a block without the signature before it got the rule (it fails the block check at startup; `-reindex` recovers it, `-reindex-chainstate` does not), a signed block of exactly the maximum weight and one weight unit over it, and copies of a signed block that change only a witness |
+
+54 was added after the release of 2026-09-30. It changes only the functional tests, so it changes no
+binary, and the build the Ark-0 nodes run was made before it.
 
 It is a soft fork: a node built without `patches-m2/` accepts every block a node with it accepts and
 keeps following Ark-0, but does not check the block signatures. The operator's block producer,
@@ -327,10 +331,12 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
 ```
 
 The series is exported from the `p2mr-m2` branch of the Core tree, which carries the four earlier
-patch sets below the five M2 commits; `01541e4` is the last M1 commit on that branch:
+patch sets below the five M2 commits, and 54 from `p2mr-m2-tests`, one commit on top of it; `01541e4`
+is the last M1 commit on that branch:
 
 ```bash
 git format-patch --start-number 49 01541e4..p2mr-m2 -o patches-m2
+git format-patch --start-number 54 p2mr-m2..p2mr-m2-tests -o patches-m2
 (cd patches-m2 && sha256sum -b *.patch) > SHA256SUMS-m2
 ```
 
