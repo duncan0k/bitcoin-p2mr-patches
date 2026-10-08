@@ -403,11 +403,11 @@ leaves were refused in the mempool and in blocks while ML-DSA-44 spends went on;
 for 24 hours from that block with no node restarting.
 
 Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since TBD, which
-`contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed TBD of TBD test cases and skipped
-TBD; TBD P2MR and signet functional scripts passed, `feature_p2mr_tripwire.py` among them; and the
-default functional suite passed TBD tests and skipped TBD. A second build, from a fresh clone with an
-empty compiler cache and the files in `patches-m3/` as published here, produced the same five
-binaries, byte for byte (TBD).
+`contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 758 of 764 test cases and one more
+with a warning, and skipped 5; 10 P2MR and signet functional scripts passed,
+`feature_p2mr_tripwire.py` among them; and the default functional suite, with the extended tests,
+passed 280 and skipped 17. A second build, from a fresh clone with an empty compiler cache and the
+files in `patches-m3/` as published here, produced the same five binaries, byte for byte.
 
 Review status: the design was reviewed in three rounds before it was frozen, and the series in
 three more, by Codex (gpt-6.1-sol at maximum effort), which passed it in the third; gpt-6-astra
@@ -442,7 +442,7 @@ binaries need from the system.
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
-`patches-m3/` as published, produced the same five binaries byte for byte (TBD). That image comes from
+`patches-m3/` as published, produced the same five binaries byte for byte. That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
