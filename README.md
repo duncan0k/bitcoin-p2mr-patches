@@ -422,12 +422,12 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
        ../bitcoin-p2mr-patches/patches-m2/*.patch ../bitcoin-p2mr-patches/patches-m3/*.patch
 ```
 
-The series is exported from the `p2mr-m3` branch of the Core tree, which carries the five earlier
-patch sets below the eleven M3 commits; `924e9f7` is the last commit of `patches-m2/` on that
-branch:
+The series is exported from the Core tree, where the eleven M3 commits sit on the five earlier
+patch sets; `924e9f7` is the last commit of `patches-m2/` there, and `dde712f`, the commit that sets
+the height, is the last of the series:
 
 ```bash
-git format-patch --start-number 55 924e9f7..p2mr-m3 -o patches-m3
+git format-patch --start-number 55 924e9f7..dde712f -o patches-m3
 (cd patches-m3 && sha256sum -b *.patch) > SHA256SUMS-m3
 ```
 
