@@ -9,13 +9,18 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 - License: same as Bitcoin Core (MIT); patches authored by CipherScope <dev@cipherscope.io>
 - Status: experimental. **Not deployed on, and not intended for, mainnet or the public signet** (the
   deployments never activate there).
-- Two experimental extensions, both deployed on the Ark-0 test signet. The M1 series in `patches-m1/`
+- Three experimental extensions for the Ark-0 test signet. The M1 series in `patches-m1/`
   adds an ML-DSA-44 signature check in P2MR leaves, `OP_CHECKMLDSA44`, which is active on Ark-0 from
-  height 8600 and on regtest by default, and on no other signet, testnet or mainnet (see "Experimental
+  height 8600 and on regtest by default, on another custom signet only if it sets `-signetmldsa44`,
+  which `patches-m3/` adds, and never on the default signet, a testnet or mainnet (see "Experimental
   M1 series" below); BIP-360 defines no post-quantum signature check. The M2 series in `patches-m2/`
   requires an ML-DSA-44 signature by a fixed key on every block from a height on, next to the signet
   solution: on Ark-0 from height 20000, and on another custom signet only if it sets `-signetpqblock`
-  (see "Experimental M2 series" below). Neither is proposed for Bitcoin.
+  (see "Experimental M2 series" below). The M3 series in `patches-m3/` adds a P2MR leaf version,
+  `0xe0`, whose elliptic curve signature checks stop working once one of a few designated outputs is
+  spent: on Ark-0 from height 30000, where the operator holds the key of one of its two such outputs
+  and will spend it in an announced drill, and on another custom signet only if it sets
+  `-signettripwire` (see "Experimental M3 series" below). None of them is proposed for Bitcoin.
 
 ## Layout
 
@@ -27,11 +32,13 @@ patches-m1/         13 further patches, the experimental M1 series, on Ark-0 fro
 patches-m2/         6 further patches, the experimental M2 series and a later test of it, on Ark-0 from height 20000 (see below)
 patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
+patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
 SHA256SUMS-m1       checksums of the M1 patches
 SHA256SUMS-m2       checksums of the M2 patches; SHA256SUMS-m2a and SHA256SUMS-m2b for the candidates
+SHA256SUMS-m3       checksums of the M3 patches
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
 ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
@@ -95,7 +102,7 @@ validation only after activation.
   post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum
   signature checks are the experimental M1 and M2 series in `patches-m1/` and `patches-m2/`, which
   Ark-0 activates from heights 8600 and 20000 (`ark0/NETWORK.md`); another custom signet can switch
-  M2 on with `-signetpqblock`.
+  M2 on with `-signetpqblock`, and M1 with `-signetmldsa44`, which `patches-m3/` adds.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
   is a separate series applying on top.
@@ -103,7 +110,8 @@ validation only after activation.
   Bitcoin Core v31.1, enforced at block validation, independently reproducible". It is not "the first",
   "the only", "the real bc1z", "mainnet-ready", or "a quantum-resistant network".
 - Describe M1 as: "an experimental ML-DSA-44 signature check in P2MR leaves, active on the Ark-0 test
-  signet only" (regtest activates it too, for tests). It is not part of BIP-360, it is not a proposal
+  signet only" (regtest activates it too, for tests, and with `patches-m3/` another custom signet can
+  switch it on with `-signetmldsa44`). It is not part of BIP-360, it is not a proposal
   for Bitcoin, and it does not make Ark-0 a quantum-resistant network: it checks ML-DSA-44 signatures
   only in the P2MR leaves that use the opcode, and it restricts the spending of an entire output to
   committed ML-DSA-44 keys only if every spendable leaf requires a valid signature under a key fixed by
@@ -112,6 +120,14 @@ validation only after activation.
   height 20000". It is not part of BIP 325, it is not a proposal for Bitcoin, and it does not make
   Ark-0 a quantum-resistant network either: blocks still need the classical signet solution and proof
   of work, one party holds both block keys, and M2 changes no rule for spending an output.
+- Describe M3 as: "a drill of disabling elliptic curve checks inside one experimental P2MR leaf
+  version, on the Ark-0 test signet: from the block after the drill tripwire is spent, elliptic curve
+  signature checks in leaves of version `0xe0` stop working". It follows the P2XX-T idea of Pieter
+  Wuille's mail of 2026-06-25, but what it constrains is one experimental leaf version, and its
+  tripwires are two designated outputs. It is not part of BIP-360 or BIP-361, it is not a proposal
+  for Bitcoin, and it does not mean that any elliptic curve key has been broken, or tell when one
+  will be. It disables no elliptic curve check outside leaves of version `0xe0`: leaves of version
+  `0xc0`, P2TR and the other output types are not affected.
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
 
@@ -163,8 +179,8 @@ outside it. From 2026-09-16 to 2026-09-25 the verifying node of the Ark-0 signet
 series while the block producing node ran the consensus series without it, so the two were continuously
 checked against each other on a live chain; a divergence would have been the finding. From 2026-09-22
 both also carried `patches-spacing/`, described below; from 2026-09-25 both ran one build of all four
-sets, `patches-m1/` included, and since 2026-09-30 they run one of all five, `patches-m2/` included. A
-job every six hours funds a P2MR
+sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, and since TBD
+they run one of all six, `patches-m3/` included. A job every six hours funds a P2MR
 address from one node and spends it back from the other through the PSBT flow, asserting the witness
 dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records the 2026-09-25 roll, the build it came
 from, and the first round trip it produced.
@@ -340,9 +356,84 @@ git format-patch --start-number 54 p2mr-m2..p2mr-m2-tests -o patches-m2
 (cd patches-m2 && sha256sum -b *.patch) > SHA256SUMS-m2
 ```
 
+## Experimental M3 series (`patches-m3/`)
+
+Eleven patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/` and
+`patches-m2/`, in that order. They add a P2MR leaf version, `0xe0`, which is executed from a height
+on as a leaf of version `0xc0` is, and whose elliptic curve signature checks fail in every block
+whose parent leaves one of a few designated outputs, the tripwire outputs, missing from the UTXO
+set. On Ark-0 the height is 30000 and the two outputs are fixed in the code. On another custom
+signet both come from `-signettripwire=<height>@<txid:vout>[,<txid:vout>...]`, which needs
+`-signetmldsa44=<height>` with a lower height: an option the series also adds, so that such a
+signet can activate `OP_CHECKMLDSA44` too. Ark-0 refuses both options. It is an experiment of the
+Ark-0 test signet, a test network for trying things out that may be reset at any time: a drill of
+disabling elliptic curve checks inside one leaf version, with a tripwire output whose key the
+operator holds and spends at an announced time. It follows the tripwire idea (P2XX-T) of Pieter
+Wuille's mail of 2026-06-25, which `ark0/NETWORK.md` cites with the other earlier work; it is not
+part of BIP-360 or BIP-361, and it is not proposed for Bitcoin. `doc/p2mr-tripwire.md`, added by the
+series, is its specification. `ark0/NETWORK.md`, "Rule change at height 30000 (M3)", says what it
+changes on Ark-0 and what it does not.
+
+| # | Commit | Content |
+|---|---|---|
+| 55 | script: add P2MR leaf version 0xe0, whose elliptic curve checks can be disabled | `P2MR_LEAF_TRIPWIRED`, control byte `0xe1`: with `SCRIPT_VERIFY_P2MR_TRIPWIRE`, a leaf of this version at depth one or more is executed as one of `0xc0`, `OP_CHECKMLDSA44` included, and without it, or in P2TR, it is an unknown leaf version; with `SCRIPT_VERIFY_P2MR_EC_DISABLED` too, `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` in such a leaf fail the script on a 32-byte key and a non-empty signature (`P2MR_EC_DISABLED`), after the validation weight is charged and before the signature or the signature cache is looked at |
+| 56 | consensus: deploy P2MR leaf version 0xe0 with tripwire outputs | buried deployment `p2mr_tripwire` and the tripwire outputs as consensus parameters, left unset for Ark-0 here; `-signettripwire` and `-signetmldsa44` for other custom signets (`-signettripwire` on regtest too), refused on Ark-0 and on the chains they are not for; regtest from genesis without tripwire outputs; never on the default signet, the testnets or mainnet; the rules in the startup log |
+| 57 | validation: fail elliptic curve checks in leaf version 0xe0 once a tripwire output is missing | `ConnectBlock` adds `SCRIPT_VERIFY_P2MR_EC_DISABLED` once per block, before any of its transactions, when a tripwire output is not present in the UTXO set the block builds on; present means unspent and created below the height, so an output that never existed, or that a deep reorganization moved to the height or above, counts as missing |
+| 58 | policy: relay spends of leaf version 0xe0 once active, and check them again when a tripwire goes | no spend through such a leaf at depth one or more while the next block is below the height, `-acceptnonstdtxn` or not; the standardness rules of `0xc0` leaves at every height; the mempool checks against the next block's state, and when a block disables the checks, it checks the spends through such leaves again and removes those that fail, with their descendants, during a reorganization once the disconnected transactions are back |
+| 59 | rpc, validation: report the tripwire outputs (gettripwireinfo) and log their spends | `gettripwireinfo`; the state in the log at startup and when the chain reaches the height; a log line for each spend of a tripwire output, once its block is in the active chain |
+| 60 | test: add script tests for P2MR leaf version 0xe0 | 83 rows of `script_tests.json` with real Schnorr, ECDSA and ML-DSA-44 signatures, under each combination of `P2MR_TRIPWIRE` and `P2MR_EC_DISABLED`, and their generator |
+| 61 | test: add unit tests for the P2MR tripwire parameters, options and state | the heights and outputs of each network, the options and every way they are refused, which outputs are present, and that `ConnectBlock` reads the state from the view it is given |
+| 62 | test: add P2MR leaf version 0xe0 script test rows signed by another implementation | 14 rows signed by p2mr-ts: S3 spent through either leaf with the checks working and disabled, signatures made for the other leaf version, and S2 in a leaf of version `0xe0` |
+| 63 | test: add feature_p2mr_tripwire.py | on regtest, with three tripwire outputs and six nodes: activation, the trigger, the mempool, reorganizations, the caches, restarts, pruning, assumeutxo, a late upgrade, the logs and the RPC |
+| 64 | doc: describe P2MR leaf version 0xe0 and its tripwire outputs | `doc/p2mr-tripwire.md` |
+| 65 | consensus: set the two P2MR tripwire outputs of the Ark-0 signet | `ARK0_TRIPWIRE_OUTPOINTS`, the two outputs created at height 15748, and `ARK0_TRIPWIRE_HEIGHT`, 30000; a unit test rebuilds each output's scriptPubKey from its key and compares it with the one on that chain |
+
+It is a soft fork: a node built without `patches-m3/` accepts every block a node with it accepts and
+keeps following Ark-0, but does not execute leaves of version `0xe0`, an unknown leaf version to it,
+and does not check the rule. Bitcoin Core's wallet does not create or sign these leaves; the wallet
+side, which builds outputs of the one template the specification recommends, S3, and signs spends
+through either of its leaves, is in [p2mr-ts](https://github.com/duncan0k/p2mr-ts), whose README
+describes it.
+
+Before the release, the series ran on a staging signet of its own, with `-signetmldsa44` and
+`-signettripwire`, two nodes with the rules and one without: S3 outputs were spent through both
+leaves; blocks with an invalid signature in a leaf of version `0xe0` were refused by the two and
+accepted by the third; after a tripwire output was spent at height 788, Schnorr spends through such
+leaves were refused in the mempool and in blocks while ML-DSA-44 spends went on; and the network ran
+for 24 hours from that block with no node restarting.
+
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since TBD, which
+`contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed TBD of TBD test cases and skipped
+TBD; TBD P2MR and signet functional scripts passed, `feature_p2mr_tripwire.py` among them; and the
+default functional suite passed TBD tests and skipped TBD. A second build, from a fresh clone with an
+empty compiler cache and the files in `patches-m3/` as published here, produced the same five
+binaries, byte for byte (TBD).
+
+Review status: the design was reviewed in three rounds before it was frozen, and the series in
+three more, by Codex (gpt-6.1-sol at maximum effort), which passed it in the third; gpt-6-astra
+then reviewed the whole series and passed it too. The first round found that a node with the rules
+could stop on an assertion when the first block of a reorganization repeats every transaction of
+the block it replaces, coinbase included, and the next one spends a tripwire output; the fix is in
+58, and `feature_p2mr_tripwire.py` covers it. The review of 65 with Ark-0's height set: TBD.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
+       ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch \
+       ../bitcoin-p2mr-patches/patches-m2/*.patch ../bitcoin-p2mr-patches/patches-m3/*.patch
+```
+
+The series is exported from the `p2mr-m3` branch of the Core tree, which carries the five earlier
+patch sets below the eleven M3 commits; `924e9f7` is the last commit of `patches-m2/` on that
+branch:
+
+```bash
+git format-patch --start-number 55 924e9f7..p2mr-m3 -o patches-m3
+(cd patches-m3 && sha256sum -b *.patch) > SHA256SUMS-m3
+```
+
 ## Prebuilt node
 
-The release `ark0-node-m2` of this repository carries the build the Ark-0 nodes run, all five patch
+The release `ark0-node-m3` of this repository carries the build the Ark-0 nodes run, all six patch
 sets: the five binaries for x86_64 Linux in an archive, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
@@ -351,7 +442,7 @@ binaries need from the system.
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
-`patches-m2/` as published, produced the same five binaries byte for byte. That image comes from
+`patches-m3/` as published, produced the same five binaries byte for byte (TBD). That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions

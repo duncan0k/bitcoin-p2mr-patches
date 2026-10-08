@@ -16,35 +16,37 @@ Before you start:
   apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest one, milestone
-  M2, applies from height 20000 ("Rule change at height 20000 (M2)" in `NETWORK.md`): from there
-  every block also needs an ML-DSA-44 signature by the operator's block key. The one before, M1,
-  has applied since height 8600. Both are soft forks: a node built without `patches-m2/` keeps
-  following the chain but does not check the block signatures, and a node without `patches-m1/`
-  does not enforce M1 and does not relay the spends that use it. A new challenge would be a new
-  network, and everyone would start again.
+  M3, applies from height 30000 ("Rule change at height 30000 (M3)" in `NETWORK.md`): from there
+  nodes run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once
+  one of two designated outputs is spent, and the operator will spend one of them in an announced
+  drill. The ones before, M2 and M1, have applied since heights 20000 and 8600. All three are soft
+  forks: a node built without `patches-m3/` keeps following the chain but does not run those
+  leaves or check their rule, a node without `patches-m2/` does not check the block signatures,
+  and a node without `patches-m1/` does not enforce M1 and does not relay the spends that use it.
+  A new challenge would be a new network, and everyone would start again.
 
 ## 1. Get the node
 
 A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
 the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). The operator's nodes run five patch sets
-on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series in `patches-m05/`
-(section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in `patches-m1/`
-and the M2 series in `patches-m2/`, applied in that order. You can take that build prebuilt, as
-binaries or as a container image, or build it yourself; the rest of this guide works the same
-with either.
+seconds per block (see "Parameters" in `NETWORK.md`). Since TBD the operator's nodes have run six
+patch sets on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series in
+`patches-m05/` (section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in
+`patches-m1/`, the M2 series in `patches-m2/` and the M3 series in `patches-m3/`, applied in that
+order. You can take that build prebuilt, as binaries or as a container image, or build it
+yourself; the rest of this guide works the same with either.
 
 ### Prebuilt binaries or image
 
-The release [`ark0-node-m2`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m2)
+The release [`ark0-node-m3`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m3)
 has the binaries for x86_64 Linux, `SHA256SUMS` and its signature `SHA256SUMS.asc`. Download the
 three into an empty directory, with the release key from this repository, and check the signature:
 
 ```bash
 R=https://github.com/duncan0k/bitcoin-p2mr-patches
-curl -fsSL --remote-name-all $R/releases/download/ark0-node-m2/ark0-node-m2-x86_64-linux-gnu.tar.gz \
-  $R/releases/download/ark0-node-m2/SHA256SUMS $R/releases/download/ark0-node-m2/SHA256SUMS.asc \
-  https://raw.githubusercontent.com/duncan0k/bitcoin-p2mr-patches/ark0-node-m2/ark0/release-signing-key.asc
+curl -fsSL --remote-name-all $R/releases/download/ark0-node-m3/ark0-node-m3-x86_64-linux-gnu.tar.gz \
+  $R/releases/download/ark0-node-m3/SHA256SUMS $R/releases/download/ark0-node-m3/SHA256SUMS.asc \
+  https://raw.githubusercontent.com/duncan0k/bitcoin-p2mr-patches/ark0-node-m3/ark0/release-signing-key.asc
 gpg --import release-signing-key.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 ```
@@ -62,7 +64,7 @@ archive, unpack it, and check the binaries too:
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
-tar -xzf ark0-node-m2-x86_64-linux-gnu.tar.gz
+tar -xzf ark0-node-m3-x86_64-linux-gnu.tar.gz
 sha256sum --ignore-missing -c SHA256SUMS
 ```
 
@@ -70,10 +72,10 @@ The binaries are linked against the system's C and C++ runtimes, libevent and SQ
 glibc 2.34 or later and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
 both, Ubuntu 22.04 and Debian 12 do not. On Ubuntu 24.04 or Debian 13, install the libraries with
 `sudo apt-get install libevent-core-2.1-7t64 libevent-extra-2.1-7t64 libevent-pthreads-2.1-7t64 libsqlite3-0`.
-Wherever this guide says `./build/bin/`, use `ark0-node-m2/bin/` instead.
+Wherever this guide says `./build/bin/`, use `ark0-node-m3/bin/` instead.
 
 The image is `ghcr.io/duncan0k/ark0-node`, also for x86_64, with the libraries in it. Pull it by
-its digest, the hash on the line of `SHA256SUMS` that names `ark0-node-m2-image-manifest.json`, so
+its digest, the hash on the line of `SHA256SUMS` that names `ark0-node-m3-image-manifest.json`, so
 that what you run is what the signature covers:
 
 ```bash
@@ -107,10 +109,11 @@ git clone --branch v31.1 --depth 1 https://github.com/bitcoin/bitcoin.git
 (cd bitcoin-p2mr-patches/patches-spacing && sha256sum -c ../SHA256SUMS-spacing)
 (cd bitcoin-p2mr-patches/patches-m1 && sha256sum -c ../SHA256SUMS-m1)
 (cd bitcoin-p2mr-patches/patches-m2 && sha256sum -c ../SHA256SUMS-m2)
+(cd bitcoin-p2mr-patches/patches-m3 && sha256sum -c ../SHA256SUMS-m3)
 cd bitcoin
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
        ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch \
-       ../bitcoin-p2mr-patches/patches-m2/*.patch
+       ../bitcoin-p2mr-patches/patches-m2/*.patch ../bitcoin-p2mr-patches/patches-m3/*.patch
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DENABLE_WALLET=ON -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF
 cmake --build build -j"$(nproc)"
 ```
@@ -124,7 +127,9 @@ old) or Clang 17 or later, pkgconf, libevent, the Boost headers and SQLite. On D
 `patches/` and `patches-spacing/` alone, the build this guide described before M1, still follow
 Ark-0, but such a node does not check the M1 signatures, and it has no P2MR wallet for section 4.
 A node built without `patches-m2/`, as this guide described before M2, follows Ark-0 too, but does
-not check the block signatures from height 20000 on.
+not check the block signatures from height 20000 on. One built without `patches-m3/`, as this
+guide described before M3, follows it as well, but does not run leaves of version `0xe0` or check
+their rule from height 30000 on.
 
 ## 2. Configure it
 
@@ -167,6 +172,7 @@ The chain is small, so the first sync takes minutes rather than hours.
   magic means another challenge:
 
   ```
+  Signet P2MR tripwire rules from height 30000 in leaf version 0xe0; tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 (BIP-341 NUMS) and 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 (drill key SHA256 077556bdd8807450ae70c372505543fdce8f6e97b51cc827a576a17233839cc2)
   Signet difficulty retargets against 90 s per block from height 8064
   Signet blocks need an ML-DSA-44 block signature from height 20000, by the key whose SHA256 is eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad
   Signet derived magic (message start): 40e8e404
@@ -178,8 +184,14 @@ The chain is small, so the first sync takes minutes rather than hours.
   `00000036e6e81d9884217ca9918e38b9683617b41195a6d4ccc4c4696b31e9d4`, the last block of the
   snapshot in `snapshot/`. The genesis hash is the same on every signet and proves nothing.
 - `./build/bin/bitcoin-cli getdeploymentinfo` lists `p2mr` as a buried deployment, active
-  from height 1, and `p2mr_mldsa44` as a buried deployment, active from height 8600, and
-  `P2MR` and `P2MR_MLDSA44` among the script flags.
+  from height 1, `p2mr_mldsa44` as one active from height 8600 and `p2mr_tripwire` as one with
+  height 30000, and `P2MR` and `P2MR_MLDSA44` among the script flags (`P2MR_TRIPWIRE` too, from
+  height 30000).
+- `./build/bin/bitcoin-cli gettripwireinfo` reports `height` 30000, `leaf_version` `e0`, the two
+  tripwire outputs of "Rule change at height 30000 (M3)" in `NETWORK.md`, each `unspent`, and
+  `ec_disabled_next_block` false. After the drill described there, the drill output is `missing`
+  and `ec_disabled_next_block` is true. A node that has not yet synced past height 15748, where
+  both outputs were created, reports both as `missing`, and logs so at startup; that is expected.
 - `./build/bin/bitcoin-cli getpeerinfo` lists the public node, and once `getblockchaininfo`
   shows `blocks` equal to `headers` and `initialblockdownload` false, your node has caught up.
 
@@ -197,7 +209,7 @@ include. A node built from `patches/` and `patches-spacing/` alone, as this guid
 lacks it. Rebuild such a node in the `bitcoin/` clone from section 1: update your clone of this
 repository with `git -C ../bitcoin-p2mr-patches pull`, run `git am --abort` if an earlier `git am`
 stopped halfway, then `git reset --hard v31.1` (it discards any change of your own in that clone),
-check all five sets from there as section 1 does, with `../bitcoin-p2mr-patches/` in place of
+check all six sets from there as section 1 does, with `../bitcoin-p2mr-patches/` in place of
 `bitcoin-p2mr-patches/`, and run its `git am` line and `cmake --build build -j"$(nproc)"`. Then stop
 the node with `./build/bin/bitcoin-cli stop`, wait until it has exited, and start it again with
 `./build/bin/bitcoind -daemonwait` (both with your `-datadir`, if you use one); it keeps its chain.
@@ -257,6 +269,12 @@ node relays and checks the result like any other transaction. Use only the trees
 every spendable leaf of its tree requires a valid signature under a key fixed by that leaf, as S1 and
 S2 do.
 
+Leaves of version `0xe0` (M3) are no different: the node's wallet neither makes nor signs them.
+p2mr-ts builds the S3 outputs and signs spends through either of their leaves ("Experimental:
+tripwired leaves (version 0xe0) and the S3 template" in its README), once the chain is six blocks
+past height 30000. Pay nothing to such leaves before height 30000: until then they are not
+executed, and anyone who knows a leaf and its path in the tree can spend the output through it.
+
 ## 5. If something is wrong
 
 - **Stuck at height 8063**, with the next block rejected for its difficulty: the node lacks
@@ -273,6 +291,12 @@ S2 do.
   not check the block signatures; rebuild it (section 1) and restart it. If it accepted blocks at or
   above height 20000 before it was upgraded, start it once with `-reindex-chainstate` so that it
   checks them (`-reindex` on a pruned node).
+- **`debug.log` has no `Signet P2MR tripwire rules` line, or `gettripwireinfo` answers
+  `Method not found`:** the node was built without `patches-m3/`, or still runs the binary from
+  before. It follows the chain but does not run leaves of version `0xe0` or check their rule;
+  rebuild it (section 1) and restart it. If it accepted blocks at or above height 30000 before it
+  was upgraded, start it once with `-reindex-chainstate` so that it checks them (`-reindex` on a
+  pruned node).
 - **A prebuilt binary does not start**, saying that `GLIBCXX_3.4.32` is not found or that
   `libevent_core-2.1.so.7` cannot be opened: the system is older than the binaries need, or the
   libraries are missing (section 1). Install them, or use the image or a build from source.

@@ -10,7 +10,10 @@ series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
 experimental rule from height 8600; see "Rule change at height 8600 (M1)".
 Since 2026-09-30 they also carry the M2 series in `patches-m2/`, which from
 height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
-at height 20000 (M2)".
+at height 20000 (M2)". Since TBD they also carry the M3 series in
+`patches-m3/`, which from height 30000 runs P2MR leaves of version `0xe0`,
+whose elliptic curve signature checks stop working once one of two
+designated outputs is spent; see "Rule change at height 30000 (M3)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -56,6 +59,14 @@ chain with a node of your own.
   every block, next to the solution of the classical signet challenge. The
   proof-of-work rules and the rules for spending outputs are unchanged. See
   "Rule change at height 20000 (M2)" below.
+- **Not evidence that any elliptic curve key is broken (M3).** From height
+  30000 the nodes built with `patches-m3/` also run P2MR leaves of an
+  experimental leaf version, `0xe0`, and refuse elliptic curve signatures in
+  them from the block after one of two designated outputs is spent. The
+  operator holds the key of one of these outputs and will spend it at an
+  announced time, as a drill. Leaves of version `0xc0`, and outputs without
+  leaves of version `0xe0`, are unchanged. See "Rule change at height 30000
+  (M3)" below.
 
 ### What the evidence does not prove
 
@@ -256,6 +267,123 @@ Each answer is `bad-signet-pqblk`. For each hash in the table,
 `bitcoin-cli getblockheader <hash>` then still answers `Block not found`, and
 `bitcoin-cli getchaintips` is unchanged.
 
+## Rule change at height 30000 (M3)
+
+From height 30000 Ark-0 has one more experimental rule, called milestone M3
+here: a drill of disabling elliptic curve signature checks inside one P2MR
+leaf version, `0xe0`. From that height leaves of this version are executed,
+and their elliptic curve signature checks stop working from the block after
+one of two designated outputs, the tripwire outputs, is spent. The operator
+holds the key of one of them and will spend it in an announced drill. The
+nodes built with `patches-m3/` enforce the rule, the operator's among them,
+and `doc/p2mr-tripwire.md` in the patched tree specifies it.
+
+The two tripwire outputs were created at height 15748. Each is a P2MR output
+of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
+`OP_RETURN`:
+
+| Label | Outpoint | `P` |
+|---|---|---|
+| `BIP-341 NUMS` | `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` | `50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0`, the NUMS point `H` of BIP-341, whose private key nobody knows: nobody can spend this output |
+| `drill` | `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0` | `2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f`, whose private key the operator holds |
+
+- **Leaves of version `0xe0` run from height 30000.** From there a leaf of
+  this version at depth one or more (its control block starts with `0xe1`)
+  is executed exactly as a leaf of version `0xc0`: the tapscript rules, the
+  validation weight budget and `OP_CHECKMLDSA44` included. The tapleaf hash
+  commits to the leaf version, so a signature made for a leaf of one version
+  is not valid in a leaf of the other. Below the height such a leaf is not
+  executed: anyone who knows it and its path in the tree can spend it
+  without a signature. Nodes do not relay such spends, and no coins should
+  be paid to these leaves before then. A single leaf sits at depth zero and
+  is spent without being executed, at any height.
+- **When the checks stop working.** A tripwire output is present while it is
+  unspent and was created below height 30000, and missing otherwise. From
+  height 30000 on, in every block whose parent leaves either output missing,
+  `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` in an executed leaf
+  of version `0xe0` fail the script when they meet a 32-byte public key and a
+  non-empty signature, valid or not. The block that spends a tripwire output
+  is still checked with the checks working; they fail from the next block
+  on, or from height 30000 if the spend comes before it. A transaction that
+  makes such a check is then refused by the mempool, and a block that
+  contains one is invalid, both with the reason
+  `Elliptic curve signature checks are disabled in this leaf`. Only a
+  reorganization that undoes the spend gives the checks back.
+- **What it does not change.** Who produces blocks: the operator, as before.
+  Empty signatures, `OP_CHECKMLDSA44`, leaves of version `0xc0`, P2TR,
+  witness v0 and legacy scripts are not affected, and neither are M2's block
+  signature and the proof-of-work rules.
+- **The drill.** The operator will spend the drill output at TBD (2026-11-09
+  08:00 UTC proposed), announced here at least two weeks ahead. From the
+  next block on, the checks fail on this chain for as long as no
+  reorganization undoes that block, and nodes with the rule remove from
+  their mempools the spends that now fail, with their descendants. Nobody
+  can spend the NUMS output.
+- **What it shows is narrow.** A node with the rule refuses, at the block
+  level, any elliptic curve signature in a leaf of version `0xe0` from the
+  block after the one that spends a tripwire output, or from height 30000 if
+  that comes later. It does not show that any elliptic curve key is broken,
+  and it cannot tell when one will be. On a signet with a single block
+  signer, it says nothing about how miners or a wider network would adopt
+  such a rule.
+- **The mixed address.** Bitcoin Core's wallet does not make or sign leaves
+  of version `0xe0`. Once the chain is six blocks past height 30000, the
+  operator's web wallet, <https://ark0-wallet.cipherscope.io>, adds a third
+  address to its Schnorr and ML-DSA-44 ones: template S3 of
+  `doc/p2mr-tripwire.md`, a tree of exactly two leaves of version `0xe0` at
+  depth one, `<x-only key> OP_CHECKSIG` and S1 (see "Rule change at height
+  8600 (M1)"). The wallet spends from it through the Schnorr leaf while the
+  checks work, and through the ML-DSA-44 leaf once the node reports them
+  disabled for the next block, so its coins stay spendable after the drill.
+  An output whose leaves of version `0xe0` all require an elliptic curve
+  signature cannot be spent through them after the drill, and a leaf that
+  requires both kinds of signature, as M1's S2 would in a leaf of version
+  `0xe0`, cannot be spent at all; the wallet makes neither.
+- **What a node logs and reports.** A node built with `patches-m3/` logs the
+  height and the two outputs when it starts, with the SHA256 of the drill
+  output's key:
+
+  ```
+  Signet P2MR tripwire rules from height 30000 in leaf version 0xe0; tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 (BIP-341 NUMS) and 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 (drill key SHA256 077556bdd8807450ae70c372505543fdce8f6e97b51cc827a576a17233839cc2)
+  ```
+
+  It also logs the state of the outputs at startup and when the chain
+  reaches height 30000, and each spend of a tripwire output once the block
+  that spends it is in its active chain:
+
+  ```
+  P2MR tripwire <txid:vout> spent by <txid> in block <hash> (height <N>): elliptic curve checks in leaf version 0xe0 are disabled from height <H>
+  P2MR tripwire <txid:vout> spent by <txid> in block <hash> (height <N>): elliptic curve checks in leaf version 0xe0 are already disabled
+  ```
+
+  `<H>` is `N + 1`, or 30000 if the spend comes before that height. The
+  second form is logged when the checks were already off before the block.
+
+  `bitcoin-cli gettripwireinfo` returns the tip it reads the state at, the
+  height and the leaf version, each output with its key, label and `state`,
+  `unspent` or `missing`, and `ec_disabled_next_block`.
+- **It is a soft fork.** A node without `patches-m3/` accepts every block a
+  node with it accepts and keeps following the chain, but does not execute
+  leaves of version `0xe0` and does not check the rule. A node that accepted
+  blocks at or above height 30000 before it upgraded has not checked them;
+  one start with `-reindex-chainstate` (`-reindex` on a pruned node) checks
+  them.
+- **It is not part of BIP-360 or BIP-361**, and it is not a proposal for
+  Bitcoin. It follows the tripwire idea (P2XX-T) in Pieter Wuille's mail of
+  2026-06-25,
+  [Giving teeth to expected EC disabling: P2XX(-T)(-ML)](https://groups.google.com/g/bitcoindev/c/aWYtPLVPZ3U),
+  with two differences: what the rule constrains is one experimental leaf
+  version, and the trigger is the spend of designated outputs, where the
+  mail's trigger is any input that successfully executes
+  `<NUMS> OP_CHECKSIG`. Anthony Towns's reply in
+  [that thread](https://gnusha.org/pi/bitcoindev/aj9SkwXqdRbuVZxH@erisian.com.au/T/)
+  proposes a proof in the coinbase instead, and Sjors Provoost's
+  [Sjors/bitcoin#121](https://github.com/Sjors/bitcoin/pull/121) implements
+  one in a node.
+- **The height and the outputs are rules of this network and will not
+  change.** The series is in `patches-m3/` (`README.md`, "Experimental M3
+  series").
+
 ## Parameters
 
 | Parameter | Value |
@@ -276,6 +404,7 @@ Each answer is `bad-signet-pqblk`. For each hash in the table,
 | Output type name | `witness_v2_p2mr` |
 | `OP_CHECKMLDSA44` (M1) | from height 8600, see "Rule change at height 8600 (M1)" |
 | ML-DSA-44 block signature (M2) | from height 20000, by the key whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, see "Rule change at height 20000 (M2)" |
+| Leaf version `0xe0` (M3) | executed from height 30000, with the tripwire outputs `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` and `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0`, see "Rule change at height 30000 (M3)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -285,9 +414,9 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is one of three consensus changes on this
-network besides P2MR; the others are M1 and M2 (the two "Rule change" sections
-above). Producing blocks faster than ten minutes is what a
+by the patch in `patches-spacing/`, is one of four consensus changes on this
+network besides P2MR; the others are M1, M2 and M3 (the three "Rule change"
+sections above). Producing blocks faster than ten minutes is what a
 signet is for: the signet solution decides who may produce a block, while
 proof of work still paces how fast, as the next paragraphs record.
 
