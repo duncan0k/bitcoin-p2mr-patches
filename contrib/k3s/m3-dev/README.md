@@ -12,8 +12,7 @@ of `../build.sh`, `../build.yaml` and `../run-build.sh` that keep to directories
 | `/work/m3-logs/<run>` | `summary.txt` and one log per phase |
 | `/work/m3-out/runs/<run>/bin` | the run's binaries; nothing is published from here |
 | `/work/m3-test-cache`, `/work/m3-test-tmp/<run>` | functional test cache and temporary directories |
-| `/work/patches/m3` | the copy of `patches-m3/` the runs apply, last |
-| `/work/patches/m3-m2tests` | `patches-m2/0054`, the M2 test patch the series sits on, applied after `master m05 spacing m1 m2`; kept apart from `/work/patches/m2`, which the release builds use |
+| `/work/m3-patches` | the copy of `patches-m3/` the runs apply, last; the earlier sets are read from `/work/patches`, where the release pipeline seeds them, and `/work/patches/m3` is that pipeline's copy of the series |
 | `/work/m3-imgctx/node`, `/work/m3-imgctx/miner` | the staging network's image contexts (`../m3-staging/images.sh`); `node` is written only by a passing run with `M3_IMGCTX=1` |
 | `/work/m3-fuzz-inputs/<run>` | the run's inputs for one fuzz target, when it has any; the build that runs them is `build-fuzz` in the source tree |
 
@@ -21,11 +20,11 @@ of `../build.sh`, `../build.yaml` and `../run-build.sh` that keep to directories
 |---|---|
 | `m3-build.sh` | what the Job runs: `git am`, configure, build, unit tests, functional tests |
 | `m3-build.yaml` | Job template, `m3-build-<run>`; `m3-run.sh` fills in its `__TOKEN__` placeholders |
-| `m3-run.sh` | start one run from a directory that holds these files, `patches-m3/` and `patches-m3-m2tests/`, each with its SHA256SUMS file |
+| `m3-run.sh` | start one run: copy `patches-m3/` and `SHA256SUMS-m3` from the root of this repository to `/work/m3-patches`, and start the Job on the release pipeline's builder image (`builder_image_ref` in `../common.sh`) |
 | `m3-wait.sh` | wait for a run, then print its summary and the tail of its log |
 | `fuzz-script-flags.py` | write inputs for the `script_flags` fuzz target that break its monotonicity check through `P2MR`, `P2MR_MLDSA44` or `P2MR_TRIPWIRE`, the flags the target leaves alone from 0055 on |
 
-A run, from such a directory on the node:
+A run, from this directory in a checkout of this repository on the build host:
 
 ```bash
 RUN_ID=m3-<name> FUNCTIONAL_TESTS="feature_p2mr_tripwire.py" ./m3-run.sh

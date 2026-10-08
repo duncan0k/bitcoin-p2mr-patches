@@ -22,7 +22,7 @@ it its own message start, so it cannot talk to Ark-0.
 
 ## Images
 
-- node: a build of the M3 series, `master m05 spacing m1 m2 m3-m2tests m3`, as
+- node: a build of the M3 series, `master m05 spacing m1 m2 m3`, as
   `p2mr-node:v31.1-p2mr-m3-dev-<head12>`;
 - M2 node: the image Ark-0 runs (`../ark0/kustomization.yaml`);
 - producer: `p2mr-miner:v31.1-p2mr-m3-dev-<head12>`, staged from that M3 build,

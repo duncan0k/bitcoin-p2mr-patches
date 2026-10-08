@@ -4,6 +4,8 @@
 # contrib/k3s/build.sh that keeps to its own directories on the work volume, so
 # that it touches nothing the M2 release builds use:
 #
+#   /work/m3-patches              the M3 series the run applies (copied there by m3-run.sh); the
+#                                 earlier sets are read from /work/patches, the release pipeline's
 #   /work/m3-src                  source tree (cloned once, reset per run)
 #   /work/m3-ccache               compiler cache (CCACHE_DIR, set by the Job)
 #   /work/m3-logs/$RUN_ID         summary.txt and one log per phase
@@ -24,7 +26,7 @@ RUN_ID="${RUN_ID:?RUN_ID is required}"
 CORE_REPO="${CORE_REPO:-https://github.com/bitcoin/bitcoin.git}"
 CORE_TAG="${CORE_TAG:-v31.1}"
 CORE_COMMIT="${CORE_COMMIT:-9be056a}"
-PATCH_SETS="${PATCH_SETS:-master m05 spacing m1 m2 m3-m2tests m3}"
+PATCH_SETS="${PATCH_SETS:-master m05 spacing m1 m2 m3}"
 BUILD_JOBS="${BUILD_JOBS:-10}"
 EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS:-}"
 RUN_UNIT_TESTS="${RUN_UNIT_TESTS:-1}"
@@ -78,9 +80,12 @@ cd "$SRC"
 tag_short="$(git rev-parse --short "$CORE_TAG^{commit}")"
 [ "$tag_short" = "$CORE_COMMIT" ] || { echo "expected $CORE_TAG to be $CORE_COMMIT, got $tag_short" >&2; exit 1; }
 
+# The M3 series is m3-run.sh's own copy; /work/patches/m3 belongs to the release pipeline.
+set_dir() { if [ "$1" = "m3" ]; then echo "$WORK/m3-patches"; else echo "$WORK/patches/$1"; fi; }
+
 say "verifying patch checksums"
 for set_name in $PATCH_SETS; do
-    dir="$WORK/patches/$set_name"
+    dir="$(set_dir "$set_name")"
     [ -d "$dir" ] || { echo "patch set $set_name not found at $dir" >&2; exit 1; }
     sums="$(find "$dir" -maxdepth 1 -name 'SHA256SUMS*' | head -1)"
     [ -n "$sums" ] || { echo "no SHA256SUMS file in $dir" >&2; exit 1; }
@@ -96,7 +101,7 @@ git clean -q -fdx -e build -e build-fuzz
 applied=0
 last_patch=""
 for set_name in $PATCH_SETS; do
-    dir="$WORK/patches/$set_name"
+    dir="$(set_dir "$set_name")"
     patches=("$dir"/*.patch)
     if [ "$set_name" = "m3" ] && [ -n "$M3_PATCH_LIMIT" ]; then
         patches=("${patches[@]:0:$M3_PATCH_LIMIT}")
