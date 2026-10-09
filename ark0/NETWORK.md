@@ -215,7 +215,7 @@ The block producer has signed every block since height 18000. For each block
 from 18000 to 19999, nodes A and B, the two the operator runs in its cluster,
 logged that its ML-DSA-44 block signature was valid, and so did the public node
 and the relay, which had the same logging switched on for the purpose, for the
-blocks from 18000 to TBD:
+blocks from 18000 to 18032:
 
 ```
 CheckSignetPQBlock: block <hash> below height 20000, ML-DSA-44 block signature valid
@@ -223,7 +223,7 @@ CheckSignetPQBlock: block <hash> below height 20000, ML-DSA-44 block signature v
 
 | Height | Block | What happened |
 |---|---|---|
-| 18000 | `TBD` | The first block with an ML-DSA-44 block signature, TBD UTC. |
+| 18000 | `000000100bb3026a2303ce46839febbe47c3d50150cec0d137b2324a3f493dfb` | The first block with an ML-DSA-44 block signature, 2026-10-08 20:48:23 UTC. |
 | 20000 | `TBD` | The first block under the rule, TBD UTC. |
 
 At height TBD the operator built five blocks on `TBD`, each with valid proof of
