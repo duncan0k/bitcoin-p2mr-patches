@@ -2828,3 +2828,35 @@ and the evidence of the signatures verifying before they are enforced would stop
 a producer without the block key stops the chain, since the nodes with the rule refuse its blocks, and
 a node rolled back to the M1 build keeps following the chain but no longer checks the signatures.
 Neither is a way back after 20000.
+
+## Height 18000: the first block signatures (2026-10-08)
+
+From height 18000 the producer adds an ML-DSA-44 block signature to every block; the rule that
+requires it applies from 20000. The blocks around it, header times in UTC:
+
+| height | hash | header time | |
+|---|---|---|---|
+| 17999 | `000000d4cb9bf31b0c04adda2863a597b078325b2ce8f5761fb17d3f002b3f69` | 20:46:52 | the last block without the signature: `absent or not in the required form` |
+| 18000 | `000000100bb3026a2303ce46839febbe47c3d50150cec0d137b2324a3f493dfb` | 20:48:23 | the first block with it |
+| 18006 | `0000005bf5c3b4113a55f21caaefc0aeeb208a2c65996a7080c12f2f8c347fea` | 20:58:19 | |
+
+Checked between 21:40 and 21:43, and again from the same logs on 2026-10-11, on each of the four
+nodes the operator runs: every block from 18000 to 18032, 33 blocks, has exactly one line
+`CheckSignetPQBlock: block <hash> below height 20000, ML-DSA-44 block signature valid` in the node's
+`debug.log`, and no block has any other verdict. Nodes A and B log the `validation` category by their
+configuration (`debug=validation`). On the public node and the relay it was switched on with
+`bitcoin-cli logging '["validation"]'` before block 17968 arrived at 19:57, and off again with
+`bitcoin-cli logging '[]' '["validation"]'` at 21:42, between blocks 18032 and 18033; their logs hold
+that category from 17968 to 18032, so their check covers 18000 to 18032. The monitor that reads the
+logs of nodes A and B every 30 minutes had found
+nothing but valid signatures up to 18024 by 21:29, and had reported the first six blocks, with the
+two external nodes' verdicts on them, to the operator's alert channel.
+
+The producer logged one line per block, `height <n> <hash>`, through 18031, with no error and no
+retry; the producer and both nodes had run for eight days without a restart. The observe job at
+21:25 and at 21:35 found both nodes on the same tip, 18021 and then 18027, with three connections
+each, and its checks ok.
+
+What remains is 20000: from that height a block without a valid signature is refused, which five
+blocks made to be refused will show, given only to nodes that carry the rule (see "What this roll
+does not show yet" above).
