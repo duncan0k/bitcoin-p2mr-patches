@@ -224,21 +224,31 @@ CheckSignetPQBlock: block <hash> below height 20000, ML-DSA-44 block signature v
 | Height | Block | What happened |
 |---|---|---|
 | 18000 | `000000100bb3026a2303ce46839febbe47c3d50150cec0d137b2324a3f493dfb` | The first block with an ML-DSA-44 block signature, 2026-10-08 20:48:23 UTC. |
-| 20000 | `TBD` | The first block under the rule, TBD UTC. |
+| 20000 | `000001153177f182a96b4ad6903ed9279cef82b0cfd340f85b55d1ac81ccc1d4` | The first block under the rule, 2026-10-11 04:41:28 UTC. It is `evidence/m2_block_20000.hex`. |
 
-At height TBD the operator built five blocks on `TBD`, each with valid proof of
-work and a valid classical signet solution, and with an ML-DSA-44 block
-signature that is missing or wrong in one of five ways. Each of the four nodes
-the operator runs refused each of them with `bad-signet-pqblk` and kept nothing
-of any, neither a chain tip nor a header:
+From height 20000 a node with the rule logs no line for a valid block
+signature: it accepts the block or refuses it. All four nodes the operator runs
+accepted 20000 and the blocks after it.
+
+At height 20095 the operator built five blocks on
+`00000107c067fe63e95dab9c05783e221b8be0024a7c79059c9811bd7a40695f` (20094), on
+2026-10-11, each with valid proof of work and a valid classical signet
+solution, and with an ML-DSA-44 block signature that is missing or wrong in
+one of five ways. Each of the four nodes the operator runs refused each of them
+with `bad-signet-pqblk` and kept nothing of any, neither a chain tip nor a
+header:
 
 | File | Block | The push after the witness commitment |
 |---|---|---|
-| `evidence/m2_badblock_nopush.hex` | `TBD` | absent: the signet solution follows the commitment directly |
-| `evidence/m2_badblock_flipped.hex` | `TBD` | the block's valid push, with bit 0 of its byte 100 (counting from 0; byte 95 of the signature) flipped |
-| `evidence/m2_badblock_otherkey.hex` | `TBD` | a valid signature of the block by another key, derived from a public string; it controls nothing |
-| `evidence/m2_badblock_trailing.hex` | `TBD` | the block's valid push, followed by `OP_0` |
-| `evidence/m2_badblock_nonpush.hex` | `TBD` | `OP_1NEGATE` in place of the push |
+| `evidence/m2_badblock_nopush.hex` | `00000001283c2155356bf9afdb2886941e35ff4433d6d5b42fa484bcba44f3b1` | absent: the signet solution follows the commitment directly |
+| `evidence/m2_badblock_flipped.hex` | `0000007f9ed4affe71837767c9172689b674562e0c9395c53e0dc62290db1e31` | the block's valid push, with bit 0 of its byte 100 (counting from 0; byte 95 of the signature) flipped |
+| `evidence/m2_badblock_otherkey.hex` | `0000011cb625f3b9fc44c6d93a7eeb911669fbe71e47c12b6260e544ccec9a60` | a valid signature of the block by another key, derived from a public string; it controls nothing |
+| `evidence/m2_badblock_trailing.hex` | `000000fbb48c81097e88ed87183c466f68207966ce7b91a4dcc91141a7d59811` | the block's valid push, followed by `OP_0` |
+| `evidence/m2_badblock_nonpush.hex` | `00000054caad64dc405a3c084faa341d1b847af0a9adbf3a0737bc20b421cc59` | `OP_1NEGATE` in place of the push |
+
+The block producer kept running meanwhile, and block 20095 in the chain is the
+one it made,
+`000000cbc10a3a5314bc52f7c0a5d44c566e505ebb42c0eb65043573d2859b5f`.
 
 Give these blocks only to a node built with `patches-m2/`. A node without the
 rule checks nothing new and takes each of them as a valid block. A node with
@@ -254,7 +264,7 @@ for f in evidence/m2_badblock_*.hex; do bitcoin-cli submitblock "$(cat "$f")"; d
 
 Each answer is `bad-signet-pqblk`. For each hash in the table,
 `bitcoin-cli getblockheader <hash>` then still answers `Block not found`, and
-`bitcoin-cli getchaintips` is unchanged.
+`bitcoin-cli getchaintips` lists none of them.
 
 ## Parameters
 
@@ -410,6 +420,6 @@ chain instead, see `JOIN.md`.
 | `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
-| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, and the five refused under M2 |
+| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, block 20000, and the five blocks refused under M2 |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
 | `SHA256SUMS` | checksums for everything above |
