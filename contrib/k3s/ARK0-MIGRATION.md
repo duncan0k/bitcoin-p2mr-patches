@@ -2860,3 +2860,51 @@ each, and its checks ok.
 What remains is 20000: from that height a block without a valid signature is refused, which five
 blocks made to be refused will show, given only to nodes that carry the rule (see "What this roll
 does not show yet" above).
+
+## Height 20000: the rule applies (2026-10-11)
+
+From height 20000 a node built with `patches-m2/` refuses a block whose ML-DSA-44 block signature is
+missing, malformed or invalid. The blocks around it, header times in UTC:
+
+| height | hash | header time | |
+|---|---|---|---|
+| 19999 | `000000841874616836f0908d4e6bb2ef8cd55ea0b9323e7084f857d69b2abdb1` | 04:39:14 | the last block below the rule |
+| 20000 | `000001153177f182a96b4ad6903ed9279cef82b0cfd340f85b55d1ac81ccc1d4` | 04:41:28 | the first block under it |
+| 20006 | `000000f552dfdd2de26f4ecf23d804019adbfba85aa63ef9646c7f0de930316f` | 04:51:56 | |
+
+By 05:07 the monitor that reads the logs of nodes A and B every 30 minutes had checked every block
+from 18000 to 19999: each node had logged a verdict on each block, and every verdict was valid. With
+the chain at 20015 it reported the rule in force to the operator's alert channel and stopped. From
+20000 on a node logs no verdict line for a valid signature; it accepts the block or refuses it. The
+producer logged one line per block, `height <n> <hash>`, with no error and no retry; the producer and
+both nodes had run since the roll of 2026-09-30 without a restart. The observe job at 04:35, 04:45
+and 04:55 found both nodes on the same tip, 19996, 20002 and then 20007, with three connections
+each, and its checks ok. At 07:18 all four nodes were on the same tip at 20093, with the same block at
+20000.
+
+### The five refused blocks
+
+At 07:19:52 the operator started the check: a script in the producer pod built five blocks and gave
+them to nodes A and B, and the same blocks then went to the public node and the relay over SSH, all
+by `submitblock`; the producer kept running throughout. The blocks are at height 20095, on
+20094, `00000107c067fe63e95dab9c05783e221b8be0024a7c79059c9811bd7a40695f`, each with valid proof of
+work and a valid classical signet solution, and with an ML-DSA-44 block signature missing or wrong
+in one of five ways; they are `ark0/evidence/m2_badblock_*.hex`, and `ark0/evidence/EVIDENCE.md`
+describes each. Nodes A and B were given them at 07:20:54, the public node and the relay between
+07:20:57 and 07:21:56.
+
+All four nodes answered `bad-signet-pqblk` to all five blocks, and none kept anything of any of
+them: `getchaintips` listing none of them, `getblockheader` answering `Block not found`. Nodes A and B
+logged
+`BlockChecked: block hash=<hash> state=bad-signet-pqblk, signet ML-DSA-44 block signature validation
+failure` for each, and all four `ProcessNewBlock: AcceptBlock FAILED (bad-signet-pqblk, signet
+ML-DSA-44 block signature validation failure)`. Meanwhile the producer mined its own 20095,
+`000000cbc10a3a5314bc52f7c0a5d44c566e505ebb42c0eb65043573d2859b5f`, and the chain went on: the observe
+run at 07:25:03 found both nodes on the same tip at 20097, and six chain tips on node A, as at
+07:15:04.
+
+The node of the new image that had followed the chain from the public node since 2026-09-29 (see
+"Before the roll" above) was at 20096 shortly afterwards, with the same blocks at 20000 and 20096 as
+nodes A and B, and no other chain tip. It has since been removed.
+
+This closes what "What this roll does not show yet" above left open.
