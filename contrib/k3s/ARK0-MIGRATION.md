@@ -2909,14 +2909,16 @@ nodes A and B, and no other chain tip. It has since been removed.
 
 This closes what "What this roll does not show yet" above left open.
 
-## Executed on 2026-10-13 (M3 roll)
+## Executed on 2026-10-12 (M3 roll)
 
-Both nodes move onto one build that also carries `patches-m3/`: from height 30000, P2MR leaves of
+Both nodes moved onto one build that also carries `patches-m3/`: from height 30000, P2MR leaves of
 version `0xe0` are executed as tapscript, and their elliptic curve signature checks stop working from
 the block after one of two tripwire outputs fixed in the build is spent (`ARK0_TRIPWIRE_HEIGHT` and
-the two outpoints in the series, `ark0/NETWORK.md` "Rule change at height 30000 (M3)").
-
-TBD: the times, the images, the sequence and the checks of the roll.
+the two outpoints in the series, `ark0/NETWORK.md` "Rule change at height 30000 (M3)"). The
+producer, the probe and the soak job kept their image: the series changes neither the coinbase nor
+the RPC calls they make. Carried out between 16:13 and 16:18 UTC, following "Rolling a workload onto
+a new build" and the maintenance sequence above, with `overlays/maintenance` and the base, as on this
+cluster since 2026-09-28.
 
 ### The builds
 
@@ -2926,3 +2928,105 @@ TBD: the times, the images, the sequence and the checks of the roll.
 | `m3rc2-repro-cold-1008` | the same from a fresh clone with an empty compiler cache, its patch files identical to those published in this repository (2026-10-08) | checksums and `series ok`, 65 commits; `test_bitcoin` as above; `feature_p2mr_tripwire`, `feature_signet_pqblock` and `feature_p2mr_mldsa44` passed; none of the 489 compilations found in the cache; the five binaries are those of `de1-m3rc2-1008`, byte for byte |
 
 `bitcoind` hashes to `cd74395fac4387623419a317df70a30973a5c2d2c548da89b1f22e8362579bf0`.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488`, new | `sha256:f28a0a5ef4231e43be42e3b499af1ee9658fbd283b77212a51c4e0bb39f707d7` | `sha256:5d2ee1139a17c22b84f67cc968a1166fe920af84afc33d54f735988a8ce698b2` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-0954c5cca219`, kept | `sha256:299cb73b8842da748b30881e53c798fa3bc4be70e04fac604e0307daafec9409` | `sha256:19e997f0d4affb24783c7b1f2c4a7fa75d75a794f35662ae8fe89cf93100df58` |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-0954c5cca219`, kept | `sha256:5698383fb5fab25302886d73baf868859420a66bb59befbaabd3183b1838c5ab` | both nodes' way back |
+
+The node image was built and imported for the release candidate as
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-rc2-478595d27488`. The tag above follows the
+`<series>-<head12>` rule of `kustomization.yaml`; it was added to the same manifest before the roll.
+
+### The sequence
+
+All times UTC.
+
+1. **Ahead of the stop.** `render-config.sh --from-live` found no difference against the live
+   ConfigMap, so none was applied: M3 needs no new setting on these nodes. The soak run of 16:07 had
+   finished, and no observe run was in progress.
+2. **16:13:16.** The producer scaled to zero on its own; it was gone by 16:13:51. The frozen tip, on
+   both nodes: 21283, `000000fcd02483ae9ad83106d5c05449431b630812527ee9e350997ebc6a9412`, with the
+   same `getchaintips` (one `active`, five `invalid`).
+3. **16:14.** The two node tags in `kustomization.yaml` moved to the new build, and the copy on the host
+   was compared by hash with this tree. `kubectl diff -k` of the maintenance overlay showed the two
+   node images and nothing else. A server-side dry run passed.
+4. **16:16:00.** The maintenance overlay applied. Both nodes were ready on the new image at 16:16:17.
+5. **Checks on the frozen tip**, both nodes: `imageID` equal to the new image's above; the startup
+   lines
+
+   ```
+   Signet P2MR tripwire rules from height 30000 in leaf version 0xe0; tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 (BIP-341 NUMS) and 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 (drill key SHA256 077556bdd8807450ae70c372505543fdce8f6e97b51cc827a576a17233839cc2)
+   P2MR tripwire state at height 21283: tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 unspent, 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 unspent; elliptic curve checks in leaf version 0xe0 are enabled for the next block
+   ```
+
+   with the retarget, M2, P2MR and M1 lines as before and, on node A, `Config file arg: [signet]
+   blockreservedweight="16000"`; the frozen tip and `getchaintips` as in step 2; `gettripwireinfo`
+   with height 30000, leaf version `e0`, both outputs `unspent` and `ec_disabled_next_block` false;
+   `getdeploymentinfo` with `p2mr_tripwire` buried at 30000.
+6. **16:17:36.** The base started the producer; its `kubectl diff -k` had been the producer's
+   `replicas` from 0 to 1, and the node pods did not roll again. Its first `getblocktemplate` failed,
+   as the network policy admits a new pod about a second late; the loop retried 15 seconds later and
+   mined 21284.
+7. **Checks after the roll.** The producer's `imageID` as before the roll. The observe run at 16:15:02
+   saw both nodes on the frozen tip and the producer absent, as it was during the window; the run at
+   16:25:01 saw both nodes on 21288 and the three pods ready with no restarts.
+
+### Before and after
+
+| | 16:13:51, producer at zero | 16:16:17, both nodes on the new image | 16:28:05 |
+|---|---|---|---|
+| block count, both nodes | 21283 | 21283 | 21290 |
+| best hash, both | `000000fcd02483ae…ebc6a9412` | the same | `0000006791ff8bf3…b579fea0` |
+| connections, each node | 3 | 2 | 3 |
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 21283 | `000000fcd02483ae9ad83106d5c05449431b630812527ee9e350997ebc6a9412` | 16:12:15 | the frozen tip |
+| 21284 | `00000041029b9ad837120638b0e8c473eaa3c5ec3b65b629b79a4fea8a628df6` | 16:17:55 | the first block after the roll |
+| 21285 | `0000002b7497861d52316087d461084817dc293a643e611f722f8b0a573dafbf` | 16:19:44 | |
+
+Node B carried the same height and hash at every reading.
+
+### The soak
+
+`soak-roll-m3-1012`, started by hand after the roll, funding from node A and spending from node B,
+both on the new build:
+
+```
+2026-10-12T16:28:42Z | f5079247956d1b7718067a1e59c98d955584ed1607f672736e2c4299d1a52982 | 429501e1970d5129eae743d42787ee97bb4ec8920297504cabc19264e1e196a4 | 21291/21292 | ok (index 217, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)
+```
+
+### The two external nodes
+
+Both moved onto the `bitcoind` and `bitcoin-cli` of the release package `ark0-node-m3`, checked against
+its `SHA256SUMS`; the M2 binaries are kept beside them as `*.m2`. The public node was restarted at
+16:24:11 and the relay at 16:26:11. Each logged the M3 line above with both outputs `unspent`, and
+followed the tip: at 16:28:05 all four nodes held 21290,
+`0000006791ff8bf38dd68ed196a10cd118561bc552447509735ac119b579fea0`. The relay also gained
+`txospenderindex=1`, which the explorer uses to find the transaction that spends a tripwire output; the
+index was built and in sync at 21289 within ten seconds. In the same restart its RPC whitelists gained
+`gettripwireinfo` for the explorer's and the web wallet's users, and `gettxspendingprevout` for the
+explorer's.
+
+### What this roll does not show yet
+
+The rule applies from height 30000, and the operator spends the drill output at 2026-10-30 08:00 UTC.
+What to check then, on all four nodes: from 30000, that spends through leaves of version `0xe0` are
+executed and accepted with valid signatures; after the drill block, that `gettripwireinfo` reports the
+drill output `missing` and `ec_disabled_next_block` true, that elliptic curve spends through such
+leaves are refused in the mempool and in blocks with `Elliptic curve signature checks are disabled in
+this leaf`, and that ML-DSA-44 spends through them still go through.
+
+### Rolling back this roll
+
+Below height 30000 the roll is fully reversible: stop the producer, set the two node pins back to
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-0954c5cca219`, apply the maintenance overlay, and start the
+producer. The external nodes get their `*.m2` binaries back, and the relay's configuration changes are
+undone in the same restart. From 30000 on, a node rolled back to the M2 build keeps following the
+chain but no longer runs leaves of version `0xe0` or checks the rule, so that is not a way back.

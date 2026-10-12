@@ -29,7 +29,7 @@ Before you start:
 
 A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
 the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). Since 2026-10-13 the operator's nodes have run six
+seconds per block (see "Parameters" in `NETWORK.md`). Since 2026-10-12 the operator's nodes have run six
 patch sets on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series in
 `patches-m05/` (section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in
 `patches-m1/`, the M2 series in `patches-m2/` and the M3 series in `patches-m3/`, applied in that

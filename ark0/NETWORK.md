@@ -10,7 +10,7 @@ series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
 experimental rule from height 8600; see "Rule change at height 8600 (M1)".
 Since 2026-09-30 they also carry the M2 series in `patches-m2/`, which from
 height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
-at height 20000 (M2)". Since 2026-10-13 they also carry the M3 series in
+at height 20000 (M2)". Since 2026-10-12 they also carry the M3 series in
 `patches-m3/`, which from height 30000 runs P2MR leaves of version `0xe0`,
 whose elliptic curve signature checks stop working once one of two
 designated outputs is spent; see "Rule change at height 30000 (M3)".

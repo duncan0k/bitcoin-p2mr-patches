@@ -78,9 +78,11 @@ namespace: ark0
 # node A runs the M0.5 wallet series too, so its label no longer says what it
 # runs; the label is only a key for this block. On 2026-09-30 all three moved
 # to builds that also carry patches-m2/, whose rule applies from height 20000;
-# the producer signs every block with the block key from height 18000. All
-# four rolls are recorded at the end of ../ARK0-MIGRATION.md, with the tags
-# they moved off.
+# the producer signs every block with the block key from height 18000. On
+# 2026-10-12 the two node tags moved to one build that also carries
+# patches-m3/, whose rule applies from height 30000; the producer kept its
+# image. All five rolls are recorded at the end of ../ARK0-MIGRATION.md, with
+# the tags they moved off.
 # Every tag here ends in the first twelve characters of the commit its build's
 # PROVENANCE.txt records. A bootstrap anywhere else replaces all three with the
 # references its own builds printed, before it starts a workload -- step 2 of
@@ -88,10 +90,10 @@ namespace: ark0
 images:
   - name: p2mr-node-m0
     newName: p2mr-node
-    newTag: v31.1-p2mr-m05-spacing-m1-m2-0954c5cca219
+    newTag: v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488
   - name: p2mr-node-m05
     newName: p2mr-node
-    newTag: v31.1-p2mr-m05-spacing-m1-m2-0954c5cca219
+    newTag: v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488
   - name: p2mr-miner
     newName: p2mr-miner
     newTag: v31.1-p2mr-0954c5cca219
