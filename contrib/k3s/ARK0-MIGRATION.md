@@ -2908,3 +2908,21 @@ The node of the new image that had followed the chain from the public node since
 nodes A and B, and no other chain tip. It has since been removed.
 
 This closes what "What this roll does not show yet" above left open.
+
+## Executed on 2026-10-13 (M3 roll)
+
+Both nodes move onto one build that also carries `patches-m3/`: from height 30000, P2MR leaves of
+version `0xe0` are executed as tapscript, and their elliptic curve signature checks stop working from
+the block after one of two tripwire outputs fixed in the build is spent (`ARK0_TRIPWIRE_HEIGHT` and
+the two outpoints in the series, `ark0/NETWORK.md` "Rule change at height 30000 (M3)").
+
+TBD: the times, the images, the sequence and the checks of the roll.
+
+### The builds
+
+| Run | Patch sets | Result |
+|---|---|---|
+| `de1-m3rc2-1008` | `master m05 spacing m1 m2 m3`, 65 commits, the existing clone | `series ok`; `test_bitcoin` 758 of 764 passed, 1 passed with warnings, 5 skipped; 10 P2MR and signet functional scripts passed (`feature_p2mr`, `feature_p2mr_signet`, `feature_p2mr_mldsa44`, `feature_p2mr_tripwire`, `feature_signet_pqblock`, `feature_signet_pqblock_edges`, `wallet_p2mr`, `wallet_p2mr_multisig`, `wallet_p2mr_signet`, `wallet_p2mr_timelock`); the default functional suite with the extended tests passed, 280 tests, 17 skipped |
+| `m3rc2-repro-cold-1008` | the same from a fresh clone with an empty compiler cache, its patch files identical to those published in this repository (2026-10-08) | checksums and `series ok`, 65 commits; `test_bitcoin` as above; `feature_p2mr_tripwire`, `feature_signet_pqblock` and `feature_p2mr_mldsa44` passed; none of the 489 compilations found in the cache; the five binaries are those of `de1-m3rc2-1008`, byte for byte |
+
+`bitcoind` hashes to `cd74395fac4387623419a317df70a30973a5c2d2c548da89b1f22e8362579bf0`.
