@@ -16,9 +16,9 @@ Before you start:
   apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest one, milestone
-  M3, applies from height 30000 ("Rule change at height 30000 (M3)" in `NETWORK.md`): from there
+  M3, applies from height 30000 ("Rule change at height 30000 (M3)" in `NETWORK.md`). From there
   nodes run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once
-  one of two designated outputs is spent, and the operator will spend one of them in an announced
+  one of two designated outputs is spent; the operator will spend one of them in an announced
   drill. The ones before, M2 and M1, have applied since heights 20000 and 8600. All three are soft
   forks: a node built without `patches-m3/` keeps following the chain but does not run those
   leaves or check their rule, a node without `patches-m2/` does not check the block signatures,

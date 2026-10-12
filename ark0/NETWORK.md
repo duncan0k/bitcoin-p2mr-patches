@@ -308,14 +308,14 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   be paid to these leaves before then. A single leaf sits at depth zero and
   is spent without being executed, at any height.
 - **When the checks stop working.** A tripwire output is present while it is
-  unspent and was created below height 30000, and missing otherwise. From
+  unspent and was created below height 30000; otherwise it is missing. From
   height 30000 on, in every block whose parent leaves either output missing,
   `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` and `OP_CHECKSIGADD` in an executed leaf
   of version `0xe0` fail the script when they meet a 32-byte public key and a
   non-empty signature, valid or not. The block that spends a tripwire output
-  is still checked with the checks working; they fail from the next block
-  on, or from height 30000 if the spend comes before it. A transaction that
-  makes such a check is then refused by the mempool, and a block that
+  is still checked with the checks working. They fail from the next block
+  on, or from height 30000 if the spend comes before it. From then on the
+  mempool refuses a transaction that makes such a check, and a block that
   contains one is invalid, both with the reason
   `Elliptic curve signature checks are disabled in this leaf`. Only a
   reorganization that undoes the spend gives the checks back.
@@ -326,7 +326,7 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
 - **The drill.** The operator will spend the drill output at 2026-10-30
   08:00 UTC; any change of that time would be announced here at least two
   weeks ahead. From the next block on, the checks fail on this chain for
-  as long as no reorganization undoes that block, and nodes with the rule
+  as long as no reorganization undoes that block. Nodes with the rule then
   remove from their mempools the spends that now fail, with their
   descendants. Nobody can spend the NUMS output.
 - **What it shows is narrow.** A node with the rule refuses, at the block
@@ -345,10 +345,10 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   8600 (M1)"). The wallet spends from it through the Schnorr leaf while the
   checks work, and through the ML-DSA-44 leaf once the node reports them
   disabled for the next block, so its coins stay spendable after the drill.
-  An output whose leaves of version `0xe0` all require an elliptic curve
-  signature cannot be spent through them after the drill, and a leaf that
-  requires both kinds of signature, as M1's S2 would in a leaf of version
-  `0xe0`, cannot be spent at all; the wallet makes neither.
+  The wallet avoids two things. An output whose leaves of version `0xe0` all
+  require an elliptic curve signature cannot be spent through them after the
+  drill. A leaf that requires both kinds of signature, as M1's S2 would in a
+  leaf of version `0xe0`, cannot be spent at all.
 - **What a node logs and reports.** A node built with `patches-m3/` logs the
   height and the two outputs when it starts, with the SHA256 of the drill
   output's key:

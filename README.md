@@ -9,18 +9,20 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 - License: same as Bitcoin Core (MIT); patches authored by CipherScope <dev@cipherscope.io>
 - Status: experimental. **Not deployed on, and not intended for, mainnet or the public signet** (the
   deployments never activate there).
-- Three experimental extensions for the Ark-0 test signet. The M1 series in `patches-m1/`
-  adds an ML-DSA-44 signature check in P2MR leaves, `OP_CHECKMLDSA44`, which is active on Ark-0 from
-  height 8600 and on regtest by default, on another custom signet only if it sets `-signetmldsa44`,
-  which `patches-m3/` adds, and never on the default signet, a testnet or mainnet (see "Experimental
-  M1 series" below); BIP-360 defines no post-quantum signature check. The M2 series in `patches-m2/`
-  requires an ML-DSA-44 signature by a fixed key on every block from a height on, next to the signet
-  solution: on Ark-0 from height 20000, and on another custom signet only if it sets `-signetpqblock`
-  (see "Experimental M2 series" below). The M3 series in `patches-m3/` adds a P2MR leaf version,
-  `0xe0`, whose elliptic curve signature checks stop working once one of a few designated outputs is
-  spent: on Ark-0 from height 30000, where the operator holds the key of one of its two such outputs
-  and will spend it in an announced drill, and on another custom signet only if it sets
-  `-signettripwire` (see "Experimental M3 series" below). None of them is proposed for Bitcoin.
+- Three experimental extensions for the Ark-0 test signet. None of them is proposed for Bitcoin.
+  - The M1 series in `patches-m1/` adds an ML-DSA-44 signature check in P2MR leaves,
+    `OP_CHECKMLDSA44`; BIP-360 defines no post-quantum signature check. It is active on Ark-0 from
+    height 8600 and on regtest by default, and never on the default signet, a testnet or mainnet.
+    Another custom signet gets it only if it sets `-signetmldsa44`, an option `patches-m3/` adds.
+    See "Experimental M1 series" below.
+  - The M2 series in `patches-m2/` requires an ML-DSA-44 signature by a fixed key on every block
+    from a height on, next to the signet solution: on Ark-0 from height 20000, and on another custom
+    signet only if it sets `-signetpqblock`. See "Experimental M2 series" below.
+  - The M3 series in `patches-m3/` adds a P2MR leaf version, `0xe0`, whose elliptic curve signature
+    checks stop working once one of a few designated outputs is spent. On Ark-0 this applies from
+    height 30000, and the operator holds the key of one of its two such outputs and will spend it in
+    an announced drill. Another custom signet gets it only if it sets `-signettripwire`. See
+    "Experimental M3 series" below.
 
 ## Layout
 
@@ -359,20 +361,23 @@ git format-patch --start-number 54 p2mr-m2..p2mr-m2-tests -o patches-m2
 ## Experimental M3 series (`patches-m3/`)
 
 Eleven patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/` and
-`patches-m2/`, in that order. They add a P2MR leaf version, `0xe0`, which is executed from a height
-on as a leaf of version `0xc0` is, and whose elliptic curve signature checks fail in every block
-whose parent leaves one of a few designated outputs, the tripwire outputs, missing from the UTXO
-set. On Ark-0 the height is 30000 and the two outputs are fixed in the code. On another custom
-signet both come from `-signettripwire=<height>@<txid:vout>[,<txid:vout>...]`, which needs
-`-signetmldsa44=<height>` with a lower height: an option the series also adds, so that such a
-signet can activate `OP_CHECKMLDSA44` too. Ark-0 refuses both options. It is an experiment of the
-Ark-0 test signet, a test network for trying things out that may be reset at any time: a drill of
-disabling elliptic curve checks inside one leaf version, with a tripwire output whose key the
-operator holds and spends at an announced time. It follows the tripwire idea (P2XX-T) of Pieter
-Wuille's mail of 2026-06-25, which `ark0/NETWORK.md` cites with the other earlier work; it is not
-part of BIP-360 or BIP-361, and it is not proposed for Bitcoin. `doc/p2mr-tripwire.md`, added by the
-series, is its specification. `ark0/NETWORK.md`, "Rule change at height 30000 (M3)", says what it
-changes on Ark-0 and what it does not.
+`patches-m2/`, in that order.
+
+They add a P2MR leaf version, `0xe0`. From a set height, a leaf of this version is executed as a leaf
+of version `0xc0` is. Whether its elliptic curve signature checks work depends on a few designated
+outputs, the tripwire outputs: in every block whose parent leaves one of them missing from the UTXO
+set, those checks fail. On Ark-0 the height is 30000 and the two outputs are fixed in the code.
+Another custom signet sets both with `-signettripwire=<height>@<txid:vout>[,<txid:vout>...]`, which
+needs `-signetmldsa44=<height>` with a lower height; the series adds that option too, so that such a
+signet can activate `OP_CHECKMLDSA44` as well. Ark-0 refuses both options.
+
+It is an experiment of the Ark-0 test signet, a test network for trying things out that may be reset
+at any time. It is a drill: elliptic curve checks are disabled inside one leaf version, and the
+operator holds the key of a tripwire output and spends it at an announced time. It follows the
+tripwire idea (P2XX-T) of Pieter Wuille's mail of 2026-06-25, which `ark0/NETWORK.md` cites with the
+other earlier work. It is not part of BIP-360 or BIP-361, and it is not proposed for Bitcoin.
+`doc/p2mr-tripwire.md`, added by the series, is its specification;
+`ark0/NETWORK.md`, "Rule change at height 30000 (M3)", says what it changes on Ark-0 and what it does not.
 
 | # | Commit | Content |
 |---|---|---|
@@ -388,12 +393,11 @@ changes on Ark-0 and what it does not.
 | 64 | doc: describe P2MR leaf version 0xe0 and its tripwire outputs | `doc/p2mr-tripwire.md` |
 | 65 | consensus: set the two P2MR tripwire outputs of the Ark-0 signet | `ARK0_TRIPWIRE_OUTPOINTS`, the two outputs created at height 15748, and `ARK0_TRIPWIRE_HEIGHT`, 30000; a unit test rebuilds each output's scriptPubKey from its key and compares it with the one on that chain |
 
-It is a soft fork: a node built without `patches-m3/` accepts every block a node with it accepts and
-keeps following Ark-0, but does not execute leaves of version `0xe0`, an unknown leaf version to it,
-and does not check the rule. Bitcoin Core's wallet does not create or sign these leaves; the wallet
-side, which builds outputs of the one template the specification recommends, S3, and signs spends
-through either of its leaves, is in [p2mr-ts](https://github.com/duncan0k/p2mr-ts), whose README
-describes it.
+It is a soft fork. A node built without `patches-m3/` accepts every block a node with it accepts and
+keeps following Ark-0; to it, `0xe0` is an unknown leaf version, so it neither executes these leaves
+nor checks the rule. Bitcoin Core's wallet does not create or sign these leaves. The wallet side is
+in [p2mr-ts](https://github.com/duncan0k/p2mr-ts): it builds outputs of S3, the one template the
+specification recommends, and signs spends through either of its leaves, as its README describes.
 
 Before the release, the series ran on a staging signet of its own, with `-signetmldsa44` and
 `-signettripwire`, two nodes with the rules and one without: S3 outputs were spent through both
@@ -409,15 +413,16 @@ with a warning, and skipped 5; 10 P2MR and signet functional scripts passed,
 passed 280 and skipped 17. A second build, from a fresh clone with an empty compiler cache and the
 files in `patches-m3/` as published here, produced the same five binaries, byte for byte.
 
-Review status: the design was reviewed in three rounds before it was frozen, and the series in
-three more, by Codex (gpt-6.1-sol at maximum effort), which passed it in the third; gpt-6-astra
-then reviewed the whole series and passed it too. The first round found that a node with the rules
-could stop on an assertion when the first block of a reorganization repeats every transaction of
-the block it replaces, coinbase included, and the next one spends a tripwire output; the fix is in
-58, and `feature_p2mr_tripwire.py` covers it. Patch 65, with Ark-0's height set, was reviewed by both in two
-more rounds together with this repository's release files: in the first, both found the height the same in the
-code, its two static assertions and the documentation, with no test tied to the old value, and asked for fixes to
-this README's export command and to `contrib/k3s/m3-dev/`; both passed the second without findings.
+Review status: Codex (gpt-6.1-sol at maximum effort) reviewed the design in three rounds before it
+was frozen and the series in three more, and passed it in the third; gpt-6-astra then reviewed the
+whole series and passed it too. The first round found that a node with the rules could stop on an
+assertion when the first block of a reorganization repeats every transaction of the block it
+replaces, coinbase included, and the next block spends a tripwire output. The fix is in 58, and
+`feature_p2mr_tripwire.py` covers it. Both reviewers then checked patch 65, with Ark-0's height set,
+together with this repository's release files, in two more rounds. In the first, both found the
+height the same in the code, its two static assertions and the documentation, with no test tied to
+the old value, and asked for fixes to this README's export command and to `contrib/k3s/m3-dev/`.
+Both passed the second without findings.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
