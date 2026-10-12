@@ -179,7 +179,7 @@ outside it. From 2026-09-16 to 2026-09-25 the verifying node of the Ark-0 signet
 series while the block producing node ran the consensus series without it, so the two were continuously
 checked against each other on a live chain; a divergence would have been the finding. From 2026-09-22
 both also carried `patches-spacing/`, described below; from 2026-09-25 both ran one build of all four
-sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, and since TBD
+sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, and since 2026-10-13
 they run one of all six, `patches-m3/` included. A job every six hours funds a P2MR
 address from one node and spends it back from the other through the PSBT flow, asserting the witness
 dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records the 2026-09-25 roll, the build it came
@@ -402,7 +402,7 @@ accepted by the third; after a tripwire output was spent at height 788, Schnorr 
 leaves were refused in the mempool and in blocks while ML-DSA-44 spends went on; and the network ran
 for 24 hours from that block with no node restarting.
 
-Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since TBD, which
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since 2026-10-13, which
 `contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 758 of 764 test cases and one more
 with a warning, and skipped 5; 10 P2MR and signet functional scripts passed,
 `feature_p2mr_tripwire.py` among them; and the default functional suite, with the extended tests,
@@ -414,7 +414,10 @@ three more, by Codex (gpt-6.1-sol at maximum effort), which passed it in the thi
 then reviewed the whole series and passed it too. The first round found that a node with the rules
 could stop on an assertion when the first block of a reorganization repeats every transaction of
 the block it replaces, coinbase included, and the next one spends a tripwire output; the fix is in
-58, and `feature_p2mr_tripwire.py` covers it. The review of 65 with Ark-0's height set: TBD.
+58, and `feature_p2mr_tripwire.py` covers it. Patch 65, with Ark-0's height set, was reviewed by both in two
+more rounds together with this repository's release files: in the first, both found the height the same in the
+code, its two static assertions and the documentation, with no test tied to the old value, and asked for fixes to
+this README's export command and to `contrib/k3s/m3-dev/`; both passed the second without findings.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \

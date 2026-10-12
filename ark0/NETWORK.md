@@ -10,7 +10,7 @@ series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
 experimental rule from height 8600; see "Rule change at height 8600 (M1)".
 Since 2026-09-30 they also carry the M2 series in `patches-m2/`, which from
 height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
-at height 20000 (M2)". Since TBD they also carry the M3 series in
+at height 20000 (M2)". Since 2026-10-13 they also carry the M3 series in
 `patches-m3/`, which from height 30000 runs P2MR leaves of version `0xe0`,
 whose elliptic curve signature checks stop working once one of two
 designated outputs is spent; see "Rule change at height 30000 (M3)".
@@ -323,12 +323,12 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   Empty signatures, `OP_CHECKMLDSA44`, leaves of version `0xc0`, P2TR,
   witness v0 and legacy scripts are not affected, and neither are M2's block
   signature and the proof-of-work rules.
-- **The drill.** The operator will spend the drill output at TBD (2026-11-09
-  08:00 UTC proposed), announced here at least two weeks ahead. From the
-  next block on, the checks fail on this chain for as long as no
-  reorganization undoes that block, and nodes with the rule remove from
-  their mempools the spends that now fail, with their descendants. Nobody
-  can spend the NUMS output.
+- **The drill.** The operator will spend the drill output at 2026-10-30
+  08:00 UTC; any change of that time would be announced here at least two
+  weeks ahead. From the next block on, the checks fail on this chain for
+  as long as no reorganization undoes that block, and nodes with the rule
+  remove from their mempools the spends that now fail, with their
+  descendants. Nobody can spend the NUMS output.
 - **What it shows is narrow.** A node with the rule refuses, at the block
   level, any elliptic curve signature in a leaf of version `0xe0` from the
   block after the one that spends a tripwire output, or from height 30000 if
