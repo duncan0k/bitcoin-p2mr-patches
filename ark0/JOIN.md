@@ -51,7 +51,7 @@ gpg --import release-signing-key.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 ```
 
-`gpg` has to report a good signature from `Ark-0 release signing key (duncan0k) <dev@cipherscope.io>`
+`gpg` has to report a good signature from `Ark-0 release signing key (duncan0k)`
 and end with this line:
 
 ```
