@@ -55,7 +55,7 @@ data:
     rpcallowip=10.42.0.0/16
     addnode=ark0-nodeb:38443
     # The public node (ark0/JOIN.md), which this node keeps a connection to.
-    addnode=ark0-node.cipherscope.io:38433
+    addnode=node.ark0.si:38433
     fallbackfee=0.0001
     # Room in the coinbase for the ML-DSA-44 block signature of M2, about 9.7k
     # weight units, when a template is full. The default reserves 8000.
@@ -86,7 +86,7 @@ data:
     rpcallowip=10.42.0.0/16
     connect=ark0-nodea:38433
     # The public node (ark0/JOIN.md), too; -connect leaves added nodes alone.
-    addnode=ark0-node.cipherscope.io:38433
+    addnode=node.ark0.si:38433
     fallbackfee=0.0001
 
   # ark0.py reads the coinbase destination from $ARK0_HOME/reward_address.txt;

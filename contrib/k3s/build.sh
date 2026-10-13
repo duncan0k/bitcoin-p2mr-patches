@@ -159,7 +159,7 @@ if [ "$APPLY_PATCHES" = "1" ]; then
         echo "--- $set_name: $count patches"
         # A failed git am leaves the tree mid-apply; dump enough to debug it
         # from the Job log, then stop, rather than building a half-patched tree.
-        if ! git -c user.name=CipherScope -c user.email=dev@cipherscope.io \
+        if ! git -c user.name=duncan0k -c user.email=dev@ark0.si \
                  am "$dir"/*.patch 2>&1 | tee -a "$LOGDIR/git-am.log"; then
             echo "git am failed in set $set_name" >&2
             git am --show-current-patch=diff 2>&1 | head -60 >&2 || true

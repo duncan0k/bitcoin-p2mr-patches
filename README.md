@@ -6,7 +6,8 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 
 - Base: `bitcoin/bitcoin` tag `v31.1` (commit `9be056a`)
 - Specification: BIP-360 v0.12.1 at `bitcoin/bips` commit `620871a7a442e276a058b487cd8743775fb499a4`
-- License: same as Bitcoin Core (MIT); patches authored by CipherScope <dev@cipherscope.io>
+- License: same as Bitcoin Core (MIT)
+- Contact: duncan0k <dev@ark0.si>
 - Status: experimental. **Not deployed on, and not intended for, mainnet or the public signet** (the
   deployments never activate there).
 - Three experimental extensions for the Ark-0 test signet. None of them is proposed for Bitcoin.

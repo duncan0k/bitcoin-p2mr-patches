@@ -12,8 +12,8 @@ Before you start:
   a decentralized network.
 - **It is a test network for trying things out.** It may be reset at any time.
 - **The explorer and the faucet are the operator's too.** A block explorer at
-  <https://ark0-explorer.cipherscope.io> shows blocks and transactions, with P2MR spends taken
-  apart, and a faucet at <https://ark0-faucet.cipherscope.io> gives out coins to try P2MR with
+  <https://explorer.ark0.si> shows blocks and transactions, with P2MR spends taken
+  apart, and a faucet at <https://faucet.ark0.si> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest one, milestone
   M3, applies from height 30000 ("Rule change at height 30000 (M3)" in `NETWORK.md`). From there
@@ -146,14 +146,14 @@ listen=0
 [signet]
 signetchallenge=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae
 signetpowtargetspacing=90@8064
-addnode=ark0-node.cipherscope.io:38433
+addnode=node.ark0.si:38433
 ```
 
 The first two settings under `[signet]` are rules of the network. With another challenge your
 node is on a different signet altogether; without the spacing option it stops following Ark-0
 at height 8064. Set both before the first start.
 
-`ark0-node.cipherscope.io` is a node run by the operator. It listens on port 38433, over IPv4
+`node.ark0.si` is a node run by the operator. It listens on port 38433, over IPv4
 only, and offers peer-to-peer connections and nothing else. Your node only needs its outgoing
 connection to it; `listen=0` keeps it from accepting incoming ones.
 
@@ -240,7 +240,7 @@ echo "$FIRST"
 wallet's descriptors, and these commands pass it as an argument, where other users of the machine
 could see it: keep this wallet for Ark-0 test coins.
 
-1. Paste that address into the faucet at <https://ark0-faucet.cipherscope.io> and pass the human
+1. Paste that address into the faucet at <https://faucet.ark0.si> and pass the human
    check. It sends 1 coin, which confirms with the next block. Each address and each visitor can
    claim once in 24 hours, and the faucet pays at most 100 claims in any hour.
    `cli -rpcwallet=p2mr getbalances` shows the coin as `untrusted_pending` until the block and as
@@ -280,7 +280,7 @@ executed, and anyone who knows a leaf and its path in the tree can spend the out
 - **Stuck at height 8063**, with the next block rejected for its difficulty: the node lacks
   `patches-spacing/` or the `signetpowtargetspacing=90@8064` option.
 - **No blocks at all:** check the challenge, then that the node can reach
-  `ark0-node.cipherscope.io` on port 38433.
+  `node.ark0.si` on port 38433.
 - **`getdescriptorinfo` does not know `tmr`:** the node was built without `patches-m05/`, or still
   runs the binary from before; rebuild it and restart it as section 4 says.
 - **`getdeploymentinfo` does not list `p2mr_mldsa44`:** the node was built without `patches-m1/`,

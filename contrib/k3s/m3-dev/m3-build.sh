@@ -109,7 +109,7 @@ for set_name in $PATCH_SETS; do
     count=${#patches[@]}
     last_patch="${patches[$((count - 1))]}"
     echo "--- $set_name: $count patches"
-    if ! git -c user.name=CipherScope -c user.email=dev@cipherscope.io \
+    if ! git -c user.name=duncan0k -c user.email=dev@ark0.si \
              am "${patches[@]}" 2>&1 | tee -a "$LOGDIR/git-am.log"; then
         echo "git am failed in set $set_name" >&2
         git am --show-current-patch=diff 2>&1 | head -60 >&2 || true

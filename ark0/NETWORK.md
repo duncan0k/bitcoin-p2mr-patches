@@ -338,7 +338,7 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   such a rule.
 - **The mixed address.** Bitcoin Core's wallet does not make or sign leaves
   of version `0xe0`. Once the chain is six blocks past height 30000, the
-  operator's web wallet, <https://ark0-wallet.cipherscope.io>, adds a third
+  operator's web wallet, <https://wallet.ark0.si>, adds a third
   address to its Schnorr and ML-DSA-44 ones: template S3 of
   `doc/p2mr-tripwire.md`, a tree of exactly two leaves of version `0xe0` at
   depth one, `<x-only key> OP_CHECKSIG` and S1 (see "Rule change at height

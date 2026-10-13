@@ -21,7 +21,7 @@ fi
 
 (cd "$HERE/patches" && sha256sum -c ../SHA256SUMS)
 git checkout -q -B p2mr "$BASE_TAG"
-git -c user.name=CipherScope -c user.email=dev@cipherscope.io am "$HERE"/patches/*.patch
+git -c user.name=duncan0k -c user.email=dev@ark0.si am "$HERE"/patches/*.patch
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_WALLET=ON \
       -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF
