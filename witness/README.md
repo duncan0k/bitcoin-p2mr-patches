@@ -54,7 +54,8 @@ sh build.sh linux <SHA-256 of bitcoind>         # out/ark0-witness, the same pro
 ```
 
 The build is reproducible: the same Go release and the same source give the same bytes, whatever the checkout.
-Version 0.1.0 is built with go1.26.9.
+Version 0.1.0 is built with go1.26.9. `dist/package.py` then packs the zip for Windows, the same bytes on every
+run: the two programs, `dist/README.txt` with their SHA-256, and the licenses.
 
 ## Test
 
