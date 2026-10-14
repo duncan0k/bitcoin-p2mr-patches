@@ -101,6 +101,13 @@ func (n *node) state() (string, string) {
 	return n.phase, n.message
 }
 
+// snapshot is the node's phase, message and RPC, read together.
+func (n *node) snapshot() (string, string, *rpcClient) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.phase, n.message, n.rpc
+}
+
 func (n *node) set(phase, message string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()

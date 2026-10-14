@@ -70,9 +70,12 @@ func (c *collector) get() status {
 func (c *collector) collect() status {
 	s := status{Version: version, Now: nowUTC(), DataDir: c.dataDir, Ark0: "pending", H3: m3Height, TripwireInfo: "unknown",
 		Tripwires: []tripwire{}}
-	s.Node, s.NodeError = c.node.state()
-	rpc := c.node.client()
+	var rpc *rpcClient
+	s.Node, s.NodeError, rpc = c.node.snapshot()
 	if rpc == nil || s.Node == "stopped" {
+		if s.Node == "running" {
+			s.Node = "noanswer" // the node has just exited; what follows is not known yet
+		}
 		return s
 	}
 	var chain struct {

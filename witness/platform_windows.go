@@ -24,6 +24,7 @@ const (
 	processTerminate                  = 0x0001
 	processQueryLimitedInformation    = 0x1000
 	threadSuspendResume               = 0x0002
+	fileIDInfoClass                   = 18 // FileIdInfo
 )
 
 var (
@@ -39,6 +40,7 @@ var (
 	procOpenThread               = kernel32.NewProc("OpenThread")
 	procResumeThread             = kernel32.NewProc("ResumeThread")
 	procQueryFullProcessImageW   = kernel32.NewProc("QueryFullProcessImageNameW")
+	procGetFileInformationByEx   = kernel32.NewProc("GetFileInformationByHandleEx")
 )
 
 // setupConsole has the console print UTF-8, so that every language shows, and names the window.
@@ -136,7 +138,7 @@ func admit(p *os.Process, program *os.File) error {
 }
 
 // runsFile reports whether process runs program: the file Windows loaded for it and program are one file of one
-// volume, whatever the paths that led to them.
+// volume, whatever the paths that led to them. Without ids to compare, it reports an error.
 func runsFile(process syscall.Handle, program *os.File) (bool, error) {
 	buf := make([]uint16, 32768)
 	size := uint32(len(buf))
@@ -150,14 +152,37 @@ func runsFile(process syscall.Handle, program *os.File) (bool, error) {
 		return false, err
 	}
 	defer syscall.CloseHandle(image)
-	var a, b syscall.ByHandleFileInformation
-	if err := syscall.GetFileInformationByHandle(image, &a); err != nil {
+	a, err := idOf(image)
+	if err != nil {
 		return false, err
 	}
-	if err := syscall.GetFileInformationByHandle(syscall.Handle(program.Fd()), &b); err != nil {
+	b, err := idOf(syscall.Handle(program.Fd()))
+	if err != nil {
 		return false, err
 	}
-	return a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileIndexHigh == b.FileIndexHigh && a.FileIndexLow == b.FileIndexLow, nil
+	return a == b, nil
+}
+
+// fileID is FILE_ID_INFO: the volume's serial number and the file's 128-bit id, which, unlike the 64-bit index
+// of GetFileInformationByHandle, identifies a file on ReFS as well.
+type fileID struct {
+	VolumeSerialNumber uint64
+	ID                 [16]byte
+}
+
+// The build fails unless fileID has the 24 bytes Windows expects.
+var _ [24]byte = [unsafe.Sizeof(fileID{})]byte{}
+
+func idOf(h syscall.Handle) (fileID, error) {
+	var id fileID
+	if r, _, err := procGetFileInformationByEx.Call(uintptr(h), fileIDInfoClass, uintptr(unsafe.Pointer(&id)),
+		unsafe.Sizeof(id)); r == 0 {
+		return id, err
+	}
+	if id == (fileID{}) {
+		return id, errors.New("the file system gives the node program no id")
+	}
+	return id, nil
 }
 
 // threadEntry is THREADENTRY32.

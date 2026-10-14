@@ -617,6 +617,12 @@ func TestStatusEdges(t *testing.T) {
 	if r := witnessReport(s, nil); s.Node != "noanswer" || !strings.Contains(r, "Node: did not answer just now") || strings.Contains(r, "Tip") {
 		t.Errorf("no answer: %+v\n%s", s, r)
 	}
+	// A node that was running and has just exited, before the program knows what follows.
+	gone := newNode("bitcoind", "", t.TempDir())
+	gone.markRunning()
+	if s := (&collector{node: gone, dataDir: f.dataDir}).collect(); s.Node != "noanswer" {
+		t.Errorf("just exited: %+v", s)
+	}
 	// Still loading.
 	f.answers["getblockchaininfo"] = func([]json.RawMessage) (any, *rpcError) {
 		return nil, &rpcError{Code: rpcInWarmup, Message: "Loading block index…"}
