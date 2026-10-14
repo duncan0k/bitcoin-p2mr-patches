@@ -8,11 +8,11 @@ For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
 1. Unzip the download (Safari usually does that by itself), then double-click Ark0Witness
    in the folder ark0-witness-{version}-macos. Keep the files of this folder together.
 2. The program is not notarized by Apple, so the first time macOS says it cannot verify
-   "Ark0Witness" and offers only "Done" and "Move to Trash": click Done. Then open System
+   "Ark0Witness": click Done (on macOS 14, Cancel), not Move to Trash. Then open System
    Settings, Privacy & Security, scroll down to the message that "Ark0Witness" was blocked,
    click "Open Anyway" and confirm with your password. Double-click Ark0Witness again and
-   click "Open Anyway". macOS may also ask whether Terminal may access files in your
-   Downloads folder: click Allow.
+   click "Open Anyway" (on macOS 14, "Open"). macOS may also ask whether Terminal may
+   access files in your Downloads folder: click Allow.
 3. A Terminal window opens and your browser shows the status page. Keep the window open:
    closing it stops the node. Terminal asks first; click Terminate.
 
