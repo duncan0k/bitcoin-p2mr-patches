@@ -223,7 +223,7 @@ func (n *node) runOnce(port int) (string, error) {
 
 	go n.trustWhenReady(cmd.Process, port)
 	_ = cmd.Wait()
-	removeNodePID(n.dataDir)
+	_ = removeNodePID(n.dataDir)
 	n.mu.Lock()
 	n.proc, n.rpc = nil, nil
 	n.mu.Unlock()

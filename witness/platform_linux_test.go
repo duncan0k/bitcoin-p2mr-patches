@@ -8,10 +8,29 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestLinuxAbsoluteXDGWithoutHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	base := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", base)
+	if got, err := defaultDataHome(); err != nil || got != base {
+		t.Fatalf("absolute XDG without HOME: %q %v", got, err)
+	}
+}
+
+func TestLinuxBrowserWithoutDesktop(t *testing.T) {
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("PATH", t.TempDir())
+	if err := openBrowser("http://127.0.0.1/"); err == nil || !strings.Contains(err.Error(), "no graphical desktop") {
+		t.Fatalf("headless browser: %v", err)
+	}
+}
 
 func TestLinuxExecutesCheckedDescriptor(t *testing.T) {
 	runtime.LockOSThread()

@@ -46,7 +46,8 @@ def main() -> None:
     out = Path(args[4])
     template = "README.txt" if platform == "windows" else "README-macos.txt" if platform == "macos" else "README-linux.txt"
     readme = (HERE / template).read_text(encoding="ascii").format(
-        version=VERSION, witness_sha256=sha256(witness), bitcoind_sha256=sha256(node))
+        version=VERSION, witness_sha256=sha256(witness), bitcoind_sha256=sha256(node),
+        arch=platform.removeprefix("linux-"))
     witness_name = "Ark0Witness.exe" if platform == "windows" else "Ark0Witness" if platform == "macos" else "ark0-witness"
     node_name = "bitcoind.exe" if platform == "windows" else "bitcoind"
     text = crlf if platform == "windows" else lambda data: data.replace(b"\r\n", b"\n")

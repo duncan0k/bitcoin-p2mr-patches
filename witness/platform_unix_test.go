@@ -38,7 +38,11 @@ func writeTestFile(t *testing.T, path, text string, mode os.FileMode) {
 }
 
 func TestPrivateNodeCopy(t *testing.T) {
-	dataDir, shipped := t.TempDir(), filepath.Join(t.TempDir(), nodeName)
+	dataDir, err := dataFolder(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shipped := filepath.Join(t.TempDir(), nodeName)
 	writeTestFile(t, shipped, "the shipped node", 0o700)
 	want := fileHash(t, shipped)
 	copyPath := filepath.Join(dataDir, "node", nodeName)
@@ -178,22 +182,13 @@ func TestDevelopmentNodeSkipsCopy(t *testing.T) {
 	}
 }
 
-func TestLeftoverNode(t *testing.T) {
-	// Data folder aliases must still identify the private executable reported by the operating system.
-	dir := filepath.Join(t.TempDir(), "data")
-	if err := os.Symlink(t.TempDir(), dir); err != nil {
-		t.Fatal(err)
+func TestEarlierWitnessHelper(t *testing.T) {
+	dir := os.Getenv("WITNESS_EARLIER_WITNESS")
+	if dir == "" {
+		return
 	}
-	exe, err := os.Executable()
+	dir, err := dataFolder(dir)
 	if err != nil {
-		t.Fatal(err)
-	}
-	n := fakeNodeProcess(t, "silent", dir, fileHash(t, exe))
-	n.start()
-	if !eventually(10*time.Second, func() bool { return starts(dir) == 1 && n.child() != nil }) {
-		t.Fatal("no private fake node started")
-	}
-	if err := writeNodePID(dir, n.child().Pid); err != nil {
 		t.Fatal(err)
 	}
 	release, err := lockInstance(filepath.Join(dir, lockFile))
@@ -201,19 +196,119 @@ func TestLeftoverNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if err := stopLeftoverNode(dir); err != nil {
+	exe, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !stoppedWithin(n, 5*time.Second) {
-		t.Fatal("the earlier node still runs")
+	n := newNode(exe, fileHash(t, exe), dir)
+	cmd := exec.Command(exe, nodeArgs(dir, 1)...)
+	cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=silent")
+	configureNode(cmd)
+	// 仅此测试辅助进程移除 Pdeathsig，让 SIGKILL 留下真实孤儿；正式启动仍保留它。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := n.startNode(cmd); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Hour)
+}
+
+func TestLeftoverNode(t *testing.T) {
+	target := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := dataFolder(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedDir := t.TempDir()
+	unrelated := exec.Command(exe, nodeArgs(unrelatedDir, 1)...)
+	unrelated.Env = append(os.Environ(), "WITNESS_FAKE_NODE=silent")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedExited := make(chan struct{})
+	go func() { _ = unrelated.Wait(); close(unrelatedExited) }()
+	defer func() { _ = unrelated.Process.Kill(); <-unrelatedExited }()
+	if !eventually(5*time.Second, func() bool { return starts(unrelatedDir) == 1 }) {
+		t.Fatal("unrelated fake node did not start")
+	}
+
+	helper := exec.Command(exe, "-test.run=^TestEarlierWitnessHelper$")
+	helper.Env = append(os.Environ(), "WITNESS_FAKE_NODE=", "WITNESS_EARLIER_WITNESS="+alias)
+	helper.Stderr = os.Stderr
+	if err := helper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	helperDone := false
+	t.Cleanup(func() {
+		if !helperDone {
+			_ = helper.Process.Kill()
+			_ = helper.Wait()
+		}
+	})
+	var pid int
+	if !eventually(10*time.Second, func() bool {
+		pid, err = readNodePID(filepath.Join(dir, nodePIDFile))
+		return err == nil && pid > 1 && starts(dir) == 1
+	}) {
+		t.Fatal("earlier witness did not start and record its private fake node")
+	}
+	orphan, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orphan.Release()
+	recovered := false
+	defer func() {
+		if !recovered {
+			_ = orphan.Kill()
+		}
+	}()
+	if err := helper.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = helper.Wait()
+	helperDone = true
+	expected := filepath.Join(dir, "node", nodeName)
+	if image, err := processExecutable(pid); err != nil || image != expected {
+		t.Fatalf("no orphaned private node: %q %v", image, err)
+	}
+	release, err := lockInstance(filepath.Join(dir, lockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := stopLeftoverNode(dir, consoleTexts["en"].Leftover); err != nil {
+		t.Fatal(err)
+	}
+	if !eventually(5*time.Second, func() bool { image, err := processExecutable(pid); return err == nil && image != expected }) {
+		t.Fatal("orphaned node still runs")
+	}
+	recovered = true
+	select {
+	case <-unrelatedExited:
+		t.Fatal("unrelated node exited during recovery")
+	default:
+	}
+	if err := unrelated.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("unrelated node stopped: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, nodePIDFile)); !os.IsNotExist(err) {
-		t.Errorf("the old PID remains: %v", err)
+		t.Fatalf("old PID remains: %v", err)
+	}
+	if err := stopLeftoverNode(dir, consoleTexts["en"].Leftover); err != nil {
+		t.Fatalf("already gone: %v", err)
 	}
 	next := fakeNodeProcess(t, "ready", dir, fileHash(t, exe))
 	next.start()
 	if !eventually(10*time.Second, func() bool { return starts(dir) == 2 && next.client() != nil }) {
-		t.Fatal("a new node did not start after recovery")
+		t.Fatal("new node did not start after recovery")
 	}
 }
 
@@ -244,7 +339,7 @@ func TestUnrelatedPIDIsNotSignalled(t *testing.T) {
 	if err := writeNodePID(dir, cmd.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
-	if err := stopLeftoverNode(dir); err != nil {
+	if err := stopLeftoverNode(dir, consoleTexts["en"].Leftover); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(cmd.Process.Pid, 0); err != nil {
@@ -279,6 +374,10 @@ func TestUnixDataFolder(t *testing.T) {
 			want = filepath.Join(base, "Ark0Witness")
 		}
 		got, err := dataFolder("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err = filepath.EvalSymlinks(want)
 		if err != nil || got != want {
 			t.Fatalf("XDG_DATA_HOME=%q: %s %v, want %s", xdg, got, err, want)
 		}
@@ -288,7 +387,9 @@ func TestUnixDataFolder(t *testing.T) {
 		}
 	}
 	override := filepath.Join(t.TempDir(), "explicit")
-	if got, err := dataFolder(override); err != nil || got != override {
+	got, err := dataFolder(override)
+	want, resolveErr := filepath.EvalSymlinks(override)
+	if err != nil || resolveErr != nil || got != want {
 		t.Fatalf("override: %s %v", got, err)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const nodeName = "bitcoind"
@@ -70,15 +71,10 @@ func lockInstance(path string) (func(), error) {
 
 func ownedByUser(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Getuid())
+	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func privateNodeFolder(dataDir string) (string, error) {
-	// A canonical data folder keeps the executed path and the recovery path identical, including /var on macOS.
-	dataDir, err := filepath.EvalSymlinks(dataDir)
-	if err != nil {
-		return "", err
-	}
 	dir := filepath.Join(dataDir, "node")
 	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
 		return "", err
@@ -204,6 +200,7 @@ func (n *node) startNode(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// macOS 在启动和记录 PID 之间被 SIGKILL 时，未记录的节点只能手动停止。
 	if err := writeNodePID(n.dataDir, cmd.Process.Pid); err != nil {
 		// Without a recovery record, an untracked child could survive this witness on macOS.
 		_ = cmd.Process.Kill()
@@ -232,62 +229,154 @@ func writeNodePID(dataDir string, pid int) error {
 	return os.Rename(f.Name(), filepath.Join(dataDir, nodePIDFile))
 }
 
-func removeNodePID(dataDir string) { _ = os.Remove(filepath.Join(dataDir, nodePIDFile)) }
-
-// Only an executable in this data folder may be stopped; a reused PID must never target another program.
-func stopLeftoverNode(dataDir string) error {
-	path := filepath.Join(dataDir, nodePIDFile)
-	data, err := os.ReadFile(path)
+func removeNodePID(dataDir string) error {
+	err := os.Remove(filepath.Join(dataDir, nodePIDFile))
 	if os.IsNotExist(err) {
 		return nil
 	}
+	return err
+}
+
+func readNodePID(path string) (int, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("cannot safely open node PID file %q: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("cannot inspect node PID file %q: %w", path, err)
+	}
+	if reason := privateFileProblem(info.Mode(), fileOwner(info), uint32(os.Geteuid())); reason != "" {
+		return 0, fmt.Errorf("unsafe node PID file %q: %s; remove it before retrying", path, reason)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 32))
+	if err != nil {
+		return 0, fmt.Errorf("cannot read node PID file %q: %w", path, err)
+	}
+	if info.Size() > 32 {
+		return 0, nil
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	if text == "" || strings.IndexFunc(text, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(text)
+	if err != nil || pid <= 1 || pid >= 1<<22 {
+		return 0, nil
+	}
+	return pid, nil
+}
+
+func fileOwner(info os.FileInfo) uint32 {
+	return info.Sys().(*syscall.Stat_t).Uid
+}
+
+func privateFileProblem(mode os.FileMode, owner, uid uint32) string {
+	if !mode.IsRegular() {
+		return "must be a regular file"
+	}
+	if owner != uid {
+		return "must be owned by the effective user"
+	}
+	if mode.Perm()&0o022 != 0 {
+		return "must not be writable by group or others"
+	}
+	return ""
+}
+
+// 仅恢复解析后的数据目录中的私有程序。
+func stopLeftoverNode(dataDir, message string) error {
+	path := filepath.Join(dataDir, nodePIDFile)
+	pid, err := readNodePID(path)
 	if err != nil {
 		return err
 	}
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
-	// Resolve the data folder's aliases, but never let a symlink at node/bitcoind identify an unrelated process.
-	if resolved, err := filepath.EvalSymlinks(dataDir); err == nil {
-		dataDir = resolved
-	}
-	expected := filepath.Join(dataDir, "node", nodeName)
-	if parseErr == nil && pid > 1 {
-		image, err := processExecutable(pid)
-		if err != nil {
-			return fmt.Errorf("cannot identify the node recorded in %s: %w", path, err)
-		}
-		if image == expected {
-			fmt.Println("Stopping a node left from an earlier run...")
-			// Check again immediately before signalling, because the earlier process may already have exited.
-			image, err = processExecutable(pid)
-			if err != nil {
-				return err
-			}
-			if image == expected {
-				if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-					return fmt.Errorf("cannot stop the earlier node (PID %d); stop it before retrying: %w", pid, err)
-				}
-				if err := waitLeftoverNode(pid, expected, shutdownTimeout); err != nil {
-					return err
-				}
-			}
+	if pid != 0 {
+		if err := stopRecordedNode(pid, filepath.Join(dataDir, "node", nodeName), message); err != nil {
+			return fmt.Errorf("cannot recover node recorded in %q: %w", path, err)
 		}
 	}
-	return os.Remove(path)
+	return removeNodePID(dataDir)
 }
 
-func waitLeftoverNode(pid int, expected string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		image, err := processExecutable(pid)
-		if err != nil {
-			return err
-		}
-		if image != expected {
-			return nil
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("the earlier node (PID %d) is still shutting down; wait for it to exit and retry", pid)
-		}
-		time.Sleep(100 * time.Millisecond)
+func absoluteHome() (string, error) {
+	home := os.Getenv("HOME")
+	if !filepath.IsAbs(home) {
+		return "", errors.New("HOME must be set to an absolute path; set HOME or use -datadir")
 	}
+	return home, nil
+}
+
+func dataPathProblem(path string) error {
+	if strings.ContainsFunc(path, unicode.IsControl) {
+		return fmt.Errorf("data folder %q contains a control character; choose another folder with -datadir", path)
+	}
+	return nil
+}
+
+// 数据目录更严格；父目录允许 sticky 公共目录和 user-private-group 的组写权限。
+func folderProblem(mode os.FileMode, owner, group, uid, gid uint32, data bool) string {
+	if !mode.IsDir() {
+		return "must be a directory"
+	}
+	if data {
+		if owner != uid {
+			return "must be owned by the effective user"
+		}
+		if mode.Perm()&0o022 != 0 {
+			return "must not be writable by group or others"
+		}
+		return ""
+	}
+	if owner != 0 && owner != uid {
+		return "must be owned by root or the effective user"
+	}
+	if mode.Perm()&0o002 != 0 && mode&os.ModeSticky == 0 {
+		return "is writable by others without the sticky bit"
+	}
+	// sticky 公共目录（例如 /tmp）允许组和其他用户写入。
+	if mode.Perm()&0o002 != 0 && mode&os.ModeSticky != 0 {
+		return ""
+	}
+	if mode.Perm()&0o020 != 0 && (owner != uid || group != gid) {
+		return "is group-writable without ownership by the effective user and their primary group"
+	}
+	return ""
+}
+
+func prepareDataFolder(dir string) (string, error) {
+	if err := dataPathProblem(dir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("cannot create data folder %q; choose another folder with -datadir: %w", dir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve data folder %q; choose another folder with -datadir: %w", dir, err)
+	}
+	if err := dataPathProblem(resolved); err != nil {
+		return "", err
+	}
+	for path := resolved; ; path = filepath.Dir(path) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("cannot inspect folder %q; choose another folder with -datadir: %w", path, err)
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if reason := folderProblem(info.Mode(), stat.Uid, stat.Gid, uint32(os.Geteuid()), uint32(os.Getegid()), path == resolved); reason != "" {
+			if path == resolved {
+				return "", fmt.Errorf("data folder %q %s; fix its ownership and run chmod 700 on it, or choose another folder with -datadir", path, reason)
+			}
+			return "", fmt.Errorf("parent folder %q %s; choose another folder with -datadir", path, reason)
+		}
+		if filepath.Dir(path) == path {
+			break
+		}
+	}
+	return resolved, nil
 }

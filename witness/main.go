@@ -78,7 +78,7 @@ func run() int {
 		return fail(t.Busy)
 	}
 	defer release()
-	if err := stopLeftoverNode(dataDir); err != nil {
+	if err := stopLeftoverNode(dataDir, t.Leftover); err != nil {
 		return fail(fmt.Sprintf(t.StartFailed, err))
 	}
 
@@ -92,10 +92,12 @@ func run() int {
 	pagePath := filepath.Join(dataDir, pageFile)
 	_ = os.WriteFile(pagePath, []byte(url+"\n"), 0o600)
 	defer os.Remove(pagePath)
-	fmt.Printf("%s\n%s\n\n%s\n", t.Running, url, t.KeepOpen)
-	if !*noBrowser {
-		_ = openBrowser(url)
+	attempted := shouldOpenBrowser(runtime.GOOS, *noBrowser, os.Getenv("DISPLAY"), os.Getenv("WAYLAND_DISPLAY"))
+	var browserErr error
+	if attempted {
+		browserErr = openBrowser(url)
 	}
+	fmt.Printf("%s\n%s\n\n%s\n", runningText(t, attempted, browserErr), url, t.KeepOpen)
 
 	select {
 	case <-signals:
@@ -191,11 +193,25 @@ func dataFolder(given string) (string, error) {
 		}
 		dir = filepath.Join(base, "Ark0Witness")
 	}
+	if err := dataPathProblem(dir); err != nil {
+		return "", err
+	}
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", err
 	}
-	return dir, os.MkdirAll(dir, 0o700)
+	return prepareDataFolder(dir)
+}
+
+func shouldOpenBrowser(platform string, noBrowser bool, display, wayland string) bool {
+	return !noBrowser && (platform != "linux" || display != "" || wayland != "")
+}
+
+func runningText(t console, attempted bool, err error) string {
+	if attempted && err == nil {
+		return t.Running
+	}
+	return t.RunningNoBrowser
 }
 
 var pageURLPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/[0-9a-f]{64}/$`)

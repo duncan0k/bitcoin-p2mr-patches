@@ -17,11 +17,13 @@ const nodeName = "bitcoind.exe"
 const shutdownTimeout = 4 * time.Second
 const endUnresponsiveNode = true
 
-func defaultDataHome() (string, error) { return os.UserCacheDir() }
-func stoppingSignals() []os.Signal     { return []os.Signal{os.Interrupt, syscall.SIGTERM} }
-func ignoreBrokenPipe()                {}
-func stopLeftoverNode(string) error    { return nil }
-func removeNodePID(string)             {}
+func defaultDataHome() (string, error)             { return os.UserCacheDir() }
+func stoppingSignals() []os.Signal                 { return []os.Signal{os.Interrupt, syscall.SIGTERM} }
+func ignoreBrokenPipe()                            {}
+func stopLeftoverNode(string, string) error        { return nil }
+func removeNodePID(string) error                   { return nil }
+func prepareDataFolder(dir string) (string, error) { return dir, os.MkdirAll(dir, 0o700) }
+func dataPathProblem(string) error                 { return nil }
 
 // Windows ends a program five seconds after its console window was closed.
 func shutdownNode(n *node, timeout time.Duration) {
