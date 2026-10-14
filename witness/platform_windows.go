@@ -179,10 +179,16 @@ func idOf(h syscall.Handle) (fileID, error) {
 		unsafe.Sizeof(id)); r == 0 {
 		return id, err
 	}
-	if id == (fileID{}) {
-		return id, errors.New("the file system gives the node program no id")
+	return id, id.check()
+}
+
+// check refuses an id the file system left empty: one without 128-bit file ids sets the id to zero, whatever the
+// volume's serial number, and two of its files would then look like one.
+func (id fileID) check() error {
+	if id.ID == ([16]byte{}) {
+		return errors.New("the file system gives the node program no id")
 	}
-	return id, nil
+	return nil
 }
 
 // threadEntry is THREADENTRY32.

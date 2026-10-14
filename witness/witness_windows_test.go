@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+// A file id left empty by the file system is no id, even on a volume with a serial number.
+func TestFileIDCheck(t *testing.T) {
+	if (fileID{VolumeSerialNumber: 7}).check() == nil {
+		t.Error("an empty file id is accepted")
+	}
+	if (fileID{VolumeSerialNumber: 7, ID: [16]byte{15: 1}}).check() != nil {
+		t.Error("a file id is refused")
+	}
+}
+
 // A node whose image is not the file that was checked is not let run.
 func TestAdmitRefusesAnotherFile(t *testing.T) {
 	t.Setenv("WITNESS_FAKE_NODE", "silent")
