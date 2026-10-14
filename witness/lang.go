@@ -52,7 +52,7 @@ var consoleTexts = map[string]console{
 	},
 	"ja": {
 		Title:        "Ark-0 ウィットネス",
-		Tagline:      "Ark-0 はテストネットです。試用のためのもので、いつでもリセットされる可能性があります。",
+		Tagline:      "Ark-0 は試してみるためのテストネットワークです。いつでもリセットされる可能性があります。",
 		Running:      "ウィットネスが動いています。状態ページをブラウザーで開きました：",
 		KeepOpen:     "このウィンドウは開いたままにしてください。閉じるとノードが停止します。",
 		Already:      "ウィットネスは別のウィンドウですでに動いています。状態ページ：",
@@ -67,7 +67,7 @@ var consoleTexts = map[string]console{
 	},
 	"ko": {
 		Title:        "Ark-0 위트니스",
-		Tagline:      "Ark-0은 테스트넷입니다. 체험용이며 언제든 초기화될 수 있습니다.",
+		Tagline:      "Ark-0 테스트 네트워크는 체험용이며, 언제든지 초기화될 수 있습니다.",
 		Running:      "위트니스가 실행 중입니다. 브라우저에서 상태 페이지를 열었습니다:",
 		KeepOpen:     "이 창을 닫지 마세요. 창을 닫으면 노드가 멈춥니다.",
 		Already:      "위트니스가 이미 다른 창에서 실행 중입니다. 상태 페이지:",
@@ -97,7 +97,7 @@ var consoleTexts = map[string]console{
 	},
 	"es": {
 		Title:        "Ark-0 Witness",
-		Tagline:      "Ark-0 es una red de pruebas, solo para probar; puede reiniciarse en cualquier momento.",
+		Tagline:      "Ark-0 es una red de prueba para experimentar. Puede reiniciarse en cualquier momento.",
 		Running:      "Ark-0 Witness está en marcha. Su página se ha abierto en el navegador:",
 		KeepOpen:     "No cierres esta ventana: si la cierras, el nodo se detiene.",
 		Already:      "Ark-0 Witness ya está en marcha en otra ventana. Su página:",

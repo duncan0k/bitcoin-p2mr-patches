@@ -3,16 +3,18 @@ Ark0Witness {version} for Windows
 Watch the Ark-0 M3 drill with a node of your own. Ark-0 is a test network for trying things out;
 it may be reset at any time.
 
-1. Unzip the whole download into a folder (right-click, Extract All), then double-click
-   Ark0Witness.exe in that folder.
+1. Unzip the whole download into a folder on the computer's own drive (right-click,
+   Extract All), then double-click Ark0Witness.exe in that folder. From a FAT32 or exFAT
+   drive, such as many USB sticks, the node does not start ("The parameter is incorrect.").
 2. Windows may say "Windows protected your PC", because the program is not code-signed:
-   click "More info", then "Run anyway".
+   click "More info", then "Run anyway". With Smart App Control on, Windows blocks the
+   program outright; ark0/JOIN.md in the repository below runs the node in WSL instead.
 3. A console window opens and your browser shows the status page. Keep the window open:
    closing it stops the node.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, and judges a raw transaction you paste into it. Nothing is
-ever sent. All times are UTC.
+applies and the two tripwires, and judges a raw transaction you paste into it, which is
+never broadcast. All times are UTC.
 
 To remove everything: close the console window, then delete this folder and the folder
 %LOCALAPPDATA%\Ark0Witness, where the node keeps its data.

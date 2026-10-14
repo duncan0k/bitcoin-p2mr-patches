@@ -37,7 +37,7 @@ order. You can take that build prebuilt, as binaries or as a container image, or
 yourself; the rest of this guide works the same with either.
 
 On 64-bit Windows 10 or 11 there is a way without commands: the witness program of the release
-`ark0-witness-0.1.0` runs a Windows build of the same node and shows what it reports
+[`ark0-witness-0.1.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.1.0) runs a Windows build of the same node and shows what it reports
 (`witness/README.md`). This guide does not cover it.
 
 ### Prebuilt binaries or image

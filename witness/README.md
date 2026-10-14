@@ -8,15 +8,16 @@ Double-click `Ark0Witness.exe` and it:
 - opens a page in your browser, served on 127.0.0.1 only, that shows what that node reports: how far it has
   synced, whether it is on Ark-0 (the hash of block 1264), block 30000 where M3 applies, the two tripwires,
   and whether elliptic curve signatures in leaves of version `0xe0` are still accepted;
-- lets you paste a raw transaction for the node to judge with `testmempoolaccept`. Nothing is ever sent;
+- lets you paste a raw transaction for the node to judge with `testmempoolaccept`. It is never broadcast;
 - gives a short witness report to share. It holds no IP address and no folder name.
 
-Closing the program's console window stops the node; a node still loading then, or still shutting down a few
-seconds later, is ended, and picks up where it left off at the next start. The node is tied to the program:
-however the program ends, Windows ends the node with it (a job object), so no node is left running hidden. The
-node keeps its data in
-`%LOCALAPPDATA%\Ark0Witness` for the next start; to remove everything, close the window, wait a few
-seconds, and delete that folder and the program's folder.
+Closing the program's console window stops the node. A node that is still loading at that moment, or still
+shutting down a few seconds later, is ended; it picks up where it left off at the next start. The node is tied
+to the program: however the program ends, Windows ends the node with it (a job object), so no node is left
+running hidden. One gap is left: if the program is killed in the instant between starting the node and tying
+it to the program, a suspended node process that has run no code stays behind; end it in Task Manager. The
+node keeps its data in `%LOCALAPPDATA%\Ark0Witness` for the next start; to remove everything, close the
+window, wait a few seconds, and delete that folder and the program's folder.
 
 Ark-0 is a test network for trying things out. It may be reset at any time.
 
@@ -33,18 +34,22 @@ Ark-0 is a test network for trying things out. It may be reset at any time.
   requests whose Host is that address: another site's page cannot find it or reach it under a name of its own.
 - No update checks, no statistics, no other network traffic than the node's own.
 - The program is built with the SHA-256 of the `bitcoind.exe` it ships with and starts no other: it holds the
-  file open against changes while it checks it and starts the node suspended, and lets the node run only once
-  Windows shows that the node runs that very file.
+  file open, so that nothing can change it, while it checks the file, starts the node suspended and checks with
+  Windows that the node runs that very file; only then does it let the node run. That check needs file ids,
+  which FAT32 and exFAT drives do not give (see below).
 - What the page calls good rests on the node's own answers: it says so only once the node has confirmed
   block 1264 and reported both tripwires; anything it could not read shows as unknown, also in the report.
 - A second start while the program runs shows the running one's page.
 
 ## Before you run it on Windows
 
-The program is not code-signed. On first start, Windows SmartScreen may say "Windows protected your PC":
-click "More info", then "Run anyway". Check the zip's SHA-256 against the `SHA256SUMS` of the release, whose
-signature you can check with the release key as `ark0/JOIN.md` describes. It needs 64-bit Windows 10 or 11
-on an Intel or AMD processor.
+It needs 64-bit Windows 10 or 11 on an Intel or AMD processor. Unzip it onto the computer's own drive (NTFS),
+not onto a FAT32 or exFAT drive such as many USB sticks: there the program cannot check the node and does not
+start it, and its window says "The parameter is incorrect." Check the zip's SHA-256 against the `SHA256SUMS`
+of the release, whose signature you can check with the release key as `ark0/JOIN.md` describes. The
+programs are not code-signed. On first start, Windows SmartScreen may say "Windows protected your PC":
+click "More info", then "Run anyway". With Smart App Control on, Windows blocks the program and offers no
+such choice; on such a computer, run the Linux build in WSL and follow `ark0/JOIN.md` instead.
 
 ## Build
 

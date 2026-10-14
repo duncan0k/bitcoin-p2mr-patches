@@ -6,7 +6,7 @@
   const STRINGS = window.STRINGS;
   const LANGS = ['en', 'zh', 'ja', 'ko', 'ru', 'es'];
   const NAMES = { en: 'English', zh: '中文', ja: '日本語', ko: '한국어', ru: 'Русский', es: 'Español' };
-  const HTML_LANG = { en: 'en', zh: 'zh-CN', ja: 'ja', ko: 'ko', ru: 'ru', es: 'es' };
+  const HTML_LANG = { en: 'en', zh: 'zh-Hans', ja: 'ja', ko: 'ko', ru: 'ru', es: 'es' };
   const EXPLORER_HEIGHT = 'https://explorer.ark0.si/height/';
   // The two tripwires were created at height 15748: below it a node reports both as missing.
   const TRIPWIRES_CREATED = 15748;
