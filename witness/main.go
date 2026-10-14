@@ -32,6 +32,11 @@ func main() {
 }
 
 func run() int {
+	// Closing the console window arrives as SIGTERM (CTRL_CLOSE_EVENT on Windows), Ctrl+C as an interrupt. Both are
+	// caught from the start: a node is then stopped, or never started.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
 	dataFlag := flag.String("datadir", "", "data folder (default: Ark0Witness in the local application data folder)")
 	nodeFlag := flag.String("bitcoind", "", "node program (default: bitcoind next to this program)")
 	noBrowser := flag.Bool("no-browser", false, "do not open the page in a browser")
@@ -41,17 +46,18 @@ func run() int {
 	t := consoleTexts[pickLanguage(*langFlag, systemLanguage())]
 	setupConsole(t.Title)
 	fmt.Printf("%s %s\n%s\n\n", t.Title, version, t.Tagline)
+	fail := func(message string) int { return failed(t, message, signals) }
 
 	exe, err := nodeProgram(*nodeFlag)
 	if err != nil {
-		return fail(t, t.MissingNode)
+		return fail(t.MissingNode)
 	}
 	if err := checkNodeProgram(exe, bitcoindSHA256); err != nil {
-		return fail(t, t.WrongNode)
+		return fail(t.WrongNode)
 	}
 	dataDir, err := dataFolder(*dataFlag)
 	if err != nil {
-		return fail(t, fmt.Sprintf(t.NoDataFolder, err))
+		return fail(fmt.Sprintf(t.NoDataFolder, err))
 	}
 	release, err := lockInstance(filepath.Join(dataDir, lockFile))
 	if err != nil {
@@ -61,20 +67,22 @@ func run() int {
 			if !*noBrowser {
 				_ = openBrowser(url)
 			}
-			time.Sleep(5 * time.Second)
+			select {
+			case <-signals:
+			case <-time.After(5 * time.Second):
+			}
 			return 0
 		}
-		return fail(t, t.Busy)
+		return fail(t.Busy)
 	}
 	defer release()
 
-	n := newNode(exe, dataDir)
-	n.start()
+	n := newNode(exe, bitcoindSHA256, dataDir)
 	srv, err := newServer(n, dataDir)
 	if err != nil {
-		n.stop()
-		return fail(t, fmt.Sprintf(t.StartFailed, err))
+		return fail(fmt.Sprintf(t.StartFailed, err))
 	}
+	n.start()
 	url := srv.url()
 	pagePath := filepath.Join(dataDir, pageFile)
 	_ = os.WriteFile(pagePath, []byte(url+"\n"), 0o600)
@@ -84,26 +92,33 @@ func run() int {
 		_ = openBrowser(url)
 	}
 
-	// Closing the console window arrives as SIGTERM (CTRL_CLOSE_EVENT on Windows), Ctrl+C as an interrupt.
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	select {
 	case <-signals:
 		fmt.Println(t.Stopping)
+		// Windows ends a program five seconds after its console window was closed.
+		deadline := time.Now().Add(4 * time.Second)
 		n.stop()
-		n.wait(2 * time.Second)
+		n.wait(time.Until(deadline))
 		return 0
 	case <-n.done:
 		_, message := n.state()
-		return fail(t, fmt.Sprintf(t.Stopped, message))
+		return fail(strings.TrimSpace(t.Stopped + "\n" + message))
 	}
 }
 
-// fail shows a message and keeps the window open until Enter, so that a double-clicked program does not
-// vanish before its message can be read.
-func fail(t console, message string) int {
+// failed shows a message and keeps the window open until Enter, Ctrl+C or the window is closed, so that a
+// double-clicked program does not vanish before its message can be read.
+func failed(t console, message string, signals <-chan os.Signal) int {
 	fmt.Printf("\n%s\n\n%s\n", message, t.PressEnter)
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	enter := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		close(enter)
+	}()
+	select {
+	case <-enter:
+	case <-signals:
+	}
 	return 1
 }
 
@@ -137,16 +152,21 @@ func nodeProgram(given string) (string, error) {
 
 // checkNodeProgram compares the node program with the SHA-256 this program was built with, if any.
 func checkNodeProgram(exe, want string) error {
-	if want == "" {
-		return nil
-	}
-	f, err := os.Open(exe)
+	f, err := openNodeProgram(exe)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	return checkSHA256(f, want)
+}
+
+// checkSHA256 compares what r holds with the SHA-256 want, if any.
+func checkSHA256(r io.Reader, want string) error {
+	if want == "" {
+		return nil
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, r); err != nil {
 		return err
 	}
 	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), want) {

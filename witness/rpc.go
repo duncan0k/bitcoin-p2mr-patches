@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,14 +36,19 @@ type rpcClient struct {
 	url        string
 	cookiePath string
 	client     *http.Client
+	lastID     atomic.Uint64
 }
 
 func newRPCClient(port int, cookiePath string) *rpcClient {
 	return &rpcClient{
 		url:        "http://127.0.0.1:" + strconv.Itoa(port) + "/",
 		cookiePath: cookiePath,
-		// No proxy: the node is on this computer, whatever the environment says.
-		client: &http.Client{Transport: &http.Transport{Proxy: nil}},
+		client: &http.Client{
+			// No proxy: the node is on this computer, whatever the environment says.
+			Transport: &http.Transport{Proxy: nil},
+			// The node never redirects; following one would carry the call elsewhere.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
@@ -59,7 +65,8 @@ func (c *rpcClient) callWithin(timeout time.Duration, method string, params []an
 	if params == nil {
 		params = []any{}
 	}
-	body, err := json.Marshal(map[string]any{"jsonrpc": "1.0", "id": "witness", "method": method, "params": params})
+	id := strconv.FormatUint(c.lastID.Add(1), 10)
+	body, err := json.Marshal(map[string]any{"jsonrpc": "1.0", "id": id, "method": method, "params": params})
 	if err != nil {
 		return err
 	}
@@ -83,9 +90,11 @@ func (c *rpcClient) callWithin(timeout time.Duration, method string, params []an
 	var reply struct {
 		Result json.RawMessage `json:"result"`
 		Error  *rpcError       `json:"error"`
+		ID     json.RawMessage `json:"id"`
 	}
-	// A refused cookie comes back as 401 with an empty body: that, or anything but JSON-RPC, is no answer.
-	if err := json.Unmarshal(data, &reply); err != nil {
+	// A refused cookie comes back as 401 with an empty body: that, or anything but the answer to this very call,
+	// is no answer.
+	if json.Unmarshal(data, &reply) != nil || string(reply.ID) != strconv.Quote(id) {
 		return errNotReady
 	}
 	if reply.Error != nil {
@@ -94,12 +103,8 @@ func (c *rpcClient) callWithin(timeout time.Duration, method string, params []an
 	if out == nil {
 		return nil
 	}
+	if len(reply.Result) == 0 || string(reply.Result) == "null" {
+		return errors.New("the node answered " + method + " without a result")
+	}
 	return json.Unmarshal(reply.Result, out)
-}
-
-// alive reports whether the node of this data folder answers on this port, even if only to say it is loading.
-func (c *rpcClient) alive() bool {
-	err := c.callWithin(3*time.Second, "getblockcount", nil, nil)
-	var answer *rpcError
-	return err == nil || errors.As(err, &answer)
 }

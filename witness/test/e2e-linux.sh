@@ -15,7 +15,9 @@ fail() {
 	say "FAILED: $*"
 	FAILED=1
 }
-nodes() { pgrep -f -- "-datadir=$DATA" | wc -l; } # the node only: the witness takes -datadir and the folder as two arguments
+node_pids() { pgrep -f -- "-datadir=$DATA"; } # the node only: the witness takes -datadir and the folder as two arguments
+nodes() { node_pids | wc -l; }
+rpc_port() { tr '\0' '\n' < "/proc/$(node_pids | head -n 1)/cmdline" | sed -n 's/^-rpcport=//p'; }
 start() {
 	"$WITNESS" -no-browser -datadir "$DATA" -bitcoind "$BITCOIND" -lang en < /dev/null > "$LOG" 2>&1 &
 	PID=$!
@@ -35,16 +37,22 @@ wait_running() {
 		sleep 2
 	done
 }
-stop() {
-	kill -TERM "$PID"
-	wait "$PID" 2> /dev/null
+no_nodes_within() {
 	i=0
 	while [ "$(nodes)" -gt 0 ]; do
 		i=$((i + 1))
-		[ $i -gt 60 ] && { fail "the node did not stop"; return 1; }
+		[ $i -gt "$1" ] && { fail "the node did not stop: $2"; return 1; }
 		sleep 1
 	done
 }
+stop() {
+	kill -TERM "$PID"
+	wait "$PID" 2> /dev/null
+	no_nodes_within 60 "after its witness was stopped"
+}
+
+say "== a bitcoin.conf in the data folder changes nothing"
+printf '[signet]\nrpcbind=0.0.0.0\nrpcallowip=0.0.0.0/0\n' > "$DATA/bitcoin.conf"
 
 say "== first start and sync"
 start || exit 1
@@ -56,11 +64,15 @@ until curl -s "${URL}api/status" | field "1 if s['node']=='running' and not s['i
 	sleep 2
 done
 STATUS=$(curl -s "${URL}api/status")
-say "$STATUS" | field "s['blocks'], s['ark0'], s['h3'], [(w['label'], w['state']) for w in s['tripwires']], s['ecDisabledNextBlock'], s['subversion']"
+say "$STATUS" | field "s['blocks'], s['ark0'], s['h3'], s['tripwireInfo'], s['tripwireTip'], [(w['label'], w['state']) for w in s['tripwires']], s['ecDisabledNextBlock'], s['subversion']"
 [ "$(say "$STATUS" | field "s['ark0']")" = ok ] || fail "ark0 check"
 [ "$(say "$STATUS" | field "s['h3']")" = 30000 ] || fail "h3"
+[ "$(say "$STATUS" | field "s['tripwireInfo']")" = ok ] || fail "tripwire info"
 [ "$(say "$STATUS" | field "sorted(w['label'] for w in s['tripwires'])")" = "['BIP-341 NUMS', 'drill']" ] || fail "tripwire labels"
-[ "$(say "$STATUS" | field "s['notM3']")" = False ] || fail "not M3"
+RPCPORT=$(rpc_port)
+LISTENERS=$(awk -v port="$(printf ':%04X' "$RPCPORT")" '$4 == "0A" && $2 ~ (port "$") { print $2 }' /proc/net/tcp /proc/net/tcp6)
+say "RPC listeners: $LISTENERS"
+[ "$LISTENERS" = "$(printf '0100007F:%04X' "$RPCPORT")" ] || fail "the RPC listens beyond 127.0.0.1"
 
 say "== boundaries"
 PORT=$(say "$URL" | sed -E 's#http://127\.0\.0\.1:([0-9]+)/.*#\1#')
@@ -70,7 +82,6 @@ PORT=$(say "$URL" | sed -E 's#http://127\.0\.0\.1:([0-9]+)/.*#\1#')
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Origin: https://evil.example' -d '{"hex":"00"}' "${URL}api/check")" = 403 ] || fail "origin"
 
 say "== check a confirmed transaction (block 123's P2MR spend) and a malformed one"
-RPCPORT=$(cat "$DATA/witness-rpcport.txt")
 CLI="$CLI -datadir=$DATA -signet -rpcport=$RPCPORT"
 TX=$($CLI getblock "$($CLI getblockhash 123)" 2 | python3 -c "import json,sys; print(json.load(sys.stdin)['tx'][1]['hex'])")
 ANSWER=$(curl -s -X POST -H 'Content-Type: application/json' -d "{\"hex\":\"$TX\"}" "${URL}api/check")
@@ -90,16 +101,20 @@ grep -q "$URL" "$LOG.2" || fail "second window"
 say "== stop"
 stop
 
-say "== restart at once, while the node may still be shutting down"
-start && wait_running 120 && stop
+say "== stop while the node still loads"
+start && kill -TERM "$PID" && wait "$PID" 2> /dev/null
+no_nodes_within 15 "stopped while it loaded"
 
-say "== a node left running is reused"
+say "== a witness killed outright takes its node with it"
 start && wait_running 120
 kill -KILL "$PID"
-sleep 2
-[ "$(nodes)" -eq 1 ] || fail "the node did not outlive its witness"
-start && wait_running 30
-[ "$(nodes)" -eq 1 ] || fail "a second node was started"
+no_nodes_within 30 "after its witness was killed"
+
+say "== a new witness starts while the node of a killed one still shuts down"
+start && wait_running 120
+kill -KILL "$PID"
+start && wait_running 120
+[ "$(nodes)" -eq 1 ] || fail "nodes: $(nodes)"
 stop
 
 pkill -f -- "$DATA" 2> /dev/null

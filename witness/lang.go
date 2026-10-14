@@ -15,7 +15,7 @@ type console struct {
 	NoDataFolder string // %v: the error
 	StartFailed  string // %v: the error
 	Stopping     string
-	Stopped      string // %s: the node's message
+	Stopped      string // the node's own message, if any, follows on the next line
 	PressEnter   string
 }
 
@@ -32,7 +32,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "The data folder cannot be created: %v",
 		StartFailed:  "The witness cannot start: %v",
 		Stopping:     "Stopping the node…",
-		Stopped:      "The node has stopped: %s",
+		Stopped:      "The node has stopped.",
 		PressEnter:   "Press Enter to close this window.",
 	},
 	"zh": {
@@ -47,7 +47,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "无法创建数据文件夹：%v",
 		StartFailed:  "见证器无法启动：%v",
 		Stopping:     "正在停止节点……",
-		Stopped:      "节点已停止：%s",
+		Stopped:      "节点已停止。",
 		PressEnter:   "按回车键关闭这个窗口。",
 	},
 	"ja": {
@@ -62,7 +62,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "データフォルダーを作成できません：%v",
 		StartFailed:  "ウィットネスを起動できません：%v",
 		Stopping:     "ノードを停止しています…",
-		Stopped:      "ノードが停止しました：%s",
+		Stopped:      "ノードが停止しました。",
 		PressEnter:   "Enter キーを押すと、このウィンドウを閉じます。",
 	},
 	"ko": {
@@ -77,7 +77,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "데이터 폴더를 만들 수 없습니다: %v",
 		StartFailed:  "위트니스를 시작할 수 없습니다: %v",
 		Stopping:     "노드를 멈추는 중입니다…",
-		Stopped:      "노드가 멈췄습니다: %s",
+		Stopped:      "노드가 멈췄습니다.",
 		PressEnter:   "Enter 키를 누르면 이 창이 닫힙니다.",
 	},
 	"ru": {
@@ -92,7 +92,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "Не удаётся создать папку данных: %v",
 		StartFailed:  "Witness не может запуститься: %v",
 		Stopping:     "Останавливаем узел…",
-		Stopped:      "Узел остановился: %s",
+		Stopped:      "Узел остановился.",
 		PressEnter:   "Нажмите Enter, чтобы закрыть это окно.",
 	},
 	"es": {
@@ -107,7 +107,7 @@ var consoleTexts = map[string]console{
 		NoDataFolder: "No se puede crear la carpeta de datos: %v",
 		StartFailed:  "Ark-0 Witness no puede iniciarse: %v",
 		Stopping:     "Deteniendo el nodo…",
-		Stopped:      "El nodo se ha detenido: %s",
+		Stopped:      "El nodo se ha detenido.",
 		PressEnter:   "Pulsa Intro para cerrar esta ventana.",
 	},
 }

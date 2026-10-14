@@ -22,22 +22,26 @@ type tripwire struct {
 
 // status is what the page shows: the node's own answers, nothing the program assumes.
 type status struct {
-	Version             string     `json:"version"`
-	Now                 string     `json:"now"` // UTC
-	DataDir             string     `json:"dataDir"`
-	Node                string     `json:"node"` // "starting", "running" or "stopped"
-	NodeError           string     `json:"nodeError"`
-	Warmup              string     `json:"warmup"` // the node's message while it loads
-	Blocks              int64      `json:"blocks"`
-	Headers             int64      `json:"headers"`
-	IBD                 bool       `json:"ibd"`
-	TipHash             string     `json:"tipHash"`
-	Peers               int        `json:"peers"`
-	Ark0                string     `json:"ark0"` // "pending", "ok" or "mismatch"
-	H3                  int64      `json:"h3"`
-	BlockH3             string     `json:"blockH3"`
+	Version   string `json:"version"`
+	Now       string `json:"now"` // UTC
+	DataDir   string `json:"dataDir"`
+	Node      string `json:"node"` // "starting", "running" or "stopped"
+	NodeError string `json:"nodeError"`
+	Warmup    string `json:"warmup"` // the node's message while it loads
+	Blocks    int64  `json:"blocks"`
+	Headers   int64  `json:"headers"`
+	IBD       bool   `json:"ibd"`
+	TipHash   string `json:"tipHash"`
+	Peers     int    `json:"peers"`
+	Ark0      string `json:"ark0"` // "pending", "ok" or "mismatch"
+	H3        int64  `json:"h3"`
+	BlockH3   string `json:"blockH3"`
+	// What gettripwireinfo gave: "ok", "unknown" (no answer this time) or "absent" (the node has no such call, so
+	// it is not M3). The fields after it hold only with "ok", and are of block TripwireTip.
+	TripwireInfo        string     `json:"tripwireInfo"`
+	TripwireTip         int64      `json:"tripwireTip"`
+	TripwireTipHash     string     `json:"tripwireTipHash"`
 	Tripwires           []tripwire `json:"tripwires"`
-	NotM3               bool       `json:"notM3"`
 	ECDisabledNextBlock bool       `json:"ecDisabledNextBlock"`
 	Subversion          string     `json:"subversion"`
 }
@@ -63,7 +67,8 @@ func (c *collector) get() status {
 }
 
 func (c *collector) collect() status {
-	s := status{Version: version, Now: nowUTC(), DataDir: c.dataDir, Ark0: "pending", H3: m3Height, Tripwires: []tripwire{}}
+	s := status{Version: version, Now: nowUTC(), DataDir: c.dataDir, Ark0: "pending", H3: m3Height, TripwireInfo: "unknown",
+		Tripwires: []tripwire{}}
 	s.Node, s.NodeError = c.node.state()
 	rpc := c.node.client()
 	if rpc == nil || s.Node == "stopped" {
@@ -96,22 +101,23 @@ func (c *collector) collect() status {
 			}
 		}
 	}
+	// The tripwire states and the flag come with the block they are of, which may be newer than the tip above.
 	var tw struct {
+		TipHash    string     `json:"tip_hash"`
+		TipHeight  int64      `json:"tip_height"`
 		Height     int64      `json:"height"`
 		Tripwires  []tripwire `json:"tripwires"`
-		ECDisabled bool       `json:"ec_disabled_next_block"`
+		ECDisabled *bool      `json:"ec_disabled_next_block"`
 	}
-	if err := rpc.call("gettripwireinfo", nil, &tw); err == nil {
-		if tw.Height > 0 {
-			s.H3 = tw.Height
-		}
-		if tw.Tripwires != nil {
-			s.Tripwires = tw.Tripwires
-		}
-		s.ECDisabledNextBlock = tw.ECDisabled
-	} else {
-		var answer *rpcError
-		s.NotM3 = errors.As(err, &answer) && answer.Code == rpcMethodNotFound
+	err := rpc.call("gettripwireinfo", nil, &tw)
+	var answer *rpcError
+	switch {
+	case err == nil && tw.TipHash != "" && tw.Height > 0 && tw.Tripwires != nil && tw.ECDisabled != nil:
+		s.TripwireInfo, s.H3 = "ok", tw.Height
+		s.TripwireTip, s.TripwireTipHash = tw.TipHeight, tw.TipHash
+		s.Tripwires, s.ECDisabledNextBlock = tw.Tripwires, *tw.ECDisabled
+	case errors.As(err, &answer) && answer.Code == rpcMethodNotFound:
+		s.TripwireInfo = "absent"
 	}
 	if s.Blocks >= s.H3 {
 		_ = rpc.call("getblockhash", []any{s.H3}, &s.BlockH3)
@@ -138,6 +144,10 @@ func witnessReport(s status, last *checkResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ark-0 witness report (Ark0Witness %s)\n", s.Version)
 	fmt.Fprintf(&b, "Time (UTC): %s\n", s.Now)
+	if s.Node != "running" {
+		fmt.Fprintf(&b, "Node: %s\n", s.Node)
+		return b.String()
+	}
 	if s.Subversion != "" {
 		fmt.Fprintf(&b, "Node software: %s\n", s.Subversion)
 	}
@@ -147,18 +157,30 @@ func witnessReport(s status, last *checkResult) string {
 	case "mismatch":
 		b.WriteString("Block 1264 matches Ark-0: NO\n")
 	default:
-		b.WriteString("Block 1264 matches Ark-0: not synced that far yet\n")
+		b.WriteString("Block 1264 matches Ark-0: not checked yet\n")
 	}
-	fmt.Fprintf(&b, "Tip: height %d, hash %s\n", s.Blocks, s.TipHash)
+	// With the tripwires known, the tip is the block their states are of.
+	if s.TripwireInfo == "ok" {
+		fmt.Fprintf(&b, "Tip: height %d, hash %s\n", s.TripwireTip, s.TripwireTipHash)
+	} else {
+		fmt.Fprintf(&b, "Tip: height %d, hash %s\n", s.Blocks, s.TipHash)
+	}
 	if s.BlockH3 != "" {
 		fmt.Fprintf(&b, "Block %d (M3): %s\n", s.H3, s.BlockH3)
 	} else {
 		fmt.Fprintf(&b, "Block %d (M3): not reached yet\n", s.H3)
 	}
-	for _, w := range s.Tripwires {
-		fmt.Fprintf(&b, "Tripwire %s %s: %s\n", w.Label, w.Outpoint, w.State)
+	switch s.TripwireInfo {
+	case "ok":
+		for _, w := range s.Tripwires {
+			fmt.Fprintf(&b, "Tripwire %s %s: %s\n", w.Label, w.Outpoint, w.State)
+		}
+		fmt.Fprintf(&b, "ec_disabled_next_block: %t\n", s.ECDisabledNextBlock)
+	case "absent":
+		b.WriteString("Tripwires: unknown, this node has no gettripwireinfo (not the M3 release)\n")
+	default:
+		b.WriteString("Tripwires: unknown, the node did not answer gettripwireinfo just now\n")
 	}
-	fmt.Fprintf(&b, "ec_disabled_next_block: %t\n", s.ECDisabledNextBlock)
 	switch {
 	case last == nil:
 	case last.Error != "":

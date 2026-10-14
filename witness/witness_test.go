@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,12 +17,228 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+// TestMain lets the test binary stand in for bitcoind: with WITNESS_FAKE_NODE set, it acts as a node of that
+// kind instead of running the tests.
+func TestMain(m *testing.M) {
+	if kind := os.Getenv("WITNESS_FAKE_NODE"); kind != "" {
+		os.Exit(fakeBitcoind(kind, os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+// fakeBitcoind acts as bitcoind started with nodeArgs, as far as the program can tell. Every kind notes its start
+// in starts.txt in the data folder.
+//   - "ready" binds its RPC port, then writes its cookie, answers every call and exits on stop;
+//   - "loading" binds its port and writes its cookie, but answers every call, stop included, with the warmup
+//     error until a signal ends it;
+//   - "silent" never binds its port or writes a cookie;
+//   - "locked" finds the data folder locked, as when an earlier node still holds it, and exits.
+func fakeBitcoind(kind string, args []string) int {
+	var dataDir, port string
+	for _, arg := range args {
+		if v, ok := strings.CutPrefix(arg, "-datadir="); ok {
+			dataDir = v
+		}
+		if v, ok := strings.CutPrefix(arg, "-rpcport="); ok {
+			port = v
+		}
+	}
+	if f, err := os.OpenFile(filepath.Join(dataDir, "starts.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_, _ = f.WriteString(kind + "\n")
+		_ = f.Close()
+	}
+	switch kind {
+	case "silent":
+		time.Sleep(time.Hour)
+		return 0
+	case "locked":
+		fmt.Fprintln(os.Stderr, "Error: Cannot obtain a lock on directory "+dataDir+". Bitcoin Core is probably already running.")
+		return 1
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: Unable to start HTTP server. See debug log for details.")
+		return 1
+	}
+	if os.MkdirAll(filepath.Join(dataDir, "signet"), 0o700) != nil || os.WriteFile(cookiePath(dataDir), []byte("__cookie__:fake"), 0o600) != nil {
+		return 1
+	}
+	stopped := make(chan struct{})
+	var once sync.Once
+	go func() {
+		_ = http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			reply := map[string]any{"id": req.ID, "result": "ok", "error": nil}
+			switch {
+			case kind == "loading":
+				reply["result"], reply["error"] = nil, rpcError{Code: rpcInWarmup, Message: "Loading block index…"}
+			case req.Method == "stop":
+				defer once.Do(func() { close(stopped) })
+			}
+			_ = json.NewEncoder(w).Encode(reply)
+		}))
+	}()
+	<-stopped
+	time.Sleep(100 * time.Millisecond) // the answer to stop goes out first
+	_ = os.Remove(cookiePath(dataDir))
+	return 0
+}
+
+// fakeNodeProcess is a node supervisor that runs the test binary as a bitcoind of the given kind.
+func fakeNodeProcess(t *testing.T, kind, dataDir, exeSHA256 string) *node {
+	t.Setenv("WITNESS_FAKE_NODE", kind)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := newNode(exe, exeSHA256, dataDir)
+	t.Cleanup(func() {
+		n.stop()
+		n.wait(10 * time.Second)
+	})
+	return n
+}
+
+func eventually(d time.Duration, cond func() bool) bool {
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return cond()
+}
+
+func stoppedWithin(n *node, d time.Duration) bool {
+	select {
+	case <-n.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+func starts(dataDir string) int {
+	data, _ := os.ReadFile(filepath.Join(dataDir, "starts.txt"))
+	return strings.Count(string(data), "\n")
+}
+
+// A node that agrees stops at once; one that refuses while it loads, or never listens, is ended after two
+// seconds. Its RPC is trusted only once it has written its cookie.
+func TestNodeStops(t *testing.T) {
+	for _, c := range []struct {
+		kind    string
+		trusted bool
+		within  time.Duration
+	}{
+		{"ready", true, 2 * time.Second},
+		{"loading", true, 5 * time.Second},
+		{"silent", false, 5 * time.Second},
+	} {
+		t.Run(c.kind, func(t *testing.T) {
+			n := fakeNodeProcess(t, c.kind, t.TempDir(), "")
+			n.start()
+			if !eventually(10*time.Second, func() bool { return n.child() != nil }) {
+				t.Fatal("no node started")
+			}
+			if trusted := eventually(3*time.Second, func() bool { return n.client() != nil }); trusted != c.trusted {
+				t.Fatalf("trusted: %v", trusted)
+			}
+			began := time.Now()
+			n.stop()
+			if !stoppedWithin(n, c.within) {
+				t.Fatalf("the node still runs %v after stop", time.Since(began))
+			}
+			if phase, message := n.state(); phase != "stopped" || message != "" {
+				t.Errorf("%s %q", phase, message)
+			}
+		})
+	}
+}
+
+// Asked to stop before the node starts, the program starts none.
+func TestStopBeforeStart(t *testing.T) {
+	dir := t.TempDir()
+	n := fakeNodeProcess(t, "ready", dir, "")
+	n.stop()
+	n.start()
+	if !stoppedWithin(n, 2*time.Second) {
+		t.Fatal("not stopped")
+	}
+	if starts(dir) != 0 {
+		t.Error("a node was started")
+	}
+}
+
+// A cookie left by an earlier node is removed, and never makes another program's port trusted.
+func TestStaleCookie(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "signet"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cookiePath(dir), []byte("__cookie__:stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := fakeNodeProcess(t, "silent", dir, "")
+	n.start()
+	if !eventually(10*time.Second, func() bool { return n.child() != nil }) {
+		t.Fatal("no node started")
+	}
+	time.Sleep(time.Second)
+	if n.client() != nil {
+		t.Error("a node that never listened is trusted")
+	}
+	if _, err := os.Stat(cookiePath(dir)); err == nil {
+		t.Error("the stale cookie is still there")
+	}
+}
+
+// While an earlier node holds the data folder, the start is tried again; stop ends the trying.
+func TestNodeLockedRetries(t *testing.T) {
+	dir := t.TempDir()
+	n := fakeNodeProcess(t, "locked", dir, "")
+	n.start()
+	if !eventually(10*time.Second, func() bool { return starts(dir) >= 2 }) {
+		t.Fatalf("starts: %d", starts(dir))
+	}
+	n.stop()
+	if !stoppedWithin(n, 5*time.Second) {
+		t.Fatal("not stopped")
+	}
+	if _, message := n.state(); message != "" {
+		t.Errorf("message after stop: %q", message)
+	}
+}
+
+// A node program that is not the one the witness was built with is not started.
+func TestWrongNodeProgram(t *testing.T) {
+	dir := t.TempDir()
+	n := fakeNodeProcess(t, "ready", dir, strings.Repeat("0", 64))
+	n.start()
+	if !stoppedWithin(n, 5*time.Second) {
+		t.Fatal("not stopped")
+	}
+	if _, message := n.state(); !strings.Contains(message, "not the one") {
+		t.Errorf("message %q", message)
+	}
+	if starts(dir) != 0 {
+		t.Error("the node was started")
+	}
+}
 
 func TestNodeArgsAreJoinMd(t *testing.T) {
 	args := nodeArgs(`C:\Users\a b\AppData\Local\Ark0Witness`, 40123)
 	for _, want := range []string{
+		"-noconf",
+		"-nosettings",
 		`-datadir=C:\Users\a b\AppData\Local\Ark0Witness`,
 		"-signet=1",
 		"-signetchallenge=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae",
@@ -80,8 +298,8 @@ func TestLanguages(t *testing.T) {
 				t.Errorf("%s: an empty console text", lang)
 			}
 		}
-		if !strings.Contains(c.NoDataFolder, "%v") || !strings.Contains(c.StartFailed, "%v") || !strings.Contains(c.Stopped, "%s") {
-			t.Errorf("%s: a console text lost its placeholder", lang)
+		if !strings.Contains(c.NoDataFolder, "%v") || !strings.Contains(c.StartFailed, "%v") || strings.Contains(c.Stopped, "%") {
+			t.Errorf("%s: a console text has the wrong placeholders", lang)
 		}
 	}
 	for id, want := range map[uint16]string{0x0804: "zh", 0x0404: "zh", 0x0409: "en", 0x0809: "en", 0x0411: "ja", 0x0412: "ko",
@@ -190,9 +408,15 @@ func newFakeNode(t *testing.T) *fakeNode {
 	return f
 }
 
-func (f *fakeNode) port() int {
-	u, _ := url.Parse(f.server.URL)
-	port, _ := strconv.Atoi(u.Port())
+func portOf(t *testing.T, server *httptest.Server) int {
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
 	return port
 }
 
@@ -202,6 +426,7 @@ func (f *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		ID     json.RawMessage   `json:"id"`
 		Method string            `json:"method"`
 		Params []json.RawMessage `json:"params"`
 	}
@@ -223,7 +448,7 @@ func (f *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 	if rpcErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"result": result, "error": rpcErr, "id": "witness"})
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": result, "error": rpcErr, "id": req.ID})
 }
 
 // ark0 makes the fake node answer as an Ark-0 node at the given height.
@@ -242,10 +467,11 @@ func (f *fakeNode) ark0(height int64, drillState string, ecDisabled bool) {
 		return nil, &rpcError{Code: -8, Message: "Block height out of range"}
 	}
 	f.answers["gettripwireinfo"] = func([]json.RawMessage) (any, *rpcError) {
-		return map[string]any{"height": 30000, "leaf_version": "e0", "ec_disabled_next_block": ecDisabled, "tripwires": []map[string]any{
-			{"outpoint": "4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1", "state": "unspent", "label": "BIP-341 NUMS"},
-			{"outpoint": "8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0", "state": drillState, "label": "drill"},
-		}}, nil
+		return map[string]any{"tip_height": height, "tip_hash": "00aa", "height": 30000, "leaf_version": "e0",
+			"ec_disabled_next_block": ecDisabled, "tripwires": []map[string]any{
+				{"outpoint": "4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1", "state": "unspent", "label": "BIP-341 NUMS"},
+				{"outpoint": "8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0", "state": drillState, "label": "drill"},
+			}}, nil
 	}
 	f.answers["getnetworkinfo"] = func([]json.RawMessage) (any, *rpcError) {
 		return map[string]any{"subversion": "/Satoshi:31.1.0/"}, nil
@@ -253,8 +479,8 @@ func (f *fakeNode) ark0(height int64, drillState string, ecDisabled bool) {
 }
 
 func (f *fakeNode) node() *node {
-	n := newNode("bitcoind", f.dataDir)
-	n.rpc = newRPCClient(f.port(), cookiePath(f.dataDir))
+	n := newNode("bitcoind", "", f.dataDir)
+	n.rpc = newRPCClient(portOf(f.t, f.server), cookiePath(f.dataDir))
 	return n
 }
 
@@ -265,7 +491,8 @@ func TestStatusAndReport(t *testing.T) {
 	c := &collector{node: n, dataDir: f.dataDir}
 	s := c.collect()
 	if s.Node != "running" || s.Blocks != 30100 || s.Ark0 != "ok" || s.H3 != 30000 || s.BlockH3 != "000030000hash" ||
-		!s.ECDisabledNextBlock || len(s.Tripwires) != 2 || s.Tripwires[1].Label != "drill" || s.Subversion != "/Satoshi:31.1.0/" || s.Peers != 1 {
+		s.TripwireInfo != "ok" || s.TripwireTip != 30100 || !s.ECDisabledNextBlock || len(s.Tripwires) != 2 ||
+		s.Tripwires[1].Label != "drill" || s.Subversion != "/Satoshi:31.1.0/" || s.Peers != 1 {
 		t.Fatalf("status %+v", s)
 	}
 	if phase, _ := n.state(); phase != "running" {
@@ -283,14 +510,30 @@ func TestStatusAndReport(t *testing.T) {
 		t.Error("the report names the data folder")
 	}
 
+	// The tripwires come with the block they are of, which the report names even when the tip has moved on.
+	answer := f.answers["gettripwireinfo"]
+	f.answers["gettripwireinfo"] = func(p []json.RawMessage) (any, *rpcError) {
+		info, _ := answer(p)
+		info.(map[string]any)["tip_height"], info.(map[string]any)["tip_hash"] = 30101, "00bb"
+		return info, nil
+	}
+	s = (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+	if r := witnessReport(s, nil); !strings.Contains(r, "Tip: height 30101, hash 00bb") || s.Blocks != 30100 {
+		t.Errorf("tripwire tip:\n%s", r)
+	}
+
 	// Before 30000, the hash of block 30000 is not asked for.
 	g := newFakeNode(t)
 	g.ark0(22600, "unspent", false)
 	s = (&collector{node: g.node(), dataDir: g.dataDir}).collect()
-	if s.BlockH3 != "" || s.ECDisabledNextBlock || s.Ark0 != "ok" {
+	if s.BlockH3 != "" || s.ECDisabledNextBlock || s.Ark0 != "ok" || s.TripwireInfo != "ok" {
 		t.Errorf("status %+v", s)
 	}
 	if r := witnessReport(s, nil); !strings.Contains(r, "Block 30000 (M3): not reached yet") || strings.Contains(r, "Checked") {
+		t.Errorf("report:\n%s", r)
+	}
+	// A node that is not running yet.
+	if r := witnessReport(status{Version: "v", Now: "now", Node: "starting"}, nil); !strings.Contains(r, "Node: starting") || strings.Contains(r, "Tip") {
 		t.Errorf("report:\n%s", r)
 	}
 }
@@ -300,14 +543,35 @@ func TestStatusEdges(t *testing.T) {
 	f := newFakeNode(t)
 	f.ark0(22600, "unspent", false)
 	delete(f.answers, "gettripwireinfo")
-	if s := (&collector{node: f.node(), dataDir: f.dataDir}).collect(); !s.NotM3 {
+	s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+	if s.TripwireInfo != "absent" || !strings.Contains(witnessReport(s, nil), "not the M3 release") {
 		t.Errorf("not M3 not seen: %+v", s)
+	}
+	// A failed gettripwireinfo, or an answer without the flag, leaves the tripwires unknown rather than in place.
+	for _, answer := range []func([]json.RawMessage) (any, *rpcError){
+		func([]json.RawMessage) (any, *rpcError) { return nil, &rpcError{Code: -1, Message: "boom"} },
+		func([]json.RawMessage) (any, *rpcError) {
+			return map[string]any{"tip_height": 22600, "tip_hash": "00aa", "height": 30000, "tripwires": []any{}}, nil
+		},
+	} {
+		f.answers["gettripwireinfo"] = answer
+		s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+		if r := witnessReport(s, nil); s.TripwireInfo != "unknown" || len(s.Tripwires) != 0 || s.ECDisabledNextBlock ||
+			!strings.Contains(r, "Tripwires: unknown") || strings.Contains(r, "ec_disabled_next_block") {
+			t.Errorf("unknown tripwires: %+v\n%s", s, r)
+		}
 	}
 	// Another chain.
 	f.ark0(22600, "unspent", false)
 	f.answers["getblockhash"] = func([]json.RawMessage) (any, *rpcError) { return "0000other", nil }
 	if s := (&collector{node: f.node(), dataDir: f.dataDir}).collect(); s.Ark0 != "mismatch" {
 		t.Errorf("mismatch not seen: %+v", s)
+	}
+	// Block 1264 not read: not checked rather than mismatched.
+	f.answers["getblockhash"] = func([]json.RawMessage) (any, *rpcError) { return nil, &rpcError{Code: -1, Message: "boom"} }
+	if s := (&collector{node: f.node(), dataDir: f.dataDir}).collect(); s.Ark0 != "pending" ||
+		!strings.Contains(witnessReport(s, nil), "Block 1264 matches Ark-0: not checked yet") {
+		t.Errorf("pending not seen: %+v", s)
 	}
 	// Still loading.
 	f.answers["getblockchaininfo"] = func([]json.RawMessage) (any, *rpcError) {
@@ -317,20 +581,62 @@ func TestStatusEdges(t *testing.T) {
 	if s := (&collector{node: n, dataDir: f.dataDir}).collect(); s.Node != "starting" || s.Warmup != "Loading block index…" {
 		t.Errorf("warmup: %+v", s)
 	}
-	if !n.rpc.alive() {
-		t.Error("a loading node is alive")
-	}
 	// A wrong cookie gets no answer.
 	if err := os.WriteFile(cookiePath(f.dataDir), []byte("__cookie__:other"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if n.rpc.alive() {
-		t.Error("a node that refuses the cookie is not this folder's")
+	if err := n.rpc.call("getblockcount", nil, nil); err != errNotReady {
+		t.Errorf("wrong cookie: %v", err)
 	}
 	// No cookie yet.
 	_ = os.Remove(cookiePath(f.dataDir))
 	if err := n.rpc.call("getblockcount", nil, nil); err != errNotReady {
 		t.Errorf("no cookie: %v", err)
+	}
+}
+
+// Only the answer to the call made counts; a redirect is not followed.
+func TestRPCAnswers(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "signet"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cookiePath(dir), []byte("__cookie__:x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("a redirect was followed") }))
+	defer elsewhere.Close()
+	for body, want := range map[string]string{
+		`{"result":{"blocks":7},"error":null,"id":"1"}`:                         "",
+		`{"result":{"blocks":7},"error":null,"id":"2"}`:                         "not ready",
+		`{"result":{"blocks":7},"error":null,"id":1}`:                           "not ready",
+		`{"result":{"blocks":7},"error":null}`:                                  "not ready",
+		`{"result":null,"error":null,"id":"1"}`:                                 "without a result",
+		`{"error":null,"id":"1"}`:                                               "without a result",
+		`{"result":"7","error":null,"id":"1"}`:                                  "cannot unmarshal",
+		`{"result":null,"error":{"code":-5,"message":"refused here"},"id":"1"}`: "refused here",
+		`null`:          "not ready",
+		`<html></html>`: "not ready",
+		"redirect":      "not ready",
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if body == "redirect" {
+				http.Redirect(w, r, elsewhere.URL, http.StatusTemporaryRedirect)
+				return
+			}
+			_, _ = io.WriteString(w, body)
+		}))
+		var out struct {
+			Blocks int64 `json:"blocks"`
+		}
+		err := newRPCClient(portOf(t, server), cookiePath(dir)).call("getblockchaininfo", nil, &out)
+		switch {
+		case want == "" && (err != nil || out.Blocks != 7):
+			t.Errorf("%s: %v %+v", body, err, out)
+		case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
+			t.Errorf("%s: %v, want %q", body, err, want)
+		}
+		server.Close()
 	}
 }
 
@@ -482,7 +788,7 @@ func TestServerBoundaries(t *testing.T) {
 }
 
 func TestServerWithoutNode(t *testing.T) {
-	n := newNode("bitcoind", t.TempDir())
+	n := newNode("bitcoind", "", t.TempDir())
 	s, c := testServer(t, n)
 	if resp, body := do(t, c, "GET", s.url()+"api/status", "", nil, ""); resp.StatusCode != 200 || !strings.Contains(body, `"node":"starting"`) {
 		t.Errorf("status: %d %s", resp.StatusCode, body)
@@ -495,21 +801,6 @@ func TestServerWithoutNode(t *testing.T) {
 
 func TestFilesAndPaths(t *testing.T) {
 	dir := t.TempDir()
-	if _, ok := readPort(dir); ok {
-		t.Error("port without a file")
-	}
-	if err := writePort(dir, 40123); err != nil {
-		t.Fatal(err)
-	}
-	if port, ok := readPort(dir); !ok || port != 40123 {
-		t.Errorf("port %d %v", port, ok)
-	}
-	for _, bad := range []string{"0", "70000", "x", ""} {
-		_ = os.WriteFile(filepath.Join(dir, portFile), []byte(bad), 0o600)
-		if _, ok := readPort(dir); ok {
-			t.Errorf("port %q accepted", bad)
-		}
-	}
 	page := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
 	for text, ok := range map[string]bool{page + "\n": true, "https://evil.example/": false, "http://127.0.0.1:1/x/": false,
 		"http://localhost:40123/" + strings.Repeat("ab", 32) + "/": false, page + "x": false} {
@@ -565,7 +856,7 @@ func TestErrorText(t *testing.T) {
 	if got := lastError(out); !strings.HasPrefix(got, "Error: Cannot obtain a lock") {
 		t.Errorf("lastError: %q", got)
 	}
-	if lastError("") != "the node stopped" || lastError("bye\n") != "bye" {
+	if lastError("") != "" || lastError("bye\n") != "bye" {
 		t.Error("lastError fallbacks")
 	}
 	if clip("見証見証", 2) != "見証…" || clip("abc", 5) != "abc" {

@@ -35,7 +35,7 @@
 
   const $ = (id) => document.getElementById(id);
   const setText = (id, text) => { $(id).textContent = text; };
-  const number = (n) => Number(n || 0).toLocaleString('en-US');
+  const number = (n) => String(Number(n) || 0);
 
   function renderStatic() {
     document.documentElement.lang = HTML_LANG[lang];
@@ -47,20 +47,32 @@
     return s.node === 'running' && !s.ibd && s.headers > 0 && s.blocks >= s.headers && s.blocks >= TRIPWIRES_CREATED;
   }
 
-  // The one-line verdict on top, and its tone.
+  // The state the node reports for the tripwire with this label.
+  function wireState(s, label) {
+    const wire = s.tripwires.find((w) => w.label === label);
+    return wire ? wire.state : '';
+  }
+
+  // The one-line verdict on top, and its tone. Green only on the node's own answers: Ark-0 confirmed, the
+  // tripwires read, and each in the state the verdict names.
   function verdict(s) {
     if (!s) return [t('verdict_unreachable'), 'bad'];
     if (s.node === 'stopped') return [t('verdict_stopped'), 'bad'];
     if (s.ark0 === 'mismatch') return [t('verdict_wrong_chain'), 'bad'];
-    if (s.notM3) return [t('verdict_not_m3'), 'bad'];
+    if (s.tripwireInfo === 'absent') return [t('verdict_not_m3'), 'bad'];
     if (s.node !== 'running') return [t('verdict_starting'), 'warn'];
     if (!synced(s)) return [t('verdict_syncing'), 'warn'];
-    if (s.ecDisabledNextBlock) return [t('verdict_pulled'), 'good'];
-    if (s.blocks < s.h3) return [t('verdict_before_h3', { h3: number(s.h3) }), 'good'];
+    if (s.ark0 !== 'ok' || s.tripwireInfo !== 'ok') return [t('verdict_checking'), 'warn'];
+    const nums = wireState(s, 'BIP-341 NUMS');
+    const drill = wireState(s, 'drill');
+    if (nums === 'unspent' && drill === 'missing' && s.ecDisabledNextBlock) return [t('verdict_pulled'), 'good'];
+    if (nums !== 'unspent' || drill !== 'unspent' || s.ecDisabledNextBlock) return [t('verdict_unexpected'), 'warn'];
+    if (s.tripwireTip < s.h3) return [t('verdict_before_h3', { h3: number(s.h3) }), 'good'];
     return [t('verdict_armed'), 'good'];
   }
 
   function renderNode(s) {
+    setText('node-error', s && s.node === 'stopped' ? s.nodeError || '' : '');
     if (!s) {
       setText('sync', '');
       setText('peers', '');
@@ -70,7 +82,7 @@
       return;
     }
     if (s.node === 'stopped') {
-      setText('sync', t('node_stopped', { msg: s.nodeError || '' }));
+      setText('sync', t('node_stopped'));
     } else if (s.node !== 'running') {
       setText('sync', s.warmup ? t('node_warmup', { msg: s.warmup }) : t('node_starting'));
     } else if (synced(s)) {
@@ -108,7 +120,8 @@
   function renderTripwires(s) {
     const body = $('tw');
     body.replaceChildren();
-    const wires = s && s.node === 'running' ? s.tripwires || [] : [];
+    const known = s && s.node === 'running' && s.tripwireInfo === 'ok';
+    const wires = known ? s.tripwires : [];
     if (wires.length === 0) {
       const row = body.insertRow();
       const cell = row.insertCell();
@@ -125,7 +138,7 @@
       out.textContent = w.outpoint || '';
       out.className = 'mono';
     }
-    if (s && s.node === 'running' && !s.notM3) {
+    if (known) {
       setText('ec', s.ecDisabledNextBlock ? t('ec_off') : t('ec_on'));
       setText('ec-raw', '(ec_disabled_next_block: ' + String(Boolean(s.ecDisabledNextBlock)) + ')');
     } else {
