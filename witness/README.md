@@ -11,9 +11,10 @@ Double-click `Ark0Witness.exe` and it:
 - lets you paste a raw transaction for the node to judge with `testmempoolaccept`. Nothing is ever sent;
 - gives a short witness report to share. It holds no IP address and no folder name.
 
-Closing the program's console window stops the node; a node still loading then is ended, and picks up where
-it left off at the next start. The node is tied to the program: however the program ends, Windows ends the
-node with it (a job object), so no node is left running hidden. The node keeps its data in
+Closing the program's console window stops the node; a node still loading then, or still shutting down a few
+seconds later, is ended, and picks up where it left off at the next start. The node is tied to the program:
+however the program ends, Windows ends the node with it (a job object), so no node is left running hidden. The
+node keeps its data in
 `%LOCALAPPDATA%\Ark0Witness` for the next start; to remove everything, close the window, wait a few
 seconds, and delete that folder and the program's folder.
 
@@ -32,7 +33,8 @@ Ark-0 is a test network for trying things out. It may be reset at any time.
   requests whose Host is that address: another site's page cannot find it or reach it under a name of its own.
 - No update checks, no statistics, no other network traffic than the node's own.
 - The program is built with the SHA-256 of the `bitcoind.exe` it ships with and starts no other: it holds the
-  file open against changes while it checks and starts it.
+  file open against changes while it checks it and starts the node suspended, and lets the node run only once
+  Windows shows that the node runs that very file.
 - What the page calls good rests on the node's own answers: it says so only once the node has confirmed
   block 1264 and reported both tripwires; anything it could not read shows as unknown, also in the report.
 - A second start while the program runs shows the running one's page.

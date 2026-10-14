@@ -124,7 +124,8 @@ func (n *node) isStopping() bool {
 
 // stop keeps any further node from starting and asks the running one to shut down. A node still loading
 // refuses and a node not yet listening cannot be asked, so the request is repeated for two seconds; a node that
-// has not agreed by then is ended.
+// has not agreed by then is ended. One still shutting down when this program exits is ended with it (the job
+// object on Windows; SIGTERM again on Linux).
 func (n *node) stop() {
 	n.mu.Lock()
 	n.stopping = true
@@ -137,9 +138,6 @@ func (n *node) stop() {
 			return // no node runs, and none will start
 		}
 		if rpc != nil && rpc.callWithin(time.Second, "stop", nil, nil) == nil {
-			n.mu.Lock()
-			letFinish() // it shuts down cleanly, even if this program exits first
-			n.mu.Unlock()
 			return
 		}
 	}
@@ -211,14 +209,8 @@ func (n *node) runOnce(port int) (string, error) {
 		n.mu.Unlock()
 		return "", nil
 	}
-	if err := startChecked(cmd, n.exe, n.exeSHA256); err != nil {
+	if err := n.startNode(cmd); err != nil {
 		n.mu.Unlock()
-		return "", err
-	}
-	if err := keepWithProgram(cmd.Process); err != nil {
-		_ = cmd.Process.Kill()
-		n.mu.Unlock()
-		_ = cmd.Wait()
 		return "", err
 	}
 	n.proc, n.rpc, n.phase = cmd.Process, nil, "starting"
@@ -254,18 +246,27 @@ func (n *node) trustWhenReady(p *os.Process, port int) {
 	}
 }
 
-// startChecked starts cmd while the node program is held open against changes, after checking it against the
-// SHA-256 this program was built with, if any.
-func startChecked(cmd *exec.Cmd, exe, want string) error {
-	f, err := openNodeProgram(exe)
+// startNode starts cmd while the node program is held open against changes: it checks the program against the
+// SHA-256 this program was built with, if any, starts it, and has admit tie it to this program, check that it is
+// that very file and let it run.
+func (n *node) startNode(cmd *exec.Cmd) error {
+	f, err := openNodeProgram(n.exe)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := checkSHA256(f, want); err != nil {
+	if err := checkSHA256(f, n.exeSHA256); err != nil {
 		return err
 	}
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := admit(cmd.Process, f); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
 }
 
 func freePort() (int, error) {

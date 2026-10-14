@@ -60,12 +60,15 @@
     if (s.node === 'stopped') return [t('verdict_stopped'), 'bad'];
     if (s.ark0 === 'mismatch') return [t('verdict_wrong_chain'), 'bad'];
     if (s.tripwireInfo === 'absent') return [t('verdict_not_m3'), 'bad'];
+    if (s.node === 'noanswer') return [t('node_no_answer'), 'warn'];
     if (s.node !== 'running') return [t('verdict_starting'), 'warn'];
     if (!synced(s)) return [t('verdict_syncing'), 'warn'];
     if (s.ark0 !== 'ok' || s.tripwireInfo !== 'ok') return [t('verdict_checking'), 'warn'];
     const nums = wireState(s, 'BIP-341 NUMS');
     const drill = wireState(s, 'drill');
-    if (nums === 'unspent' && drill === 'missing' && s.ecDisabledNextBlock) return [t('verdict_pulled'), 'good'];
+    // The flag speaks of the next block, so it can be set from block h3 - 1 on.
+    const pulled = nums === 'unspent' && drill === 'missing' && s.ecDisabledNextBlock && s.tripwireTip + 1 >= s.h3;
+    if (pulled) return [t('verdict_pulled'), 'good'];
     if (nums !== 'unspent' || drill !== 'unspent' || s.ecDisabledNextBlock) return [t('verdict_unexpected'), 'warn'];
     if (s.tripwireTip < s.h3) return [t('verdict_before_h3', { h3: number(s.h3) }), 'good'];
     return [t('verdict_armed'), 'good'];
@@ -83,6 +86,8 @@
     }
     if (s.node === 'stopped') {
       setText('sync', t('node_stopped'));
+    } else if (s.node === 'noanswer') {
+      setText('sync', t('node_no_answer'));
     } else if (s.node !== 'running') {
       setText('sync', s.warmup ? t('node_warmup', { msg: s.warmup }) : t('node_starting'));
     } else if (synced(s)) {
@@ -101,17 +106,20 @@
   function renderM3(s) {
     const h3 = s ? s.h3 : 30000;
     setText('m3-title', t('m3_title', { h3: number(h3) }));
-    const reached = s && s.node === 'running' && s.blockH3;
-    $('m3-hash').hidden = !reached;
-    $('m3-link-line').hidden = !reached;
+    const reached = s && s.node === 'running' && s.reachedH3;
+    const hash = reached && s.blockH3;
+    $('m3-hash').hidden = !hash;
+    $('m3-link-line').hidden = !hash;
     if (!s || s.node !== 'running') {
       setText('m3', '');
-    } else if (reached) {
+    } else if (hash) {
       setText('m3', t('m3_after', { h3: number(h3) }));
       setText('m3-hash', s.blockH3);
       const link = $('m3-link');
       link.href = EXPLORER_HEIGHT + String(Number(h3));
       link.textContent = t('m3_compare');
+    } else if (reached) {
+      setText('m3', t('m3_hash_pending', { h3: number(h3) }));
     } else {
       setText('m3', t('m3_before', { n: number(Math.max(0, h3 - s.blocks)) }));
     }

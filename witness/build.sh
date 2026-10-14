@@ -21,7 +21,10 @@ if [ -n "$node_sha256" ] && ! printf '%s\n' "$node_sha256" | grep -Eqx '[0-9a-f]
 	exit 2
 fi
 mkdir -p out
+# The whole build environment is set before go first runs, so that nothing from outside changes the bytes and no
+# other Go release is fetched.
+export CGO_ENABLED=0 GOOS=$target GOARCH=amd64 GOAMD64=v1 GOEXPERIMENT= GOFIPS140=off GOFLAGS=-mod=readonly \
+	GOTOOLCHAIN=local GOPROXY=off
 go version
-CGO_ENABLED=0 GOOS=$target GOARCH=amd64 GOAMD64=v1 GOEXPERIMENT= GOFLAGS=-mod=readonly GOTOOLCHAIN=local GOPROXY=off \
-	go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=$(cat VERSION) -X main.bitcoindSHA256=$node_sha256" -o "$out" .
+go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=$(cat VERSION) -X main.bitcoindSHA256=$node_sha256" -o "$out" .
 sha256sum "$out"

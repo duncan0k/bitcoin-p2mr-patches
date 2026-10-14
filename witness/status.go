@@ -25,7 +25,7 @@ type status struct {
 	Version   string `json:"version"`
 	Now       string `json:"now"` // UTC
 	DataDir   string `json:"dataDir"`
-	Node      string `json:"node"` // "starting", "running" or "stopped"
+	Node      string `json:"node"` // "starting", "running", "noanswer" (running, but no answer this time) or "stopped"
 	NodeError string `json:"nodeError"`
 	Warmup    string `json:"warmup"` // the node's message while it loads
 	Blocks    int64  `json:"blocks"`
@@ -35,7 +35,8 @@ type status struct {
 	Peers     int    `json:"peers"`
 	Ark0      string `json:"ark0"` // "pending", "ok" or "mismatch"
 	H3        int64  `json:"h3"`
-	BlockH3   string `json:"blockH3"`
+	ReachedH3 bool   `json:"reachedH3"` // the newest tip the node reported is at or past H3
+	BlockH3   string `json:"blockH3"`   // the hash of block H3, once read
 	// What gettripwireinfo gave: "ok", "unknown" (no answer this time) or "absent" (the node has no such call, so
 	// it is not M3). The fields after it hold only with "ok", and are of block TripwireTip.
 	TripwireInfo        string     `json:"tripwireInfo"`
@@ -82,8 +83,11 @@ func (c *collector) collect() status {
 	}
 	if err := rpc.call("getblockchaininfo", nil, &chain); err != nil {
 		var answer *rpcError
-		if errors.As(err, &answer) && answer.Code == rpcInWarmup {
+		switch {
+		case errors.As(err, &answer) && answer.Code == rpcInWarmup:
 			s.Warmup = answer.Message
+		case s.Node == "running":
+			s.Node = "noanswer"
 		}
 		return s
 	}
@@ -112,14 +116,19 @@ func (c *collector) collect() status {
 	err := rpc.call("gettripwireinfo", nil, &tw)
 	var answer *rpcError
 	switch {
-	case err == nil && tw.TipHash != "" && tw.TipHeight != nil && tw.Height > 0 && tw.Tripwires != nil && tw.ECDisabled != nil:
+	case err == nil && tw.TipHash != "" && tw.TipHeight != nil && *tw.TipHeight >= 0 && tw.Height > 0 && tw.Tripwires != nil &&
+		tw.ECDisabled != nil:
 		s.TripwireInfo, s.H3 = "ok", tw.Height
 		s.TripwireTip, s.TripwireTipHash = *tw.TipHeight, tw.TipHash
 		s.Tripwires, s.ECDisabledNextBlock = tw.Tripwires, *tw.ECDisabled
 	case errors.As(err, &answer) && answer.Code == rpcMethodNotFound:
 		s.TripwireInfo = "absent"
 	}
-	if s.Blocks >= s.H3 {
+	tip := s.Blocks
+	if s.TripwireInfo == "ok" && s.TripwireTip > tip {
+		tip = s.TripwireTip
+	}
+	if s.ReachedH3 = tip >= s.H3; s.ReachedH3 {
 		_ = rpc.call("getblockhash", []any{s.H3}, &s.BlockH3)
 	}
 	if c.subversion == "" {
@@ -145,7 +154,11 @@ func witnessReport(s status, last *checkResult) string {
 	fmt.Fprintf(&b, "Ark-0 witness report (Ark0Witness %s)\n", s.Version)
 	fmt.Fprintf(&b, "Time (UTC): %s\n", s.Now)
 	if s.Node != "running" {
-		fmt.Fprintf(&b, "Node: %s\n", s.Node)
+		node := s.Node
+		if node == "noanswer" {
+			node = "did not answer just now"
+		}
+		fmt.Fprintf(&b, "Node: %s\n", node)
 		return b.String()
 	}
 	if s.Subversion != "" {
@@ -165,9 +178,12 @@ func witnessReport(s status, last *checkResult) string {
 	} else {
 		fmt.Fprintf(&b, "Tip: height %d, hash %s\n", s.Blocks, s.TipHash)
 	}
-	if s.BlockH3 != "" {
+	switch {
+	case s.BlockH3 != "":
 		fmt.Fprintf(&b, "Block %d (M3): %s\n", s.H3, s.BlockH3)
-	} else {
+	case s.ReachedH3:
+		fmt.Fprintf(&b, "Block %d (M3): reached, hash not read just now\n", s.H3)
+	default:
 		fmt.Fprintf(&b, "Block %d (M3): not reached yet\n", s.H3)
 	}
 	switch s.TripwireInfo {

@@ -33,13 +33,11 @@ func openNodeProgram(exe string) (*os.File, error) {
 	return os.Open(exe)
 }
 
-// keepWithProgram has nothing to do on Linux: the parent-death signal ends the node with this program.
-func keepWithProgram(*os.Process) error {
+// admit has nothing to do on Linux: the node runs from its start, and the parent-death signal ends it with this
+// program.
+func admit(*os.Process, *os.File) error {
 	return nil
 }
-
-// letFinish has nothing to do on Linux: the parent-death signal only repeats a stop the node has agreed to.
-func letFinish() {}
 
 // terminate asks the node to stop with SIGTERM, which it obeys even while it loads.
 func terminate(p *os.Process) error {

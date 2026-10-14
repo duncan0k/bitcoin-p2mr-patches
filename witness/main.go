@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -144,8 +145,12 @@ func nodeProgram(given string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("the node program is not a file")
+	if info.IsDir() {
+		return "", errors.New("the node program is a folder")
+	}
+	// The file checked must be the file started: on Windows, exec would run name.exe for a name without it.
+	if found, err := exec.LookPath(exe); err != nil || found != exe {
+		return "", errors.New("the node program is not an executable file")
 	}
 	return exe, nil
 }

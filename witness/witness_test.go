@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -522,6 +523,31 @@ func TestStatusAndReport(t *testing.T) {
 		t.Errorf("tripwire tip:\n%s", r)
 	}
 
+	// The tripwires already at block 30000 while the chain info still said 29999: block 30000 counts as reached.
+	h := newFakeNode(t)
+	h.ark0(29999, "unspent", false)
+	answer = h.answers["gettripwireinfo"]
+	h.answers["gettripwireinfo"] = func(p []json.RawMessage) (any, *rpcError) {
+		info, _ := answer(p)
+		info.(map[string]any)["tip_height"], info.(map[string]any)["tip_hash"] = 30000, "00cc"
+		return info, nil
+	}
+	s = (&collector{node: h.node(), dataDir: h.dataDir}).collect()
+	if !s.ReachedH3 || s.BlockH3 != "000030000hash" {
+		t.Errorf("crossing 30000: %+v", s)
+	}
+	// Past 30000 with the hash of block 30000 not read: reached, not "not reached yet".
+	h.answers["getblockhash"] = func(p []json.RawMessage) (any, *rpcError) {
+		if string(p[0]) == "1264" {
+			return block1264, nil
+		}
+		return nil, &rpcError{Code: -1, Message: "boom"}
+	}
+	s = (&collector{node: h.node(), dataDir: h.dataDir}).collect()
+	if r := witnessReport(s, nil); !strings.Contains(r, "Block 30000 (M3): reached, hash not read just now") {
+		t.Errorf("hash not read:\n%s", r)
+	}
+
 	// Before 30000, the hash of block 30000 is not asked for.
 	g := newFakeNode(t)
 	g.ark0(22600, "unspent", false)
@@ -556,6 +582,9 @@ func TestStatusEdges(t *testing.T) {
 		func([]json.RawMessage) (any, *rpcError) {
 			return map[string]any{"tip_hash": "00aa", "height": 30000, "tripwires": []any{}, "ec_disabled_next_block": false}, nil
 		},
+		func([]json.RawMessage) (any, *rpcError) {
+			return map[string]any{"tip_height": -1, "tip_hash": "00aa", "height": 30000, "tripwires": []any{}, "ec_disabled_next_block": false}, nil
+		},
 	} {
 		f.answers["gettripwireinfo"] = answer
 		s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
@@ -575,6 +604,18 @@ func TestStatusEdges(t *testing.T) {
 	if s := (&collector{node: f.node(), dataDir: f.dataDir}).collect(); s.Ark0 != "pending" ||
 		!strings.Contains(witnessReport(s, nil), "Block 1264 matches Ark-0: not checked yet") {
 		t.Errorf("pending not seen: %+v", s)
+	}
+	// A running node that does not answer once is not shown at height 0.
+	g := newFakeNode(t)
+	g.ark0(22600, "unspent", false)
+	running := g.node()
+	if s := (&collector{node: running, dataDir: g.dataDir}).collect(); s.Node != "running" {
+		t.Fatalf("%+v", s)
+	}
+	g.answers["getblockchaininfo"] = func([]json.RawMessage) (any, *rpcError) { return nil, &rpcError{Code: -1, Message: "boom"} }
+	s = (&collector{node: running, dataDir: g.dataDir}).collect()
+	if r := witnessReport(s, nil); s.Node != "noanswer" || !strings.Contains(r, "Node: did not answer just now") || strings.Contains(r, "Tip") {
+		t.Errorf("no answer: %+v\n%s", s, r)
 	}
 	// Still loading.
 	f.answers["getblockchaininfo"] = func([]json.RawMessage) (any, *rpcError) {
@@ -835,6 +876,24 @@ func TestFilesAndPaths(t *testing.T) {
 	}
 	if _, err := nodeProgram(dir); err == nil {
 		t.Error("a folder is accepted as the program")
+	}
+	// The program checked is the program started.
+	if runtime.GOOS == "windows" {
+		bare := filepath.Join(dir, "node")
+		_ = os.WriteFile(bare, []byte("node"), 0o700)
+		_ = os.WriteFile(bare+".exe", []byte("other"), 0o700)
+		if _, err := nodeProgram(bare); err == nil {
+			t.Error("a name Windows would run as name.exe is accepted")
+		}
+	} else {
+		plain := filepath.Join(dir, "plain")
+		_ = os.WriteFile(plain, []byte("node"), 0o600)
+		if _, err := nodeProgram(plain); err == nil {
+			t.Error("a file that cannot be run is accepted")
+		}
+		if got, err := nodeProgram(exe); err != nil || got != exe {
+			t.Errorf("node program %s %v", got, err)
+		}
 	}
 	if got, err := dataFolder(filepath.Join(dir, "data")); err != nil || !filepath.IsAbs(got) {
 		t.Errorf("data folder %s %v", got, err)

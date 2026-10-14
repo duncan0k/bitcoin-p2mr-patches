@@ -22,6 +22,7 @@ const (
 	jobObjectLimitKillOnJobClose      = 0x00002000
 	processSetQuota                   = 0x0100
 	processTerminate                  = 0x0001
+	processQueryLimitedInformation    = 0x1000
 	threadSuspendResume               = 0x0002
 )
 
@@ -37,6 +38,7 @@ var (
 	procThread32Next             = kernel32.NewProc("Thread32Next")
 	procOpenThread               = kernel32.NewProc("OpenThread")
 	procResumeThread             = kernel32.NewProc("ResumeThread")
+	procQueryFullProcessImageW   = kernel32.NewProc("QueryFullProcessImageNameW")
 )
 
 // setupConsole has the console print UTF-8, so that every language shows, and names the window.
@@ -54,7 +56,7 @@ func systemLanguage() string {
 }
 
 // configureNode starts the node with no window, outside this console's process group, and suspended, until
-// keepWithProgram has put it into the job. Closing this window does not reach the node; the program asks it to
+// admit lets it run. Closing this window does not reach the node; the program asks it to
 // stop over RPC instead.
 func configureNode(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | createNewProcessGroup | createSuspended}
@@ -97,12 +99,13 @@ type jobLimits struct {
 var _ [144]byte = [unsafe.Sizeof(jobLimits{})]byte{}
 
 // job holds the node. When this program exits, however it exits, Windows closes the program's handle to the job
-// and ends the processes in it, unless letFinish has lifted that. Used under node.mu.
+// and ends the processes in it. Used under node.mu.
 var job syscall.Handle
 
-// keepWithProgram puts the node, started suspended, into the job and only then lets it run, so that no node is
-// left running hidden after this program.
-func keepWithProgram(p *os.Process) error {
+// admit puts the node, started suspended, into the job, so that no node is left running hidden after this
+// program; checks that it is the very file this program checked and holds open; and only then lets it run. Should
+// this program die before the node is in the job, what is left is a suspended process that has run nothing.
+func admit(p *os.Process, program *os.File) error {
 	if job == 0 {
 		h, _, err := procCreateJobObjectW.Call(0, 0)
 		if h == 0 {
@@ -114,7 +117,7 @@ func keepWithProgram(p *os.Process) error {
 		}
 		job = syscall.Handle(h)
 	}
-	process, err := syscall.OpenProcess(processSetQuota|processTerminate, false, uint32(p.Pid))
+	process, err := syscall.OpenProcess(processSetQuota|processTerminate|processQueryLimitedInformation, false, uint32(p.Pid))
 	if err != nil {
 		return err
 	}
@@ -122,7 +125,39 @@ func keepWithProgram(p *os.Process) error {
 	if r, _, err := procAssignProcessToJobObject.Call(uintptr(job), uintptr(process)); r == 0 {
 		return err
 	}
+	same, err := runsFile(process, program)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return errors.New("the node started is not the node program that was checked")
+	}
 	return resume(uint32(p.Pid))
+}
+
+// runsFile reports whether process runs program: the file Windows loaded for it and program are one file of one
+// volume, whatever the paths that led to them.
+func runsFile(process syscall.Handle, program *os.File) (bool, error) {
+	buf := make([]uint16, 32768)
+	size := uint32(len(buf))
+	if r, _, err := procQueryFullProcessImageW.Call(uintptr(process), 0, uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&size))); r == 0 {
+		return false, err
+	}
+	image, err := syscall.CreateFile(&buf[0], 0, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil,
+		syscall.OPEN_EXISTING, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return false, err
+	}
+	defer syscall.CloseHandle(image)
+	var a, b syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(image, &a); err != nil {
+		return false, err
+	}
+	if err := syscall.GetFileInformationByHandle(syscall.Handle(program.Fd()), &b); err != nil {
+		return false, err
+	}
+	return a.VolumeSerialNumber == b.VolumeSerialNumber && a.FileIndexHigh == b.FileIndexHigh && a.FileIndexLow == b.FileIndexLow, nil
 }
 
 // threadEntry is THREADENTRY32.
@@ -165,14 +200,6 @@ func resume(pid uint32) error {
 		return errors.New("the node has no thread to resume")
 	}
 	return nil
-}
-
-// letFinish lets a node that has agreed to stop finish its shutdown should this program exit first. If Windows
-// refuses, the node is ended with the program, which it recovers from at its next start.
-func letFinish() {
-	if job != 0 {
-		_ = setJobLimits(job, 0)
-	}
 }
 
 func setJobLimits(h syscall.Handle, flags uint32) error {
