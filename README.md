@@ -145,6 +145,10 @@ and follow the live chain. Every block is still produced by the operator alone. 
 at the rule change at height 8600 (M1), with the block the nodes refused after it, at 8714, is in `NETWORK.md`
 and `evidence/`; checking it takes a node that follows the live chain.
 
+`ark0/WEB-WALLET.md` says how the operator's web wallet, <https://wallet.ark0.si>, makes its keys and
+addresses from a seed, with test vectors in `ark0/web-wallet-vectors.json`, and lists the limits of that
+derivation.
+
 ## Follow-up series: M0.5 wallet support (`patches-m05/`)
 
 A second series, shipped in this tree alongside the consensus one and applied on top of it. It is not
