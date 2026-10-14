@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,10 @@ func (s *server) url() string {
 // loadAssets reads the embedded page. The strings go to the page as a script, so that the page needs no
 // request beyond its own files.
 func loadAssets() (map[string]asset, error) {
+	return loadAssetsForPlatform(runtime.GOOS)
+}
+
+func loadAssetsForPlatform(platform string) (map[string]asset, error) {
 	files := map[string][]byte{}
 	for _, name := range []string{"index.html", "app.js", "style.css", "strings.json"} {
 		data, err := ui.ReadFile("ui/" + name)
@@ -92,6 +97,7 @@ func loadAssets() (map[string]asset, error) {
 		files[name] = data
 	}
 	var parsed map[string]map[string]string
+	files["strings.json"] = []byte(fillProgramNames(string(files["strings.json"]), platform))
 	if err := json.Unmarshal(files["strings.json"], &parsed); err != nil {
 		return nil, err
 	}

@@ -16,8 +16,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -33,10 +33,11 @@ func main() {
 }
 
 func run() int {
-	// Closing the console window arrives as SIGTERM (CTRL_CLOSE_EVENT on Windows), Ctrl+C as an interrupt. Both are
-	// caught from the start: a node is then stopped, or never started.
+	// Terminal closure (SIGHUP on Unix, CTRL_CLOSE_EVENT as SIGTERM on Windows) and Ctrl+C are caught from the
+	// start, so that a node is stopped or never started.
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signals, stoppingSignals()...)
+	ignoreBrokenPipe()
 
 	dataFlag := flag.String("datadir", "", "data folder (default: Ark0Witness in the local application data folder)")
 	nodeFlag := flag.String("bitcoind", "", "node program (default: bitcoind next to this program)")
@@ -44,7 +45,7 @@ func run() int {
 	langFlag := flag.String("lang", "", "language of this window: en, zh, ja, ko, ru or es")
 	flag.Parse()
 
-	t := consoleTexts[pickLanguage(*langFlag, systemLanguage())]
+	t := fillConsole(consoleTexts[pickLanguage(*langFlag, systemLanguage())], runtime.GOOS)
 	setupConsole(t.Title)
 	fmt.Printf("%s %s\n%s\n\n", t.Title, version, t.Tagline)
 	fail := func(message string) int { return failed(t, message, signals) }
@@ -77,6 +78,9 @@ func run() int {
 		return fail(t.Busy)
 	}
 	defer release()
+	if err := stopLeftoverNode(dataDir); err != nil {
+		return fail(fmt.Sprintf(t.StartFailed, err))
+	}
 
 	n := newNode(exe, bitcoindSHA256, dataDir)
 	srv, err := newServer(n, dataDir)
@@ -96,10 +100,7 @@ func run() int {
 	select {
 	case <-signals:
 		fmt.Println(t.Stopping)
-		// Windows ends a program five seconds after its console window was closed.
-		deadline := time.Now().Add(4 * time.Second)
-		n.stop()
-		n.wait(time.Until(deadline))
+		shutdownNode(n, shutdownTimeout)
 		return 0
 	case <-n.done:
 		_, message := n.state()
@@ -180,12 +181,11 @@ func checkSHA256(r io.Reader, want string) error {
 	return nil
 }
 
-// dataFolder is the folder given, or Ark0Witness in the local application data folder (%LOCALAPPDATA% on
-// Windows); it is created if need be, readable by this user only.
+// dataFolder creates the folder given, or the platform's persistent application data folder, privately.
 func dataFolder(given string) (string, error) {
 	dir := given
 	if dir == "" {
-		base, err := os.UserCacheDir()
+		base, err := defaultDataHome()
 		if err != nil {
 			return "", err
 		}

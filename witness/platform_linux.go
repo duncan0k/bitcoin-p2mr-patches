@@ -1,64 +1,53 @@
+//go:build linux
+
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
-const nodeName = "bitcoind"
-
-func setupConsole(string) {}
-
-// systemLanguage is the language of the locale, if the program has it.
-func systemLanguage() string {
-	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		if lang := languageOfLocale(os.Getenv(name)); lang != "" {
-			return lang
-		}
+func defaultDataHome() (string, error) {
+	if dir := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(dir) {
+		return dir, nil
 	}
-	return ""
+	home, err := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share"), err
 }
 
-// configureNode puts the node in a process group of its own, so that Ctrl+C in this terminal reaches only this
-// program, which then stops the node over RPC, as on Windows; and has Linux send the node SIGTERM, on which it
-// shuts down cleanly, should this program die first.
+func fallbackLanguage() string { return "" }
+
+// A separate process group leaves terminal signals to the witness; parent death still requests clean shutdown.
 func configureNode(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
 }
 
-// openNodeProgram opens the node program. Linux has no sharing mode that keeps it from being replaced while it
-// is checked and started; the Linux build serves tests.
-func openNodeProgram(exe string) (*os.File, error) {
-	return os.Open(exe)
-}
-
-// admit has nothing to do on Linux: the node runs from its start, and the parent-death signal ends it with this
-// program.
-func admit(*os.Process, *os.File) error {
+// The inherited read-only descriptor makes the kernel execute the file that was hashed, even after a rename.
+func runCheckedCopy(cmd *exec.Cmd, f *os.File) error {
+	path := "/proc/self/fd/" + strconv.FormatUint(uint64(f.Fd()), 10)
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("cannot start the checked node: /proc/self/fd is unavailable; mount procfs: %w", err)
+	}
+	checked, err := f.Stat()
+	if err != nil || !os.SameFile(info, checked) {
+		return fmt.Errorf("cannot start the checked node: /proc/self/fd does not identify its file")
+	}
+	cmd.ExtraFiles = []*os.File{f}
+	cmd.Path = "/proc/self/fd/3"
 	return nil
 }
 
-// terminate asks the node to stop with SIGTERM, which it obeys even while it loads.
-func terminate(p *os.Process) error {
-	return p.Signal(syscall.SIGTERM)
+func processExecutable(pid int) (string, error) {
+	path, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return path, err
 }
 
-// openBrowser opens the page in the default browser.
-func openBrowser(url string) error {
-	return exec.Command("xdg-open", url).Start()
-}
-
-// lockInstance takes an exclusive lock on the lock file, so that a second program on the same data folder
-// cannot; the lock goes with the process.
-func lockInstance(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return func() { _ = f.Close() }, nil
-}
+func openBrowser(url string) error { return exec.Command("xdg-open", url).Start() }

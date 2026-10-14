@@ -129,10 +129,8 @@ func (n *node) isStopping() bool {
 	return n.stopping
 }
 
-// stop keeps any further node from starting and asks the running one to shut down. A node still loading
-// refuses and a node not yet listening cannot be asked, so the request is repeated for two seconds; a node that
-// has not agreed by then is ended. One still shutting down when this program exits is ended with it (the job
-// object on Windows; SIGTERM again on Linux).
+// stop prevents further starts and retries the RPC request for two seconds. Windows must end an unresponsive
+// node immediately because console closure leaves little time; Unix allows it the remaining shutdown time.
 func (n *node) stop() {
 	n.mu.Lock()
 	n.stopping = true
@@ -150,7 +148,7 @@ func (n *node) stop() {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.proc != nil {
+	if n.proc != nil && endUnresponsiveNode {
 		_ = terminate(n.proc) // it may have exited in the meantime
 	}
 }
@@ -225,6 +223,7 @@ func (n *node) runOnce(port int) (string, error) {
 
 	go n.trustWhenReady(cmd.Process, port)
 	_ = cmd.Wait()
+	removeNodePID(n.dataDir)
 	n.mu.Lock()
 	n.proc, n.rpc = nil, nil
 	n.mu.Unlock()
@@ -251,29 +250,6 @@ func (n *node) trustWhenReady(p *os.Process, port int) {
 		n.mu.Unlock()
 		time.Sleep(200 * time.Millisecond)
 	}
-}
-
-// startNode starts cmd while the node program is held open against changes: it checks the program against the
-// SHA-256 this program was built with, if any, starts it, and has admit tie it to this program, check that it is
-// that very file and let it run.
-func (n *node) startNode(cmd *exec.Cmd) error {
-	f, err := openNodeProgram(n.exe)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := checkSHA256(f, n.exeSHA256); err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	if err := admit(cmd.Process, f); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return err
-	}
-	return nil
 }
 
 func freePort() (int, error) {

@@ -8,10 +8,48 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 const nodeName = "bitcoind.exe"
+
+const shutdownTimeout = 4 * time.Second
+const endUnresponsiveNode = true
+
+func defaultDataHome() (string, error) { return os.UserCacheDir() }
+func stoppingSignals() []os.Signal     { return []os.Signal{os.Interrupt, syscall.SIGTERM} }
+func ignoreBrokenPipe()                {}
+func stopLeftoverNode(string) error    { return nil }
+func removeNodePID(string)             {}
+
+// Windows ends a program five seconds after its console window was closed.
+func shutdownNode(n *node, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	n.stop()
+	n.wait(time.Until(deadline))
+}
+
+// startNode holds the checked image against changes, starts it suspended, and admits only that very file.
+func (n *node) startNode(cmd *exec.Cmd) error {
+	f, err := openNodeProgram(n.exe)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := checkSHA256(f, n.exeSHA256); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := admit(cmd.Process, f); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
+}
 
 const (
 	createNoWindow        = 0x08000000

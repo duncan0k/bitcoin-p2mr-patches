@@ -103,7 +103,11 @@ func fakeNodeProcess(t *testing.T, kind, dataDir, exeSHA256 string) *node {
 	}
 	n := newNode(exe, exeSHA256, dataDir)
 	t.Cleanup(func() {
-		n.stop()
+		if runtime.GOOS == "windows" {
+			n.stop()
+		} else {
+			shutdownNode(n, 3*time.Second)
+		}
 		n.wait(10 * time.Second)
 	})
 	return n
@@ -132,8 +136,8 @@ func starts(dataDir string) int {
 	return strings.Count(string(data), "\n")
 }
 
-// A node that agrees stops at once; one that refuses while it loads, or never listens, is ended after two
-// seconds. Its RPC is trusted only once it has written its cookie.
+// A node that agrees stops at once. Windows ends an unresponsive node after two seconds; Unix sends SIGTERM
+// at the shutdown deadline. Its RPC is trusted only once it has written its cookie.
 func TestNodeStops(t *testing.T) {
 	for _, c := range []struct {
 		kind    string
@@ -154,7 +158,11 @@ func TestNodeStops(t *testing.T) {
 				t.Fatalf("trusted: %v", trusted)
 			}
 			began := time.Now()
-			n.stop()
+			if runtime.GOOS == "windows" {
+				n.stop()
+			} else {
+				shutdownNode(n, 3*time.Second)
+			}
 			if !stoppedWithin(n, c.within) {
 				t.Fatalf("the node still runs %v after stop", time.Since(began))
 			}

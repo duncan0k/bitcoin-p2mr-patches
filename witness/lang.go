@@ -27,8 +27,8 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "Keep this window open. Closing it stops the node.",
 		Already:      "The witness is already running in another window. Its page:",
 		Busy:         "Another program is using the witness's data folder. Close it and try again.",
-		MissingNode:  "bitcoind.exe was not found next to Ark0Witness.exe. Unzip the whole download into a folder first, then double-click Ark0Witness.exe in that folder.",
-		WrongNode:    "bitcoind.exe in this folder is not the one this witness was built with. Download the witness again.",
+		MissingNode:  "{node} was not found next to {program}. Unzip the whole download into a folder first, then double-click {program} in that folder.",
+		WrongNode:    "{node} in this folder is not the one this witness was built with. Download the witness again.",
 		NoDataFolder: "The data folder cannot be created: %v",
 		StartFailed:  "The witness cannot start: %v",
 		Stopping:     "Stopping the node…",
@@ -42,8 +42,8 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "请不要关闭这个窗口。关闭它，节点就会停下。",
 		Already:      "见证器已经在另一个窗口里运行，它的状态页：",
 		Busy:         "有别的程序正在使用见证器的数据文件夹。请关掉它再试。",
-		MissingNode:  "在 Ark0Witness.exe 旁边找不到 bitcoind.exe。请先把下载的压缩包整个解压到一个文件夹，再双击那个文件夹里的 Ark0Witness.exe。",
-		WrongNode:    "这个文件夹里的 bitcoind.exe 不是见证器配套的那一个。请重新下载见证器。",
+		MissingNode:  "在 {program} 旁边找不到 {node}。请先把下载的压缩包整个解压到一个文件夹，再双击那个文件夹里的 {program}。",
+		WrongNode:    "这个文件夹里的 {node} 不是见证器配套的那一个。请重新下载见证器。",
 		NoDataFolder: "无法创建数据文件夹：%v",
 		StartFailed:  "见证器无法启动：%v",
 		Stopping:     "正在停止节点……",
@@ -57,8 +57,8 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "このウィンドウは開いたままにしてください。閉じるとノードが停止します。",
 		Already:      "ウィットネスは別のウィンドウですでに動いています。状態ページ：",
 		Busy:         "別のプログラムがウィットネスのデータフォルダーを使っています。そのプログラムを閉じてから、もう一度お試しください。",
-		MissingNode:  "Ark0Witness.exe と同じ場所に bitcoind.exe が見つかりません。ダウンロードしたファイルをまずフォルダーにすべて展開し、そのフォルダー内の Ark0Witness.exe をダブルクリックしてください。",
-		WrongNode:    "このフォルダーの bitcoind.exe は、このウィットネスと一緒に配布されたものではありません。ウィットネスをダウンロードし直してください。",
+		MissingNode:  "{program} と同じ場所に {node} が見つかりません。ダウンロードしたファイルをまずフォルダーにすべて展開し、そのフォルダー内の {program} をダブルクリックしてください。",
+		WrongNode:    "このフォルダーの {node} は、このウィットネスと一緒に配布されたものではありません。ウィットネスをダウンロードし直してください。",
 		NoDataFolder: "データフォルダーを作成できません：%v",
 		StartFailed:  "ウィットネスを起動できません：%v",
 		Stopping:     "ノードを停止しています…",
@@ -72,8 +72,8 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "이 창을 닫지 마세요. 창을 닫으면 노드가 멈춥니다.",
 		Already:      "위트니스가 이미 다른 창에서 실행 중입니다. 상태 페이지:",
 		Busy:         "다른 프로그램이 위트니스의 데이터 폴더를 사용하고 있습니다. 그 프로그램을 닫고 다시 시도하세요.",
-		MissingNode:  "Ark0Witness.exe 옆에 bitcoind.exe가 없습니다. 내려받은 압축 파일을 먼저 폴더에 모두 풀고, 그 폴더의 Ark0Witness.exe를 더블클릭하세요.",
-		WrongNode:    "이 폴더의 bitcoind.exe는 이 위트니스와 함께 배포된 파일이 아닙니다. 위트니스를 다시 내려받으세요.",
+		MissingNode:  "{program} 옆에 {node}가 없습니다. 내려받은 압축 파일을 먼저 폴더에 모두 풀고, 그 폴더의 {program}를 더블클릭하세요.",
+		WrongNode:    "이 폴더의 {node}는 이 위트니스와 함께 배포된 파일이 아닙니다. 위트니스를 다시 내려받으세요.",
 		NoDataFolder: "데이터 폴더를 만들 수 없습니다: %v",
 		StartFailed:  "위트니스를 시작할 수 없습니다: %v",
 		Stopping:     "노드를 멈추는 중입니다…",
@@ -87,8 +87,8 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "Не закрывайте это окно: если его закрыть, узел остановится.",
 		Already:      "Witness уже работает в другом окне. Его страница:",
 		Busy:         "Папку данных Witness занимает другая программа. Закройте её и попробуйте снова.",
-		MissingNode:  "Рядом с Ark0Witness.exe нет bitcoind.exe. Сначала распакуйте весь скачанный архив в папку, затем дважды щёлкните Ark0Witness.exe в этой папке.",
-		WrongNode:    "bitcoind.exe в этой папке — не тот, с которым собран этот Witness. Скачайте Witness заново.",
+		MissingNode:  "Рядом с {program} нет {node}. Сначала распакуйте весь скачанный архив в папку, затем дважды щёлкните {program} в этой папке.",
+		WrongNode:    "{node} в этой папке — не тот, с которым собран этот Witness. Скачайте Witness заново.",
 		NoDataFolder: "Не удаётся создать папку данных: %v",
 		StartFailed:  "Witness не может запуститься: %v",
 		Stopping:     "Останавливаем узел…",
@@ -102,14 +102,21 @@ var consoleTexts = map[string]console{
 		KeepOpen:     "No cierres esta ventana: si la cierras, el nodo se detiene.",
 		Already:      "Ark-0 Witness ya está en marcha en otra ventana. Su página:",
 		Busy:         "Otro programa está usando la carpeta de datos de Ark-0 Witness. Ciérralo y vuelve a intentarlo.",
-		MissingNode:  "No se encuentra bitcoind.exe junto a Ark0Witness.exe. Primero descomprime toda la descarga en una carpeta y luego haz doble clic en el Ark0Witness.exe de esa carpeta.",
-		WrongNode:    "El bitcoind.exe de esta carpeta no es el que acompaña a este Ark-0 Witness. Vuelve a descargarlo.",
+		MissingNode:  "No se encuentra {node} junto a {program}. Primero descomprime toda la descarga en una carpeta y luego haz doble clic en el {program} de esa carpeta.",
+		WrongNode:    "El {node} de esta carpeta no es el que acompaña a este Ark-0 Witness. Vuelve a descargarlo.",
 		NoDataFolder: "No se puede crear la carpeta de datos: %v",
 		StartFailed:  "Ark-0 Witness no puede iniciarse: %v",
 		Stopping:     "Deteniendo el nodo…",
 		Stopped:      "El nodo se ha detenido.",
 		PressEnter:   "Presiona Enter para cerrar esta ventana.",
 	},
+}
+
+// fillConsole keeps platform names out of the translations themselves.
+func fillConsole(text console, platform string) console {
+	text.MissingNode = fillProgramNames(text.MissingNode, platform)
+	text.WrongNode = fillProgramNames(text.WrongNode, platform)
+	return text
 }
 
 // pickLanguage is the first of the choices this program has, or English.
