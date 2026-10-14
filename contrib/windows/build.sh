@@ -7,9 +7,11 @@
 # PHASE=full  also runs test_bitcoin.exe and an end-to-end sync of bitcoind.exe under Wine.
 # PHASE=build builds and hashes only (the second, clean build of the determinism check).
 #
-# Everything lives under /work, which should start empty, the source always at /work/src, since the binaries
-# carry source paths. Results go to /work/out: stripped/bitcoind.exe is the bitcoind.exe of the witness program's
-# release (witness/README.md), and toolchain.txt lists the package versions a later build needs to match it.
+# The build lives under /work, which should start empty, the source always at /work/src, since the binaries carry
+# source paths (PHASE=full also lets Wine keep its server's socket under /tmp). Both repositories must be at the
+# commits below, or the script stops before it builds. Results go to /work/out: stripped/bitcoind.exe is the
+# bitcoind.exe of the witness program's release (witness/README.md); toolchain.txt names the toolchain, and
+# packages.txt lists every installed package's version, which a later build needs to match it.
 set -euo pipefail
 PHASE="${PHASE:-full}"
 JOBS="${JOBS:-8}"
@@ -17,8 +19,9 @@ W=/work
 OUT=$W/out
 SRC=$W/src
 CORE_TAG=v31.1
-CORE_COMMIT=9be056a
+CORE_COMMIT=9be056a8a72b624dae9623b2f7bded92c2a21c91
 PATCH_TAG=ark0-node-m3
+PATCH_COMMIT=c0015ecf9a7c02415c88c9371e99dbe2f7e46ef2
 HOST_TRIPLET=x86_64-w64-mingw32
 mkdir -p "$OUT"
 exec > >(tee -a "$OUT/run.log") 2>&1
@@ -42,14 +45,16 @@ say "packages installed in $(since "$t0")"
     echo "cmake: $(cmake --version | head -1)"
     if [ "$PHASE" = full ]; then echo "wine: $(dpkg-query -W -f='${Version}' wine64 2>/dev/null)"; fi
 } | tee "$OUT/toolchain.txt"
+dpkg-query -W -f='${Package}=${Version}\n' > "$OUT/packages.txt"
 x86_64-w64-mingw32-g++ -v 2>&1 | grep -q 'Thread model: posix' || { echo "the mingw g++ is not the POSIX-thread one" >&2; exit 1; }
 
 say "cloning Core $CORE_TAG and the patch repository at $PATCH_TAG"
 git clone -q --branch "$CORE_TAG" --depth 1 https://github.com/bitcoin/bitcoin.git "$SRC"
 core_head=$(git -C "$SRC" rev-parse HEAD)
-[ "${core_head:0:7}" = "$CORE_COMMIT" ] || { echo "expected $CORE_TAG at $CORE_COMMIT, got $core_head" >&2; exit 1; }
+[ "$core_head" = "$CORE_COMMIT" ] || { echo "expected $CORE_TAG at $CORE_COMMIT, got $core_head" >&2; exit 1; }
 git clone -q --branch "$PATCH_TAG" --depth 1 https://github.com/duncan0k/bitcoin-p2mr-patches.git "$W/patches"
 patch_head=$(git -C "$W/patches" rev-parse HEAD)
+[ "$patch_head" = "$PATCH_COMMIT" ] || { echo "expected $PATCH_TAG at $PATCH_COMMIT, got $patch_head" >&2; exit 1; }
 echo "core $core_head, patches $patch_head" | tee "$OUT/sources.txt"
 cd "$W/patches"
 for pair in patches:SHA256SUMS patches-m05:SHA256SUMS-m05 patches-spacing:SHA256SUMS-spacing \
@@ -137,6 +142,10 @@ if [ "$PHASE" = full ]; then
     t0=$(date +%s)
     "$WINE" "$OUT/stripped/bitcoind.exe" -datadir='C:\ark0' > e2e-console.log 2>&1 &
     node=$!
+    # However the script ends from here, the node does not outlive it.
+    trap 'kill "$node" 2>/dev/null || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     cli -rpcwait -rpcwaittimeout=120 getblockcount > /dev/null
     synced=0
     for i in $(seq 1 120); do
@@ -155,6 +164,11 @@ if [ "$PHASE" = full ]; then
         echo "--- datadir"; du -sh "$D"
     } | tee e2e.txt
     cli stop
+    for i in $(seq 1 60); do kill -0 "$node" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$node" 2>/dev/null; then
+        echo "bitcoind.exe still running 60 s after stop; ending it" | tee -a e2e.result
+        kill "$node"
+    fi
     rc=0; wait "$node" || rc=$?
     echo "bitcoind.exe exited $rc after stop" | tee -a e2e.result
     tr -d '\r' < "$D/signet/debug.log" | grep -E "Shutdown done|error|Error" | tail -5 | tee -a e2e.result
