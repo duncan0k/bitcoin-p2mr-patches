@@ -553,6 +553,9 @@ func TestStatusEdges(t *testing.T) {
 		func([]json.RawMessage) (any, *rpcError) {
 			return map[string]any{"tip_height": 22600, "tip_hash": "00aa", "height": 30000, "tripwires": []any{}}, nil
 		},
+		func([]json.RawMessage) (any, *rpcError) {
+			return map[string]any{"tip_hash": "00aa", "height": 30000, "tripwires": []any{}, "ec_disabled_next_block": false}, nil
+		},
 	} {
 		f.answers["gettripwireinfo"] = answer
 		s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
@@ -635,6 +638,11 @@ func TestRPCAnswers(t *testing.T) {
 			t.Errorf("%s: %v %+v", body, err, out)
 		case want != "" && (err == nil || !strings.Contains(err.Error(), want)):
 			t.Errorf("%s: %v, want %q", body, err, want)
+		}
+		// A call whose result is not used, such as stop, is held to the same answer.
+		err = newRPCClient(portOf(t, server), cookiePath(dir)).callWithin(time.Second, "stop", nil, nil)
+		if (want == "" || want == "cannot unmarshal") != (err == nil) {
+			t.Errorf("stop, %s: %v", body, err)
 		}
 		server.Close()
 	}

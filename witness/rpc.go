@@ -100,11 +100,12 @@ func (c *rpcClient) callWithin(timeout time.Duration, method string, params []an
 	if reply.Error != nil {
 		return reply.Error
 	}
-	if out == nil {
-		return nil
-	}
+	// Every call this program makes has a result, stop included.
 	if len(reply.Result) == 0 || string(reply.Result) == "null" {
 		return errors.New("the node answered " + method + " without a result")
+	}
+	if out == nil {
+		return nil
 	}
 	return json.Unmarshal(reply.Result, out)
 }

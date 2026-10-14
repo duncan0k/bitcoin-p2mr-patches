@@ -104,7 +104,7 @@ func (c *collector) collect() status {
 	// The tripwire states and the flag come with the block they are of, which may be newer than the tip above.
 	var tw struct {
 		TipHash    string     `json:"tip_hash"`
-		TipHeight  int64      `json:"tip_height"`
+		TipHeight  *int64     `json:"tip_height"`
 		Height     int64      `json:"height"`
 		Tripwires  []tripwire `json:"tripwires"`
 		ECDisabled *bool      `json:"ec_disabled_next_block"`
@@ -112,9 +112,9 @@ func (c *collector) collect() status {
 	err := rpc.call("gettripwireinfo", nil, &tw)
 	var answer *rpcError
 	switch {
-	case err == nil && tw.TipHash != "" && tw.Height > 0 && tw.Tripwires != nil && tw.ECDisabled != nil:
+	case err == nil && tw.TipHash != "" && tw.TipHeight != nil && tw.Height > 0 && tw.Tripwires != nil && tw.ECDisabled != nil:
 		s.TripwireInfo, s.H3 = "ok", tw.Height
-		s.TripwireTip, s.TripwireTipHash = tw.TipHeight, tw.TipHash
+		s.TripwireTip, s.TripwireTipHash = *tw.TipHeight, tw.TipHash
 		s.Tripwires, s.ECDisabledNextBlock = tw.Tripwires, *tw.ECDisabled
 	case errors.As(err, &answer) && answer.Code == rpcMethodNotFound:
 		s.TripwireInfo = "absent"
