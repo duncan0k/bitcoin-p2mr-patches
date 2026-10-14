@@ -546,6 +546,8 @@ chain instead, see `JOIN.md`.
 | `NETWORK.md` | this file |
 | `REPRODUCE.md` | step-by-step reproduction, with the output each step produced |
 | `JOIN.md` | how to get a node, prebuilt or built, connect it to the public node and follow the live chain |
+| `WEB-WALLET.md` | how the operator's web wallet makes its keys and addresses from a seed, and the limits of that derivation |
+| `web-wallet-vectors.json` | test vectors for `WEB-WALLET.md` |
 | `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
