@@ -45,6 +45,8 @@ SHA256SUMS-m3       checksums of the M3 patches
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
 ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
+contrib/windows/    cross-compile the M3 node for 64-bit Windows, as the witness program ships it
+witness/            Ark0Witness, a small Windows program for watching the M3 drill with a node of one's own
 ```
 
 ## Usage
@@ -461,3 +463,24 @@ versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every packag
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
 (snapshot.ubuntu.com serves past ones). And the build path, `/work/src`, is part of the binaries, so a
 rebuild elsewhere has to use it too.
+
+The release `ark0-witness-0.1.0` carries the same build for 64-bit Windows: `bitcoind.exe`, inside the zip
+of the witness program (below), without the wallet, GUI, ZMQ, IPC and USDT. `contrib/windows/build.sh`
+makes it, as root in a fresh Ubuntu 24.04 container or machine: it cross-compiles Bitcoin Core v31.1 with
+the six patch sets at the tag `ark0-node-m3`, with Core's own depends system and the mingw-w64 toolchain
+with POSIX threads, links without time stamps and strips with `SOURCE_DATE_EPOCH=1`. Two clean builds gave
+the same bytes. As with the Linux build, a later build matches only with the same package versions, which
+the script writes to `toolchain.txt` (mingw-w64 GCC 13.2.0 and binutils 2.41.90 for this one), and only
+under `/work/src`. With `PHASE=full`, the default, it also runs the unit tests and syncs the stripped
+`bitcoind.exe` with Ark-0 under Wine.
+
+## Witness program (`witness/`)
+
+Ark0Witness is a small program for 64-bit Windows 10 and 11 that runs the Windows build of the node above
+and shows, on a page served on 127.0.0.1 only, what that node reports during the M3 drill: how far it has
+synced, whether it is on Ark-0, block 30000 and the two tripwires, and whether elliptic curve signatures in
+leaves of version `0xe0` are still accepted. It can also have the node judge a raw transaction with
+`testmempoolaccept`, and it sends nothing. The release `ark0-witness-0.1.0` has the zip, its `SHA256SUMS`
+and the signature of that file by the release key. The program is not code-signed. `witness/README.md`
+says what it does and does not do, how it is built (Go and its standard library only, reproducibly) and how
+it is tested.

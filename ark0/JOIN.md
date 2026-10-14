@@ -36,6 +36,10 @@ patch sets on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet
 order. You can take that build prebuilt, as binaries or as a container image, or build it
 yourself; the rest of this guide works the same with either.
 
+On 64-bit Windows 10 or 11 there is a way without commands: the witness program of the release
+`ark0-witness-0.1.0` runs a Windows build of the same node and shows what it reports
+(`witness/README.md`). This guide does not cover it.
+
 ### Prebuilt binaries or image
 
 The release [`ark0-node-m3`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m3)
@@ -60,12 +64,13 @@ Primary key fingerprint: 025D 989B 68FF 923F 8EF6  9D4B 28F6 5A19 58A2 361A
 
 The same key is published at <https://github.com/duncan0k.gpg>, with the same fingerprint. The
 warning that the key is not certified with a trusted signature is expected. Then check the
-archive, unpack it, and check the binaries too:
+archive, unpack it, and check the binaries too; each command runs only if the one before it
+succeeded:
 
 ```bash
-sha256sum --ignore-missing -c SHA256SUMS
-tar -xzf ark0-node-m3-x86_64-linux-gnu.tar.gz
-sha256sum --ignore-missing -c SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS &&
+  tar -xzf ark0-node-m3-x86_64-linux-gnu.tar.gz &&
+  sha256sum --ignore-missing -c SHA256SUMS
 ```
 
 The binaries are linked against the system's C and C++ runtimes, libevent and SQLite. They need
