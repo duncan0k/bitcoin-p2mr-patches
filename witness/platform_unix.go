@@ -14,6 +14,8 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -186,7 +188,7 @@ func checkSignetFolder(dataDir string) error {
 		return fmt.Errorf("cannot inspect signet folder %q; fix it or choose another folder with -datadir: %w", path, err)
 	}
 	stat := info.Sys().(*syscall.Stat_t)
-	if reason := folderProblem(info.Mode(), stat.Uid, stat.Gid, uint32(os.Geteuid()), uint32(os.Getegid()), true, false, false); reason != "" {
+	if reason := folderProblem(info.Mode(), stat.Uid, stat.Gid, uint32(os.Geteuid()), uint32(os.Getegid()), true, false, false, false); reason != "" {
 		return fmt.Errorf("signet folder %q %s; use a real directory owned by you and run chmod 700 on it, or choose another folder with -datadir", path, reason)
 	}
 	return checkFolderACL(path)
@@ -274,8 +276,13 @@ func prepareNodeProgram(exe, want, dataDir string) (*os.File, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, nodeName)
-	if f, err := checkedPrivateCopy(path, want); err == nil {
-		return f, nil
+	// macOS 的文件 ACL 不受组权限位限制，旧副本即使通过 mode/hash 检查也可能被别人改写。
+	// 每次用无 allow ACL 的 node 目录内 O_EXCL 创建的新 inode 替换它，避免继承授权。
+	// Linux 的组权限位包含 ACL mask，且从已检查的描述符执行，因此可以复用。
+	if runtime.GOOS == "linux" {
+		if f, err := checkedPrivateCopy(path, want); err == nil {
+			return f, nil
+		}
 	}
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -425,7 +432,7 @@ func dataPathProblem(path string) error {
 }
 
 // 数据目录更严格；父目录允许 sticky 公共目录和 user-private-group 的组写权限。
-func folderProblem(mode os.FileMode, owner, group, uid, gid uint32, data, privateGroup, accessACL bool) string {
+func folderProblem(mode os.FileMode, owner, group, uid, gid uint32, data, privateGroup, accessACL, shield bool) string {
 	if !mode.IsDir() {
 		return "must be a directory"
 	}
@@ -441,15 +448,18 @@ func folderProblem(mode os.FileMode, owner, group, uid, gid uint32, data, privat
 	if owner != 0 && owner != uid {
 		return "must be owned by root or the effective user"
 	}
+	if shield {
+		return ""
+	}
 	if mode.Perm()&0o002 != 0 && mode&os.ModeSticky == 0 {
-		return "is writable by others without the sticky bit"
+		return "could be changed by other users because it is writable by others without the sticky bit"
 	}
 	// sticky 公共目录（例如 /tmp）允许组和其他用户写入。
 	if mode.Perm()&0o002 != 0 && mode&os.ModeSticky != 0 {
 		return ""
 	}
 	if mode.Perm()&0o020 != 0 && (owner != uid || group != gid || !privateGroup || accessACL) {
-		return "is group-writable without a verified user-private group and no POSIX access ACL"
+		return "could be changed by other users because it is group-writable without a verified user-private group and no POSIX access ACL"
 	}
 	return ""
 }
@@ -471,36 +481,123 @@ func userPrivateGroup() bool {
 	if err != nil || u.Gid != strconv.Itoa(os.Getegid()) {
 		return false
 	}
-	g, err := user.LookupGroupId(u.Gid)
-	if err != nil || g.Name != u.Username {
-		return false
-	}
-	// os/user 不提供组成员列表，必须核对 /etc/group 中的显式成员。
-	f, err := openRegularFile("/etc/group", os.O_RDONLY)
+	return userPrivateGroupFromFiles(u.Username, uint32(os.Geteuid()), uint32(os.Getegid()), readAccountFile)
+}
+
+func readAccountFile(path string) ([]byte, error) {
+	f, err := openRegularFile(path, os.O_RDONLY)
 	if err != nil {
-		return false
+		return nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
-	if err != nil {
+	return io.ReadAll(f)
+}
+
+func userPrivateGroupFromFiles(username string, uid, gid uint32, readFile func(string) ([]byte, error)) bool {
+	if username == "" {
 		return false
 	}
-	found := false
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Split(line, ":")
-		if len(fields) != 4 || fields[0] != g.Name || fields[2] != u.Gid {
-			continue
-		}
-		var members []string
-		if fields[3] != "" {
-			members = strings.Split(fields[3], ",")
-		}
-		if !privateGroupMembers(u.Username, g.Name, members) {
+	nsswitch, err := readFile("/etc/nsswitch.conf")
+	if err != nil || !localAccountSources(string(nsswitch)) {
+		return false
+	}
+	for _, database := range []string{"passwd", "group"} {
+		data, err := readFile("/etc/" + database)
+		if err != nil {
 			return false
 		}
-		found = true
+		found := false
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			fields := strings.Split(line, ":")
+			count, groupIndex := 4, 2
+			if database == "passwd" {
+				count, groupIndex = 7, 3
+			}
+			if len(fields) != count || fields[0] == "" || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+				return false
+			}
+			entryGroup, err := strconv.ParseUint(fields[groupIndex], 10, 32)
+			if err != nil {
+				return false
+			}
+			var entryUID uint64
+			if database == "passwd" {
+				entryUID, err = strconv.ParseUint(fields[2], 10, 32)
+				if err != nil {
+					return false
+				}
+			}
+			if uint32(entryGroup) != gid {
+				continue
+			}
+			if database == "passwd" {
+				if fields[0] != username || uint32(entryUID) != uid {
+					return false
+				}
+			} else {
+				var members []string
+				if fields[3] != "" {
+					members = strings.Split(fields[3], ",")
+				}
+				if !privateGroupMembers(username, fields[0], members) {
+					return false
+				}
+			}
+			found = true
+		}
+		if !found {
+			return false
+		}
 	}
-	return found
+	return true
+}
+
+func localAccountSources(text string) bool {
+	found := make(map[string]bool)
+	for _, line := range strings.Split(text, "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		name, sources, ok := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		if name != "passwd" && name != "group" {
+			continue
+		}
+		if !ok || found[name] {
+			return false
+		}
+		// NSS 的 [action] 可以含空格；只忽略完整、非嵌套的方括号项。
+		var cleaned strings.Builder
+		for len(sources) > 0 {
+			before, after, bracket := strings.Cut(sources, "[")
+			if strings.Contains(before, "]") {
+				return false
+			}
+			cleaned.WriteString(before)
+			if !bracket {
+				break
+			}
+			action, rest, closed := strings.Cut(after, "]")
+			if !closed || strings.TrimSpace(action) == "" || strings.Contains(action, "[") {
+				return false
+			}
+			cleaned.WriteByte(' ')
+			sources = rest
+		}
+		tokens := strings.Fields(cleaned.String())
+		if len(tokens) == 0 {
+			return false
+		}
+		for _, source := range tokens {
+			if source != "files" && source != "systemd" {
+				return false
+			}
+		}
+		found[name] = true
+	}
+	return found["passwd"] && found["group"]
 }
 
 func prepareDataFolder(dir string) (string, error) {
@@ -517,32 +614,58 @@ func prepareDataFolder(dir string) (string, error) {
 	if err := dataPathProblem(resolved); err != nil {
 		return "", err
 	}
+	var paths []string
 	for path := resolved; ; path = filepath.Dir(path) {
+		paths = append(paths, path)
+		if filepath.Dir(path) == path {
+			break
+		}
+	}
+	slices.Reverse(paths)
+	shield := false
+	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if err != nil {
 			return "", fmt.Errorf("cannot inspect folder %q; choose another folder with -datadir: %w", path, err)
 		}
 		stat := info.Sys().(*syscall.Stat_t)
 		privateGroup, accessACL := false, false
-		if path != resolved && info.Mode().Perm()&0o020 != 0 {
+		if !shield && path != resolved && info.Mode().Perm()&0o020 != 0 {
 			privateGroup = userPrivateGroup()
 			accessACL, err = folderHasAccessACL(path)
 			if err != nil {
-				return "", fmt.Errorf("cannot inspect access ACL on folder %q; run chmod g-w on it or choose another folder with -datadir: %w", path, err)
+				return "", fmt.Errorf("cannot inspect access ACL on folder %q; other users could change it; run chmod g-w %s or choose another folder with -datadir: %w", path, shellFolder(path), err)
 			}
 		}
-		if reason := folderProblem(info.Mode(), stat.Uid, stat.Gid, uint32(os.Geteuid()), uint32(os.Getegid()), path == resolved, privateGroup, accessACL); reason != "" {
+		if reason := folderProblem(info.Mode(), stat.Uid, stat.Gid, uint32(os.Geteuid()), uint32(os.Getegid()), path == resolved, privateGroup, accessACL, shield); reason != "" {
 			if path == resolved {
-				return "", fmt.Errorf("data folder %q %s; fix its ownership and run chmod 700 on it, or choose another folder with -datadir", path, reason)
+				ownership := ""
+				if stat.Uid != uint32(os.Geteuid()) {
+					ownership = "fix its ownership and "
+				}
+				return "", fmt.Errorf("data folder %q %s; %srun chmod 700 %s, or choose another folder with -datadir", path, reason, ownership, shellFolder(path))
 			}
-			return "", fmt.Errorf("parent folder %q %s; fix its ownership and run chmod g-w on it or choose another folder with -datadir", path, reason)
+			if stat.Uid != 0 && stat.Uid != uint32(os.Geteuid()) {
+				return "", fmt.Errorf("parent folder %q %s; other users could change it; fix its ownership or choose another folder with -datadir", path, reason)
+			}
+			if info.Mode().Perm()&0o002 != 0 {
+				return "", fmt.Errorf("parent folder %q %s; run chmod o-w %s or choose another folder with -datadir", path, reason, shellFolder(path))
+			}
+			return "", fmt.Errorf("parent folder %q %s; run chmod g-w %s or choose another folder with -datadir", path, reason, shellFolder(path))
 		}
 		if err := checkFolderACL(path); err != nil {
 			return "", err
 		}
-		if filepath.Dir(path) == path {
-			break
+		// 自己拥有且组/其他用户无 search 权限的目录阻断其他用户访问下面的路径。
+		// Linux 的 POSIX ACL 组权限位是 mask，也限制所有 named 条目，故不能绕过此屏障。
+		// macOS ACL 独立于 mode，必须先通过上面的检查，确认没有 allow 条目。
+		if stat.Uid == uint32(os.Geteuid()) && info.Mode().Perm()&0o011 == 0 {
+			shield = true
 		}
 	}
 	return resolved, nil
+}
+
+func shellFolder(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
 }

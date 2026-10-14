@@ -70,8 +70,8 @@ func TestPrivateNodeCopy(t *testing.T) {
 		return info
 	}
 	first := prepare()
-	if !os.SameFile(first, prepare()) {
-		t.Fatal("a good copy was not reused")
+	if reused := os.SameFile(first, prepare()); reused != (runtime.GOOS == "linux") {
+		t.Fatalf("copy reused=%v on %s", reused, runtime.GOOS)
 	}
 	for _, kind := range []string{"wrong hash", "symlink", "group writable", "others writable", "not executable"} {
 		t.Run(kind, func(t *testing.T) {

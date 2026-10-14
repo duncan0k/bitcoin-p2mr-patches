@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -42,7 +43,7 @@ func TestFolderPermissions(t *testing.T) {
 		{"parent file", 0o700, uid, gid, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if problem := folderProblem(c.mode, c.owner, c.group, uid, gid, c.data, true, false); (problem == "") != c.safe {
+			if problem := folderProblem(c.mode, c.owner, c.group, uid, gid, c.data, true, false, false); (problem == "") != c.safe {
 				t.Fatalf("safe=%v: %s", c.safe, problem)
 			}
 		})
@@ -66,7 +67,7 @@ func TestUserPrivateGroup(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			private := privateGroupMembers(c.username, c.groupname, c.members)
-			problem := folderProblem(os.ModeDir|0o770, 1000, 1000, 1000, 1000, false, private, c.acl)
+			problem := folderProblem(os.ModeDir|0o770, 1000, 1000, 1000, 1000, false, private, c.acl, false)
 			if (problem == "") != c.safe {
 				t.Fatalf("safe=%v: %s", c.safe, problem)
 			}
@@ -74,8 +75,116 @@ func TestUserPrivateGroup(t *testing.T) {
 	}
 }
 
+func TestPrivateGroupAccountFiles(t *testing.T) {
+	const passwd = "alice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n"
+	const group = "alice:x:1000:alice\nbob:x:1001:\n"
+	for _, c := range []struct {
+		name, nsswitch, passwd, group, missing string
+		safe                                   bool
+	}{
+		{"private", "passwd: files systemd\ngroup: files systemd\n", passwd, group, "", true},
+		{"empty members", "passwd: files\ngroup: files\n", passwd, "alice:x:1000:\n", "", true},
+		{"actions and comments", "passwd: files [NOTFOUND=return SUCCESS=continue] systemd # local\ngroup: files [SUCCESS=return]\n", passwd, group, "", true},
+		{"shared primary GID", "passwd: files\ngroup: files\n", passwd + "eve:x:1002:1000::/home/eve:/bin/sh\n", group, "", false},
+		{"same name different UID", "passwd: files\ngroup: files\n", passwd + "alice:x:1002:1000::/home/eve:/bin/sh\n", group, "", false},
+		{"same UID different name", "passwd: files\ngroup: files\n", passwd + "eve:x:1000:1000::/home/eve:/bin/sh\n", group, "", false},
+		{"group alias", "passwd: files\ngroup: files\n", passwd, group + "alias:x:1000:\n", "", false},
+		{"extra member", "passwd: files\ngroup: files\n", passwd, "alice:x:1000:alice,eve\n", "", false},
+		{"ldap passwd", "passwd: files ldap\ngroup: files\n", passwd, group, "", false},
+		{"sss group", "passwd: files\ngroup: files sss\n", passwd, group, "", false},
+		{"missing nsswitch", "", passwd, group, "/etc/nsswitch.conf", false},
+		{"missing passwd", "passwd: files\ngroup: files\n", "", group, "/etc/passwd", false},
+		{"missing group", "passwd: files\ngroup: files\n", passwd, "", "/etc/group", false},
+		{"NIS passwd include", "passwd: files\ngroup: files\n", passwd + "+::::::\n", group, "", false},
+		{"NIS passwd exclude", "passwd: files\ngroup: files\n", passwd + "-eve::::::\n", group, "", false},
+		{"NIS group include", "passwd: files\ngroup: files\n", passwd, group + "+:::\n", "", false},
+		{"NIS group exclude", "passwd: files\ngroup: files\n", passwd, group + "-eve:::\n", "", false},
+		{"bad passwd fields", "passwd: files\ngroup: files\n", passwd + "bad\n", group, "", false},
+		{"bad passwd UID", "passwd: files\ngroup: files\n", passwd + "eve:x:bad:1001::/:/bin/sh\n", group, "", false},
+		{"bad passwd GID", "passwd: files\ngroup: files\n", passwd + "eve:x:1002:bad::/:/bin/sh\n", group, "", false},
+		{"bad group fields", "passwd: files\ngroup: files\n", passwd, group + "bad\n", "", false},
+		{"bad group GID", "passwd: files\ngroup: files\n", passwd, group + "eve:x:bad:\n", "", false},
+		{"missing own passwd", "passwd: files\ngroup: files\n", "bob:x:1001:1001::/:/bin/sh\n", group, "", false},
+		{"missing own group", "passwd: files\ngroup: files\n", passwd, "bob:x:1001:\n", "", false},
+		{"missing group sources", "passwd: files\n", passwd, group, "", false},
+		{"empty passwd sources", "passwd:\ngroup: files\n", passwd, group, "", false},
+		{"bad action", "passwd: files [NOTFOUND=return\ngroup: files\n", passwd, group, "", false},
+		{"duplicate sources", "passwd: files\npasswd: ldap\ngroup: files\n", passwd, group, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			files := map[string]string{"/etc/nsswitch.conf": c.nsswitch, "/etc/passwd": c.passwd, "/etc/group": c.group}
+			read := func(path string) ([]byte, error) {
+				if path == c.missing {
+					return nil, os.ErrNotExist
+				}
+				text, ok := files[path]
+				if !ok {
+					t.Fatalf("unexpected account file %q", path)
+				}
+				return []byte(text), nil
+			}
+			private := userPrivateGroupFromFiles("alice", 1000, 1000, read)
+			if private != c.safe {
+				t.Fatalf("private=%v, want %v", private, c.safe)
+			}
+			// 位于屏障上方的组可写目录必须通过完整的私有组证明。
+			if problem := folderProblem(os.ModeDir|0o770, 1000, 1000, 1000, 1000, false, private, false, false); (problem == "") != c.safe {
+				t.Fatalf("group writable above shield: %s", problem)
+			}
+		})
+	}
+	for _, path := range []string{"/etc/nsswitch.conf", "/etc/passwd", "/etc/group"} {
+		t.Run("unreadable "+path, func(t *testing.T) {
+			read := func(name string) ([]byte, error) {
+				if name == path {
+					return nil, os.ErrPermission
+				}
+				return []byte(map[string]string{"/etc/nsswitch.conf": "passwd: files\ngroup: files\n", "/etc/passwd": passwd, "/etc/group": group}[name]), nil
+			}
+			if userPrivateGroupFromFiles("alice", 1000, 1000, read) {
+				t.Fatal("unreadable account database was accepted")
+			}
+		})
+	}
+}
+
+func TestShieldFolderPermissions(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		mode         os.FileMode
+		owner, group uint32
+		data, safe   bool
+	}{
+		{"group writable below shield", os.ModeDir | 0o770, 1000, 1001, false, true},
+		{"other writable below shield", os.ModeDir | 0o777, 1000, 1001, false, true},
+		{"root group writable below shield", os.ModeDir | 0o775, 0, 0, false, true},
+		{"foreign owner below shield", os.ModeDir | 0o700, 1001, 1000, false, false},
+		{"data group writable below shield", os.ModeDir | 0o770, 1000, 1000, true, false},
+		{"data other writable below shield", os.ModeDir | 0o707, 1000, 1000, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if reason := folderProblem(c.mode, c.owner, c.group, 1000, 1000, c.data, false, true, true); (reason == "") != c.safe {
+				t.Fatalf("safe=%v: %s", c.safe, reason)
+			}
+		})
+	}
+}
+
+func TestShellFolder(t *testing.T) {
+	for path, want := range map[string]string{
+		"/home/alice/data": "'/home/alice/data'",
+		"/home/alice/a b":  "'/home/alice/a b'",
+		"/home/alice/a'b":  "'/home/alice/a'\"'\"'b'",
+		"/home/alice/$()":  "'/home/alice/$()'",
+	} {
+		if got := shellFolder(path); got != want {
+			t.Errorf("%s: %s, want %s", strconv.Quote(path), got, want)
+		}
+	}
+}
+
 func TestSignetFolder(t *testing.T) {
-	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, 1000, 1000, true, false, false); reason == "" {
+	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, 1000, 1000, true, false, false, false); reason == "" {
 		t.Fatal("accepted a signet folder owned by another uid")
 	}
 	for _, kind := range []string{"symlink", "group writable", "other writable", "file", "safe", "missing"} {
@@ -208,7 +317,11 @@ func TestShippedNodeFIFO(t *testing.T) {
 }
 
 func TestDataFolderBoundary(t *testing.T) {
-	root := privateTempDir(t)
+	// 外层 0700 目录提供屏障，内层父目录的写权限不会再暴露给其他用户。
+	root := filepath.Join(privateTempDir(t), "parent")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(root, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
@@ -241,8 +354,8 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "parent folder") || !strings.Contains(err.Error(), "-datadir") {
-		t.Fatalf("unsafe parent: %v", err)
+	if got, err := dataFolder(alias); err != nil || got != want {
+		t.Fatalf("other writable parent below shield: %q %v", got, err)
 	}
 	if err := os.Chmod(root, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
@@ -253,16 +366,8 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	hasACL, err := folderHasAccessACL(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := dataFolder(alias); userPrivateGroup() && !hasACL {
-		if err != nil || got != want {
-			t.Fatalf("user-private-group parent: %q %v", got, err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "chmod g-w") {
-		t.Fatalf("shared primary group parent: %q %v", got, err)
+	if got, err := dataFolder(alias); err != nil || got != want {
+		t.Fatalf("group writable parent below shield: %q %v", got, err)
 	}
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
