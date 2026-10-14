@@ -14,6 +14,16 @@ import (
 	"unsafe"
 )
 
+func checkFolderACL(string) error { return nil }
+
+func folderHasAccessACL(path string) (bool, error) {
+	_, err := syscall.Getxattr(path, "system.posix_acl_access", nil)
+	if errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.ENOTSUP) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func defaultDataHome() (string, error) {
 	if dir := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(dir) {
 		return dir, nil

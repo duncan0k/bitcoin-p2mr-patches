@@ -55,6 +55,9 @@ func run() int {
 		return fail(t.MissingNode)
 	}
 	if err := checkNodeProgram(exe, bitcoindSHA256); err != nil {
+		if runtime.GOOS != "windows" {
+			return fail(t.WrongNode + "\n" + err.Error())
+		}
 		return fail(t.WrongNode)
 	}
 	dataDir, err := dataFolder(*dataFlag)
@@ -90,7 +93,7 @@ func run() int {
 	n.start()
 	url := srv.url()
 	pagePath := filepath.Join(dataDir, pageFile)
-	_ = os.WriteFile(pagePath, []byte(url+"\n"), 0o600)
+	_ = writePageFile(pagePath, []byte(url+"\n"))
 	defer os.Remove(pagePath)
 	attempted := shouldOpenBrowser(runtime.GOOS, *noBrowser, os.Getenv("DISPLAY"), os.Getenv("WAYLAND_DISPLAY"))
 	var browserErr error
@@ -218,7 +221,7 @@ var pageURLPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/[0-9a-f
 
 // readPageURL is the page of the window that already runs on this data folder, if its file holds one.
 func readPageURL(dataDir string) (string, bool) {
-	data, err := os.ReadFile(filepath.Join(dataDir, pageFile))
+	data, err := readPageFile(filepath.Join(dataDir, pageFile))
 	if err != nil {
 		return "", false
 	}

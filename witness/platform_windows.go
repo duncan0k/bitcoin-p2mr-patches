@@ -24,6 +24,17 @@ func stopLeftoverNode(string, string) error        { return nil }
 func removeNodePID(string) error                   { return nil }
 func prepareDataFolder(dir string) (string, error) { return dir, os.MkdirAll(dir, 0o700) }
 func dataPathProblem(string) error                 { return nil }
+func checkSignetFolder(string) error               { return nil }
+func readPageFile(path string) ([]byte, error)     { return os.ReadFile(path) }
+func writePageFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+
+func readCookie(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errNotReady
+	}
+	return data, nil
+}
 
 // Windows ends a program five seconds after its console window was closed.
 func shutdownNode(n *node, timeout time.Duration) {

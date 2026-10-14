@@ -199,6 +199,9 @@ func (n *node) runOnce(port int) (string, error) {
 	defer runtime.UnlockOSThread()
 
 	// A cookie left by an earlier node goes first, so that a cookie found later is this node's.
+	if err := checkSignetFolder(n.dataDir); err != nil {
+		return "", err
+	}
 	if err := os.Remove(cookiePath(n.dataDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}

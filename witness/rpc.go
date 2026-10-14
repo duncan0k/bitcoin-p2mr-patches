@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -58,9 +57,9 @@ func (c *rpcClient) call(method string, params []any, out any) error {
 
 // callWithin runs one call and decodes its result into out, which may be nil.
 func (c *rpcClient) callWithin(timeout time.Duration, method string, params []any, out any) error {
-	cookie, err := os.ReadFile(c.cookiePath)
+	cookie, err := readCookie(c.cookiePath)
 	if err != nil {
-		return errNotReady
+		return err
 	}
 	if params == nil {
 		params = []any{}

@@ -202,7 +202,7 @@ func TestEarlierWitnessHelper(t *testing.T) {
 	}
 	n := newNode(exe, fileHash(t, exe), dir)
 	cmd := exec.Command(exe, nodeArgs(dir, 1)...)
-	cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=silent")
+	cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=orphan")
 	configureNode(cmd)
 	// 仅此测试辅助进程移除 Pdeathsig，让 SIGKILL 留下真实孤儿；正式启动仍保留它。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -213,7 +213,11 @@ func TestEarlierWitnessHelper(t *testing.T) {
 }
 
 func TestLeftoverNode(t *testing.T) {
-	target := privateTempDir(t)
+	testLeftoverNode(t, privateTempDir(t))
+}
+
+func testLeftoverNode(t *testing.T, target string) {
+	t.Helper()
 	alias := filepath.Join(privateTempDir(t), "data")
 	if err := os.Symlink(target, alias); err != nil {
 		t.Fatal(err)
@@ -259,17 +263,6 @@ func TestLeftoverNode(t *testing.T) {
 	}) {
 		t.Fatal("earlier witness did not start and record its private fake node")
 	}
-	orphan, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer orphan.Release()
-	recovered := false
-	defer func() {
-		if !recovered {
-			_ = orphan.Kill()
-		}
-	}()
 	if err := helper.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +283,6 @@ func TestLeftoverNode(t *testing.T) {
 	if !eventually(5*time.Second, func() bool { image, err := processExecutable(pid); return err == nil && image != expected }) {
 		t.Fatal("orphaned node still runs")
 	}
-	recovered = true
 	select {
 	case <-unrelatedExited:
 		t.Fatal("unrelated node exited during recovery")
@@ -345,7 +337,7 @@ func TestUnrelatedPIDIsNotSignalled(t *testing.T) {
 	if err := stopLeftoverNode(dir, consoleTexts["en"].Leftover); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(cmd.Process.Pid, 0); err != nil {
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
 		t.Fatalf("an unrelated process was stopped: %v", err)
 	}
 	select {

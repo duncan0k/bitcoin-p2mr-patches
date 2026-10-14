@@ -63,6 +63,9 @@ func fakeBitcoind(kind string, args []string) int {
 		_ = f.Close()
 	}
 	switch kind {
+	case "orphan":
+		time.Sleep(60 * time.Second)
+		return 0
 	case "silent":
 		time.Sleep(time.Hour)
 		return 0
