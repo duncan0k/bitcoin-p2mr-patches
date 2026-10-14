@@ -108,7 +108,7 @@ var consoleTexts = map[string]console{
 		StartFailed:  "Ark-0 Witness no puede iniciarse: %v",
 		Stopping:     "Deteniendo el nodo…",
 		Stopped:      "El nodo se ha detenido.",
-		PressEnter:   "Pulsa Intro para cerrar esta ventana.",
+		PressEnter:   "Presiona Enter para cerrar esta ventana.",
 	},
 }
 

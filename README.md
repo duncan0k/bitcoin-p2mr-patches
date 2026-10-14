@@ -473,9 +473,9 @@ unless Core and this repository are at the commits it names. Two clean builds ga
 third, with the script as published here, gave them again. As with the Linux build, a later build matches
 only with the same package versions and only under `/work/src`: `contrib/windows/packages.txt` lists every
 package of that third build (among them mingw-w64 11.0.1 with GCC 13.2.0, binutils 2.41.90 and CMake
-3.28.3), and the script writes the list for its own build to `packages.txt`. With `PHASE=full`, the
-default, it also installs Wine, which that list then includes, runs the unit tests and syncs the stripped
-`bitcoind.exe` with Ark-0 under Wine.
+3.28.3), and the script writes the list for its own build to `/work/out/packages.txt`. With `PHASE=full`,
+the default, it also installs Wine, which its own list then includes, runs the unit tests and syncs the
+stripped `bitcoind.exe` with Ark-0 under Wine.
 
 ## Witness program (`witness/`)
 
@@ -483,7 +483,7 @@ Ark0Witness is a small program for 64-bit Windows 10 and 11 that runs the Window
 and shows, on a page served on 127.0.0.1 only, what that node reports during the M3 drill: how far it has
 synced, whether it is on Ark-0, block 30000 and the two tripwires, and whether elliptic curve signatures in
 leaves of version `0xe0` are still accepted. It can also have the node judge a raw transaction with
-`testmempoolaccept`; the transaction is never broadcast. The release `ark0-witness-0.1.0` has the zip, its `SHA256SUMS`
-and the signature of that file by the release key. The program is not code-signed. `witness/README.md`
-says what it does and does not do, how it is built (Go and its standard library only, reproducibly) and how
-it is tested.
+`testmempoolaccept`; the transaction is never broadcast. The release `ark0-witness-0.1.0` has the zip, its
+`SHA256SUMS` and the signature of that file by the release key. Neither program in the zip is code-signed.
+`witness/README.md` says what it does and does not do, how it is built (Go and its standard library only,
+reproducibly) and how it is tested.
