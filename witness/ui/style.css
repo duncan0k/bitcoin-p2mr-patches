@@ -1,0 +1,81 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1c2330;
+  --dim: #5d6675;
+  --line: #d9dde4;
+  --accent: #2563eb;
+  --good: #137a3d;
+  --warn: #9a5b00;
+  --bad: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11151c;
+    --card: #1a2029;
+    --text: #e6e9ee;
+    --dim: #9aa3b2;
+    --line: #2c3442;
+    --accent: #7aa7ff;
+    --good: #4cc38a;
+    --warn: #e0a23c;
+    --bad: #ff7a6b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 24px 16px 40px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", "Yu Gothic UI", "Malgun Gothic", sans-serif;
+}
+header, main, footer { max-width: 760px; margin: 0 auto; }
+.head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
+h1 { margin: 0; font-size: 1.5rem; }
+h2 { margin: 0 0 8px; font-size: 1.05rem; }
+p { margin: 6px 0; }
+.tag { color: var(--warn); margin-top: 8px; }
+.note, .dim { color: var(--dim); }
+.lang select { font: inherit; padding: 2px 6px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+.verdict { font-weight: 600; border-left-width: 6px; }
+.verdict.good { border-left-color: var(--good); }
+.verdict.warn { border-left-color: var(--warn); }
+.verdict.bad { border-left-color: var(--bad); }
+.good { color: var(--good); font-weight: 600; }
+.bad { color: var(--bad); }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 8px 0; }
+.bar div { height: 100%; width: 0; background: var(--accent); }
+.mono, textarea, td.mono { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
+table { width: 100%; border-collapse: collapse; margin: 6px 0 10px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--dim); }
+textarea {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+button {
+  font: inherit;
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: default; }
+a { color: var(--accent); }
+footer { color: var(--dim); font-size: 0.9rem; }

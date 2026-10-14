@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Ark-0 Witness</title>
+<link rel="stylesheet" href="style.css">
+<script src="strings.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <div class="head">
+    <h1 data-t="title">Ark-0 Witness</h1>
+    <label class="lang"><span data-t="language">Language</span> <select id="lang"></select></label>
+  </div>
+  <p class="tag" data-t="tagline"></p>
+  <p class="note" data-t="running_note"></p>
+</header>
+<main>
+  <section id="verdict" class="card verdict"><p id="verdict-text"></p></section>
+
+  <section class="card">
+    <h2 data-t="node_title"></h2>
+    <p id="sync"></p>
+    <div class="bar" aria-hidden="true"><div id="bar"></div></div>
+    <p id="peers"></p>
+    <p id="ark0"></p>
+    <p id="subversion" class="dim"></p>
+  </section>
+
+  <section class="card">
+    <h2 id="m3-title"></h2>
+    <p id="m3"></p>
+    <p id="m3-hash" class="mono" hidden></p>
+    <p id="m3-link-line" hidden><a id="m3-link" target="_blank" rel="noreferrer noopener"></a></p>
+  </section>
+
+  <section class="card">
+    <h2 data-t="tw_title"></h2>
+    <table>
+      <thead><tr><th data-t="tw_label"></th><th data-t="tw_state"></th><th data-t="tw_outpoint"></th></tr></thead>
+      <tbody id="tw"></tbody>
+    </table>
+    <p><span data-t="ec_label"></span> <strong id="ec"></strong> <span id="ec-raw" class="mono dim"></span></p>
+    <p class="dim" data-t="tw_note"></p>
+  </section>
+
+  <section class="card">
+    <h2 data-t="check_title"></h2>
+    <p data-t="check_body"></p>
+    <textarea id="hex" rows="4" spellcheck="false" autocomplete="off"></textarea>
+    <p><button id="check" type="button" data-t="check_button"></button></p>
+    <p id="check-result"></p>
+    <p id="check-ec" class="good" data-t="check_ec" hidden></p>
+  </section>
+
+  <section class="card">
+    <h2 data-t="report_title"></h2>
+    <p data-t="report_body"></p>
+    <textarea id="report" rows="9" readonly spellcheck="false"></textarea>
+    <p><button id="copy" type="button" data-t="copy_button"></button> <span id="copied" class="dim"></span></p>
+  </section>
+
+  <section class="card">
+    <h2 data-t="data_title"></h2>
+    <p id="data"></p>
+  </section>
+</main>
+<footer>
+  <p data-t="footer"></p>
+  <p id="updated" class="dim"></p>
+</footer>
+</body>
+</html>
