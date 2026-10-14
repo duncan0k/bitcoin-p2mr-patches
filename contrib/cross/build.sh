@@ -7,7 +7,11 @@
 # TARGET selects macos-arm64, macos-x86_64, linux-x86_64 or linux-aarch64. PHASE=build builds and hashes only.
 # The build lives under /work, which should start empty, the source always at /work/src, since the binaries
 # carry source paths. Results go to /work/out; packages.txt lists every installed package's version,
-# which a later build needs to match it. The Apple SDK stays outside out because it is not redistributable.
+# which a later build needs to match to get the same bytes. The published builds' lists are
+# contrib/cross/packages-macos.txt (both macOS targets), contrib/cross/packages-linux-x86_64.txt and
+# contrib/cross/packages-linux-aarch64.txt. Only the files listed in SHA256SUMS, along with toolchain.txt,
+# packages.txt and sources.txt are meant to be the same on every run. run.log and the other logs are
+# diagnostics with times in them. The Apple SDK stays outside out because it is not redistributable.
 set -euo pipefail
 PHASE="${PHASE:-build}"
 TARGET="${TARGET:-}"
@@ -178,13 +182,16 @@ done
 cd "$OUT"
 if [[ "$TARGET" = macos-* ]]; then
     # Stripping would change the signed bytes, so these are the binaries exactly as lld linked them.
+    # A Linux container cannot validate the signature's content. The release process checks the universal
+    # binary on a Mac with codesign --verify --strict --all-architectures; nothing touches the binaries
+    # after the link step.
     for b in bitcoind test_bitcoin; do
         headers=$(llvm-objdump --macho --private-headers "$b")
         signature=no
         if grep -q '^[[:space:]]*cmd LC_CODE_SIGNATURE$' <<< "$headers"; then signature=yes; fi
         echo "$b LC_CODE_SIGNATURE: $signature" | tee -a toolchain.txt
-        if [ "$TARGET" = macos-arm64 ] && [ "$b" = bitcoind ] && [ "$signature" != yes ]; then
-            echo "arm64 bitcoind has no ad hoc signature" >&2
+        if [ "$TARGET" = macos-arm64 ] && [ "$signature" != yes ]; then
+            echo "arm64 $b has no ad hoc signature" >&2
             exit 1
         fi
     done
