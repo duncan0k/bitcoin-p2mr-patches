@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,11 +16,13 @@ const nodeName = "bitcoind.exe"
 const (
 	createNoWindow        = 0x08000000
 	createNewProcessGroup = 0x00000200
+	createSuspended       = 0x00000004
 
 	jobObjectExtendedLimitInformation = 9
 	jobObjectLimitKillOnJobClose      = 0x00002000
 	processSetQuota                   = 0x0100
 	processTerminate                  = 0x0001
+	threadSuspendResume               = 0x0002
 )
 
 var (
@@ -30,6 +33,10 @@ var (
 	procCreateJobObjectW         = kernel32.NewProc("CreateJobObjectW")
 	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
 	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
+	procThread32First            = kernel32.NewProc("Thread32First")
+	procThread32Next             = kernel32.NewProc("Thread32Next")
+	procOpenThread               = kernel32.NewProc("OpenThread")
+	procResumeThread             = kernel32.NewProc("ResumeThread")
 )
 
 // setupConsole has the console print UTF-8, so that every language shows, and names the window.
@@ -46,10 +53,11 @@ func systemLanguage() string {
 	return languageOfLANGID(uint16(id))
 }
 
-// configureNode starts the node with no window and outside this console's process group: closing this window
-// does not reach the node; the program asks it to stop over RPC instead.
+// configureNode starts the node with no window, outside this console's process group, and suspended, until
+// keepWithProgram has put it into the job. Closing this window does not reach the node; the program asks it to
+// stop over RPC instead.
 func configureNode(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | createNewProcessGroup}
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow | createNewProcessGroup | createSuspended}
 }
 
 // openNodeProgram opens the node program shared with readers only: while it is open, nothing can change,
@@ -92,7 +100,8 @@ var _ [144]byte = [unsafe.Sizeof(jobLimits{})]byte{}
 // and ends the processes in it, unless letFinish has lifted that. Used under node.mu.
 var job syscall.Handle
 
-// keepWithProgram puts the node into the job, so that no node is left running hidden after this program.
+// keepWithProgram puts the node, started suspended, into the job and only then lets it run, so that no node is
+// left running hidden after this program.
 func keepWithProgram(p *os.Process) error {
 	if job == 0 {
 		h, _, err := procCreateJobObjectW.Call(0, 0)
@@ -112,6 +121,48 @@ func keepWithProgram(p *os.Process) error {
 	defer syscall.CloseHandle(process)
 	if r, _, err := procAssignProcessToJobObject.Call(uintptr(job), uintptr(process)); r == 0 {
 		return err
+	}
+	return resume(uint32(p.Pid))
+}
+
+// threadEntry is THREADENTRY32.
+type threadEntry struct {
+	Size           uint32
+	Usage          uint32
+	ThreadID       uint32
+	OwnerProcessID uint32
+	BasePriority   int32
+	DeltaPriority  int32
+	Flags          uint32
+}
+
+// resume lets a process started suspended run, by resuming its thread, the only one it has by then.
+func resume(pid uint32) error {
+	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(snapshot)
+	entry := threadEntry{Size: uint32(unsafe.Sizeof(threadEntry{}))}
+	resumed := 0
+	more, _, _ := procThread32First.Call(uintptr(snapshot), uintptr(unsafe.Pointer(&entry)))
+	for ; more != 0; more, _, _ = procThread32Next.Call(uintptr(snapshot), uintptr(unsafe.Pointer(&entry))) {
+		if entry.OwnerProcessID != pid {
+			continue
+		}
+		thread, _, err := procOpenThread.Call(threadSuspendResume, 0, uintptr(entry.ThreadID))
+		if thread == 0 {
+			return err
+		}
+		count, _, err := procResumeThread.Call(thread)
+		_ = syscall.CloseHandle(syscall.Handle(thread))
+		if uint32(count) == 0xffffffff {
+			return err
+		}
+		resumed++
+	}
+	if resumed == 0 {
+		return errors.New("the node has no thread to resume")
 	}
 	return nil
 }
