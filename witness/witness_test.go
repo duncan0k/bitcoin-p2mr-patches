@@ -32,6 +32,15 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // fakeBitcoind acts as bitcoind started with nodeArgs, as far as the program can tell. Every kind notes its start
 // in starts.txt in the data folder.
 //   - "ready" binds its RPC port, then writes its cookie, answers every call and exits on stop;
@@ -149,7 +158,7 @@ func TestNodeStops(t *testing.T) {
 		{"silent", false, 5 * time.Second},
 	} {
 		t.Run(c.kind, func(t *testing.T) {
-			n := fakeNodeProcess(t, c.kind, t.TempDir(), "")
+			n := fakeNodeProcess(t, c.kind, privateTempDir(t), "")
 			n.start()
 			if !eventually(10*time.Second, func() bool { return n.child() != nil }) {
 				t.Fatal("no node started")
@@ -175,7 +184,7 @@ func TestNodeStops(t *testing.T) {
 
 // Asked to stop before the node starts, the program starts none.
 func TestStopBeforeStart(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	n := fakeNodeProcess(t, "ready", dir, "")
 	n.stop()
 	n.start()
@@ -189,7 +198,7 @@ func TestStopBeforeStart(t *testing.T) {
 
 // A cookie left by an earlier node is removed, and never makes another program's port trusted.
 func TestStaleCookie(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(dir, "signet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +221,7 @@ func TestStaleCookie(t *testing.T) {
 
 // While an earlier node holds the data folder, the start is tried again; stop ends the trying.
 func TestNodeLockedRetries(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	n := fakeNodeProcess(t, "locked", dir, "")
 	n.start()
 	if !eventually(10*time.Second, func() bool { return starts(dir) >= 2 }) {
@@ -229,7 +238,7 @@ func TestNodeLockedRetries(t *testing.T) {
 
 // A node program that is not the one the witness was built with is not started.
 func TestWrongNodeProgram(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	n := fakeNodeProcess(t, "ready", dir, strings.Repeat("0", 64))
 	n.start()
 	if !stoppedWithin(n, 5*time.Second) {
@@ -405,7 +414,7 @@ type fakeNode struct {
 }
 
 func newFakeNode(t *testing.T) *fakeNode {
-	f := &fakeNode{t: t, dataDir: t.TempDir(), cookie: "__cookie__:0123abcd", answers: map[string]func([]json.RawMessage) (any, *rpcError){}}
+	f := &fakeNode{t: t, dataDir: privateTempDir(t), cookie: "__cookie__:0123abcd", answers: map[string]func([]json.RawMessage) (any, *rpcError){}}
 	if err := os.MkdirAll(filepath.Join(f.dataDir, "signet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +635,7 @@ func TestStatusEdges(t *testing.T) {
 		t.Errorf("no answer: %+v\n%s", s, r)
 	}
 	// A node that was running and has just exited, before the program knows what follows.
-	gone := newNode("bitcoind", "", t.TempDir())
+	gone := newNode("bitcoind", "", privateTempDir(t))
 	gone.markRunning()
 	if s := (&collector{node: gone, dataDir: f.dataDir}).collect(); s.Node != "noanswer" {
 		t.Errorf("just exited: %+v", s)
@@ -655,7 +664,7 @@ func TestStatusEdges(t *testing.T) {
 
 // Only the answer to the call made counts; a redirect is not followed.
 func TestRPCAnswers(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(dir, "signet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +746,7 @@ func TestCheckTransaction(t *testing.T) {
 }
 
 func testServer(t *testing.T, n *node) (*server, *http.Client) {
-	s, err := newServer(n, t.TempDir())
+	s, err := newServer(n, privateTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +860,7 @@ func TestServerBoundaries(t *testing.T) {
 }
 
 func TestServerWithoutNode(t *testing.T) {
-	n := newNode("bitcoind", "", t.TempDir())
+	n := newNode("bitcoind", "", privateTempDir(t))
 	s, c := testServer(t, n)
 	if resp, body := do(t, c, "GET", s.url()+"api/status", "", nil, ""); resp.StatusCode != 200 || !strings.Contains(body, `"node":"starting"`) {
 		t.Errorf("status: %d %s", resp.StatusCode, body)
@@ -863,7 +872,7 @@ func TestServerWithoutNode(t *testing.T) {
 }
 
 func TestFilesAndPaths(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	page := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
 	for text, ok := range map[string]bool{page + "\n": true, "https://evil.example/": false, "http://127.0.0.1:1/x/": false,
 		"http://localhost:40123/" + strings.Repeat("ab", 32) + "/": false, page + "x": false} {
@@ -875,6 +884,9 @@ func TestFilesAndPaths(t *testing.T) {
 
 	exe := filepath.Join(dir, "bitcoind")
 	if err := os.WriteFile(exe, []byte("node"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(exe, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("node"))
@@ -915,7 +927,7 @@ func TestFilesAndPaths(t *testing.T) {
 }
 
 func TestLockInstance(t *testing.T) {
-	path := filepath.Join(t.TempDir(), lockFile)
+	path := filepath.Join(privateTempDir(t), lockFile)
 	release, err := lockInstance(path)
 	if err != nil {
 		t.Fatal(err)

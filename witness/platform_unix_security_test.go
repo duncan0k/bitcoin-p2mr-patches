@@ -48,9 +48,12 @@ func TestFolderPermissions(t *testing.T) {
 }
 
 func TestDataFolderBoundary(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	target := filepath.Join(root, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(root, "alias")
@@ -114,6 +117,9 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Mkdir(controlTarget, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(controlTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	controlAlias := filepath.Join(root, "control-alias")
 	if err := os.Symlink(controlTarget, controlAlias); err != nil {
 		t.Fatal(err)
@@ -133,12 +139,12 @@ func TestUnixDefaultHome(t *testing.T) {
 			}
 		}
 	}
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("HOME", privateTempDir(t))
 	if _, err := defaultDataHome(); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", "")
-	if _, err := dataFolder(filepath.Join(t.TempDir(), "explicit")); err != nil {
+	if _, err := dataFolder(filepath.Join(privateTempDir(t), "explicit")); err != nil {
 		t.Fatalf("explicit datadir without HOME: %v", err)
 	}
 }
@@ -146,7 +152,7 @@ func TestUnixDefaultHome(t *testing.T) {
 func TestNodePIDFiles(t *testing.T) {
 	for _, content := range []string{"", "junk", "0\n", "1\n", "-2\n", "4194304\n", "999999999999999999999999999999999", strings.Repeat("2", 33), "123\nextra", "+123", " 123 ", strings.Repeat("0", 33) + "2"} {
 		t.Run(content, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTempDir(t)
 			path := filepath.Join(dir, nodePIDFile)
 			writeTestFile(t, path, content, 0o600)
 			if pid, err := readNodePID(path); err != nil || pid != 0 {
@@ -161,7 +167,7 @@ func TestNodePIDFiles(t *testing.T) {
 		})
 	}
 	for _, content := range []string{"2", "123\n", "4194303\n"} {
-		path := filepath.Join(t.TempDir(), nodePIDFile)
+		path := filepath.Join(privateTempDir(t), nodePIDFile)
 		writeTestFile(t, path, content, 0o600)
 		if pid, err := readNodePID(path); err != nil || pid <= 1 {
 			t.Fatalf("valid: %d %v", pid, err)
@@ -169,7 +175,7 @@ func TestNodePIDFiles(t *testing.T) {
 	}
 	for _, kind := range []string{"symlink", "dangling symlink", "fifo", "directory", "group writable", "other writable"} {
 		t.Run(kind, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTempDir(t)
 			path := filepath.Join(dir, nodePIDFile)
 			switch kind {
 			case "symlink", "dangling symlink":
@@ -206,7 +212,7 @@ func TestNodePIDFiles(t *testing.T) {
 	if problem := privateFileProblem(0o600, 1001, 1000); problem == "" {
 		t.Fatal("foreign PID owner accepted")
 	}
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	if err := removeNodePID(dir); err != nil {
 		t.Fatalf("absent PID removal: %v", err)
 	}

@@ -16,7 +16,7 @@ import (
 
 func TestLinuxAbsoluteXDGWithoutHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	base := t.TempDir()
+	base := privateTempDir(t)
 	t.Setenv("XDG_DATA_HOME", base)
 	if got, err := defaultDataHome(); err != nil || got != base {
 		t.Fatalf("absolute XDG without HOME: %q %v", got, err)
@@ -40,7 +40,7 @@ func TestLinuxExecutesCheckedDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	f, err := prepareNodeProgram(exe, fileHash(t, exe), dir)
 	if err != nil {
 		t.Fatal(err)

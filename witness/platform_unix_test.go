@@ -38,7 +38,7 @@ func writeTestFile(t *testing.T, path, text string, mode os.FileMode) {
 }
 
 func TestPrivateNodeCopy(t *testing.T) {
-	dataDir, err := dataFolder(t.TempDir())
+	dataDir, err := dataFolder(privateTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestPrivateNodeCopy(t *testing.T) {
 func TestPrivateNodeFolder(t *testing.T) {
 	for _, kind := range []string{"symlink", "file", "group writable", "others writable"} {
 		t.Run(kind, func(t *testing.T) {
-			dataDir := t.TempDir()
+			dataDir := privateTempDir(t)
 			path := filepath.Join(dataDir, "node")
 			switch kind {
 			case "symlink":
@@ -155,7 +155,7 @@ func TestShippedNodeChangesDuringCopy(t *testing.T) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	if err := copyNodeProgram(f, dir, want); err == nil || !strings.Contains(err.Error(), "changed while copying") {
 		t.Fatalf("copy: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestShippedNodeChangesDuringCopy(t *testing.T) {
 func TestDevelopmentNodeSkipsCopy(t *testing.T) {
 	shipped := filepath.Join(t.TempDir(), nodeName)
 	writeTestFile(t, shipped, "node", 0o700)
-	dataDir := t.TempDir()
+	dataDir := privateTempDir(t)
 	f, err := prepareNodeProgram(shipped, "", dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -213,8 +213,8 @@ func TestEarlierWitnessHelper(t *testing.T) {
 }
 
 func TestLeftoverNode(t *testing.T) {
-	target := t.TempDir()
-	alias := filepath.Join(t.TempDir(), "data")
+	target := privateTempDir(t)
+	alias := filepath.Join(privateTempDir(t), "data")
 	if err := os.Symlink(target, alias); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestLeftoverNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unrelatedDir := t.TempDir()
+	unrelatedDir := privateTempDir(t)
 	unrelated := exec.Command(exe, nodeArgs(unrelatedDir, 1)...)
 	unrelated.Env = append(os.Environ(), "WITNESS_FAKE_NODE=silent")
 	if err := unrelated.Start(); err != nil {
@@ -318,7 +318,7 @@ func TestUnrelatedPIDIsNotSignalled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	cmd := exec.Command(exe, nodeArgs(dir, 1)...)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -331,6 +331,9 @@ func TestUnrelatedPIDIsNotSignalled(t *testing.T) {
 	}
 	// A symlink at the private copy's name must not make an unrelated executable eligible for SIGTERM.
 	if err := os.Mkdir(filepath.Join(dir, "node"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "node"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(exe, filepath.Join(dir, "node", nodeName)); err != nil {
@@ -356,9 +359,9 @@ func TestUnrelatedPIDIsNotSignalled(t *testing.T) {
 }
 
 func TestUnixDataFolder(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
-	for _, xdg := range []string{"", "relative", t.TempDir()} {
+	for _, xdg := range []string{"", "relative", privateTempDir(t)} {
 		t.Setenv("XDG_DATA_HOME", xdg)
 		if xdg == "" {
 			if err := os.Unsetenv("XDG_DATA_HOME"); err != nil {
@@ -386,7 +389,7 @@ func TestUnixDataFolder(t *testing.T) {
 			t.Fatalf("data folder mode: %v %v", info, err)
 		}
 	}
-	override := filepath.Join(t.TempDir(), "explicit")
+	override := filepath.Join(privateTempDir(t), "explicit")
 	got, err := dataFolder(override)
 	want, resolveErr := filepath.EvalSymlinks(override)
 	if err != nil || resolveErr != nil || got != want {
