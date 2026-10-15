@@ -101,10 +101,19 @@ func loadAssetsForPlatform(platform string) (map[string]asset, error) {
 		files[name] = data
 	}
 	var parsed map[string]map[string]string
-	files["strings.json"] = []byte(fillProgramNames(string(files["strings.json"]), platform))
 	if err := json.Unmarshal(files["strings.json"], &parsed); err != nil {
 		return nil, err
 	}
+	for _, texts := range parsed {
+		for _, key := range []string{"verdict_unreachable", "verdict_stopped", "running_note"} {
+			texts[key] = platformText(texts[key], texts[key+"_linux"], platform)
+		}
+	}
+	data, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, err
+	}
+	files["strings.json"] = []byte(fillProgramNames(string(data), platform))
 	script := append([]byte("window.STRINGS = "), bytes.TrimSpace(files["strings.json"])...)
 	script = append(script, ";\n"...)
 	return map[string]asset{

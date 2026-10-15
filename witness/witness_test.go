@@ -381,13 +381,20 @@ func TestLanguages(t *testing.T) {
 			t.Fatalf("no console text for %s", lang)
 		}
 		for _, field := range []string{c.Title, c.Tagline, c.Running, c.KeepOpen, c.Already, c.AlreadyElsewhere, c.Busy, c.MissingNode, c.WrongNode,
-			c.NoDataFolder, c.StartFailed, c.Stopping, c.Stopped, c.PressEnter} {
+			c.MissingNodeLinux, c.NoDataFolder, c.StartFailed, c.Stopping, c.Stopped, c.PressEnter} {
 			if strings.TrimSpace(field) == "" {
 				t.Errorf("%s: an empty console text", lang)
 			}
 		}
 		if !strings.Contains(c.NoDataFolder, "%v") || !strings.Contains(c.StartFailed, "%v") || strings.Contains(c.Stopped, "%") {
 			t.Errorf("%s: a console text has the wrong placeholders", lang)
+		}
+		for _, text := range []string{c.MissingNode, c.MissingNodeLinux} {
+			got := placeholder.FindAllString(text, -1)
+			slices.Sort(got)
+			if !slices.Equal(got, []string{"{node}", "{program}", "{program}"}) {
+				t.Errorf("%s: MissingNode placeholders %v", lang, got)
+			}
 		}
 	}
 	for id, want := range map[uint16]string{0x0804: "zh", 0x0404: "zh", 0x0409: "en", 0x0809: "en", 0x0411: "ja", 0x0412: "ko",

@@ -2,6 +2,13 @@ package main
 
 import "strings"
 
+func platformText(text, linuxText, platform string) string {
+	if platform == "linux" {
+		return linuxText
+	}
+	return text
+}
+
 func programNames(platform string) (string, string) {
 	switch platform {
 	case "windows":

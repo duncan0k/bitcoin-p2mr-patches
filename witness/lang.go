@@ -14,6 +14,7 @@ type console struct {
 	AlreadyElsewhere string
 	Busy             string
 	MissingNode      string
+	MissingNodeLinux string
 	WrongNode        string
 	NoDataFolder     string // %v: the error
 	StartFailed      string // %v: the error
@@ -34,6 +35,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "The witness is already running in another window, which shows the address of its page.",
 		Busy:             "Another program is using the witness's data folder. Close it and try again.",
 		MissingNode:      "{node} was not found next to {program}. Unzip the whole download into a folder first, then double-click {program} in that folder.",
+		MissingNodeLinux: "{node} was not found next to {program}. Unpack the whole download into a folder first, then run {program} in that folder.",
 		WrongNode:        "{node} in this folder is not the one this witness was built with. Download the witness again.",
 		NoDataFolder:     "The data folder cannot be created: %v",
 		StartFailed:      "The witness cannot start: %v",
@@ -52,6 +54,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "见证器已经在另一个窗口里运行，那个窗口里显示着它的状态页地址。",
 		Busy:             "有别的程序正在使用见证器的数据文件夹。请关掉它再试。",
 		MissingNode:      "在 {program} 旁边找不到 {node}。请先把下载的压缩包整个解压到一个文件夹，再双击那个文件夹里的 {program}。",
+		MissingNodeLinux: "在 {program} 旁边找不到 {node}。请先把下载的压缩包整个解压到一个文件夹，再在那个文件夹里运行 {program}。",
 		WrongNode:        "这个文件夹里的 {node} 不是见证器配套的那一个。请重新下载见证器。",
 		NoDataFolder:     "无法创建数据文件夹：%v",
 		StartFailed:      "见证器无法启动：%v",
@@ -70,6 +73,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "ウィットネスは別のウィンドウですでに動いています。状態ページのアドレスは、そのウィンドウに表示されています。",
 		Busy:             "別のプログラムがウィットネスのデータフォルダーを使っています。そのプログラムを閉じてから、もう一度お試しください。",
 		MissingNode:      "{program} と同じ場所に {node} が見つかりません。ダウンロードしたファイルをまずフォルダーにすべて展開し、そのフォルダー内の {program} をダブルクリックしてください。",
+		MissingNodeLinux: "{program} と同じ場所に {node} が見つかりません。ダウンロードしたファイルをまずフォルダーにすべて展開し、そのフォルダーで {program} を実行してください。",
 		WrongNode:        "このフォルダーの {node} は、このウィットネスと一緒に配布されたものではありません。ウィットネスをダウンロードし直してください。",
 		NoDataFolder:     "データフォルダーを作成できません：%v",
 		StartFailed:      "ウィットネスを起動できません：%v",
@@ -88,6 +92,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "위트니스가 이미 다른 창에서 실행 중입니다. 상태 페이지 주소는 그 창에 표시되어 있습니다.",
 		Busy:             "다른 프로그램이 위트니스의 데이터 폴더를 사용하고 있습니다. 그 프로그램을 닫고 다시 시도하세요.",
 		MissingNode:      "{program} 옆에 {node}가 없습니다. 내려받은 압축 파일을 먼저 폴더에 모두 풀고, 그 폴더의 {program}를 더블클릭하세요.",
+		MissingNodeLinux: "{program} 옆에 {node}가 없습니다. 내려받은 압축 파일을 먼저 폴더에 모두 풀고, 그 폴더에서 {program}를 실행하세요.",
 		WrongNode:        "이 폴더의 {node}는 이 위트니스와 함께 배포된 파일이 아닙니다. 위트니스를 다시 내려받으세요.",
 		NoDataFolder:     "데이터 폴더를 만들 수 없습니다: %v",
 		StartFailed:      "위트니스를 시작할 수 없습니다: %v",
@@ -106,6 +111,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "Witness уже работает в другом окне. Адрес его страницы показан в том окне.",
 		Busy:             "Папку данных Witness занимает другая программа. Закройте её и попробуйте снова.",
 		MissingNode:      "Рядом с {program} нет {node}. Сначала распакуйте весь скачанный архив в папку, затем дважды щёлкните {program} в этой папке.",
+		MissingNodeLinux: "Рядом с {program} нет {node}. Сначала распакуйте весь скачанный архив в папку, затем запустите {program} в этой папке.",
 		WrongNode:        "{node} в этой папке — не тот, с которым собран этот Witness. Скачайте Witness заново.",
 		NoDataFolder:     "Не удаётся создать папку данных: %v",
 		StartFailed:      "Witness не может запуститься: %v",
@@ -124,6 +130,7 @@ var consoleTexts = map[string]console{
 		AlreadyElsewhere: "Ark-0 Witness ya está en marcha en otra ventana, que muestra la dirección de su página.",
 		Busy:             "Otro programa está usando la carpeta de datos de Ark-0 Witness. Ciérralo y vuelve a intentarlo.",
 		MissingNode:      "No se encuentra {node} junto a {program}. Primero descomprime toda la descarga en una carpeta y luego haz doble clic en el {program} de esa carpeta.",
+		MissingNodeLinux: "No se encuentra {node} junto a {program}. Primero descomprime toda la descarga en una carpeta y luego ejecuta {program} en esa carpeta.",
 		WrongNode:        "El {node} de esta carpeta no es el que acompaña a este Ark-0 Witness. Vuelve a descargarlo.",
 		NoDataFolder:     "No se puede crear la carpeta de datos: %v",
 		StartFailed:      "Ark-0 Witness no puede iniciarse: %v",
@@ -135,7 +142,8 @@ var consoleTexts = map[string]console{
 
 // fillConsole keeps platform names out of the translations themselves.
 func fillConsole(text console, platform string) console {
-	text.MissingNode = fillProgramNames(text.MissingNode, platform)
+	text.MissingNode = fillProgramNames(platformText(text.MissingNode, text.MissingNodeLinux, platform), platform)
+	text.MissingNodeLinux = fillProgramNames(text.MissingNodeLinux, platform)
 	text.WrongNode = fillProgramNames(text.WrongNode, platform)
 	return text
 }
