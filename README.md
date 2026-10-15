@@ -45,8 +45,9 @@ SHA256SUMS-m3       checksums of the M3 patches
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
 ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
+contrib/cross/      cross-compile the M3 node for macOS and Linux, as the witness program ships it
 contrib/windows/    cross-compile the M3 node for 64-bit Windows, as the witness program ships it
-witness/            Ark0Witness, a small Windows program for watching the M3 drill with a node of one's own
+witness/            Ark0Witness, a small program for watching the M3 drill with a node of one's own
 ```
 
 ## Usage
@@ -464,26 +465,44 @@ versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every packag
 (snapshot.ubuntu.com serves past ones). And the build path, `/work/src`, is part of the binaries, so a
 rebuild elsewhere has to use it too.
 
-The release `ark0-witness-0.1.0` carries a build of the same code for 64-bit Windows: `bitcoind.exe`, inside
-the zip of the witness program (below), without the wallet, GUI, ZMQ, IPC and USDT. `contrib/windows/build.sh`
-makes it, as root in a fresh Ubuntu 24.04 container or machine: it cross-compiles Bitcoin Core v31.1 with
-the six patch sets at the tag `ark0-node-m3`, with Core's own depends system and the mingw-w64 toolchain
-with POSIX threads, links without time stamps and strips with `SOURCE_DATE_EPOCH=1`. The script stops
-unless Core and this repository are at the commits it names. Two clean builds gave the same bytes, and a
-third, with the script as published here, gave them again. As with the Linux build, a later build matches
-only with the same package versions and only under `/work/src`: `contrib/windows/packages.txt` lists every
-package of that third build (among them mingw-w64 11.0.1 with GCC 13.2.0, binutils 2.41.90 and CMake
-3.28.3), and the script writes the list for its own build to `/work/out/packages.txt`. With `PHASE=full`,
-the default, it also installs Wine, which its own list then includes, runs the unit tests and syncs the
-stripped `bitcoind.exe` with Ark-0 under Wine.
+The releases of the witness program (below) carry builds of the same code for its systems, inside its
+archives and without the wallet, GUI, ZMQ, IPC and USDT: `bitcoind.exe` for 64-bit Windows; from
+`ark0-witness-0.2.0` on also `bitcoind` for macOS 14 and later, one universal file for Apple silicon and
+Intel, and `bitcoind` for 64-bit Linux with glibc 2.35 or later, on x86_64 and on aarch64. Each is Bitcoin
+Core v31.1 with the six patch sets at the tag `ark0-node-m3`, cross-compiled with Core's own depends system
+by a script that stops unless Core and this repository are at the commits it names.
+
+`contrib/windows/build.sh` makes the Windows build, as root in a fresh Ubuntu 24.04 container or machine,
+with the mingw-w64 toolchain with POSIX threads; it links without time stamps and strips with
+`SOURCE_DATE_EPOCH=1`. Two clean builds gave the same bytes, and a third, with the script as published
+here, gave them again. As with the Linux build, a later build matches only with the same package versions
+and only under `/work/src`: `contrib/windows/packages.txt` lists every package of that third build (among
+them mingw-w64 11.0.1 with GCC 13.2.0, binutils 2.41.90 and CMake 3.28.3), and the script writes the list
+for its own build to `/work/out/packages.txt`. With `PHASE=full`, the default, it also installs Wine, which
+its own list then includes, runs the unit tests and syncs the stripped `bitcoind.exe` with Ark-0 under Wine.
+
+`contrib/cross/build.sh` makes the other builds, one `TARGET` at a time, as root in a fresh container:
+`macos-arm64` and `macos-x86_64` in Debian 13 with clang and lld 19 and the macOS SDK that Core v31.1 pins,
+which the script downloads from bitcoincore.org and checks by its SHA-256 and which is not redistributed;
+`linux-x86_64` and `linux-aarch64` in Ubuntu 22.04 with GCC 12, linking the C++ runtime statically, and
+failing if a binary needs a glibc newer than 2.35 or any library beyond libc, libm and the loader. The macOS
+builds are not stripped: the linker signs the arm64 build ad hoc, and Apple silicon runs only signed code.
+`contrib/cross/lipo.sh` checks both macOS builds, joins them into one universal file and checks that it
+holds them unchanged; that the signatures are valid is checked on a Mac with `codesign --verify --strict
+--all-architectures`. Two clean builds of each of the four targets gave the same bytes, and a third of each
+Linux build, with the script as published here, gave them again. As for Windows, a later build matches only
+with the same package versions and under `/work/src`: `contrib/cross/packages-*.txt` list the packages of the
+published builds.
 
 ## Witness program (`witness/`)
 
-Ark0Witness is a small program for 64-bit Windows 10 and 11 that runs the Windows build of the node above
-and shows, on a page served on 127.0.0.1 only, what that node reports during the M3 drill: how far it has
-synced, whether it is on Ark-0, block 30000 and the two tripwires, and whether elliptic curve signatures in
-leaves of version `0xe0` are still accepted. It can also have the node judge a raw transaction with
-`testmempoolaccept`; the transaction is never broadcast. The release `ark0-witness-0.1.0` has the zip, its
-`SHA256SUMS` and the signature of that file by the release key. Neither program in the zip is code-signed.
+Ark0Witness is a small program for Windows 10 and 11, macOS 14 and later and 64-bit Linux that runs the
+build of the node above for its system and shows, on a page served on 127.0.0.1 only, what that node
+reports during the M3 drill: how far it has synced, whether it is on Ark-0, block 30000 and the two
+tripwires, and whether elliptic curve signatures in leaves of version `0xe0` are still accepted. It can also
+have the node judge a raw transaction with `testmempoolaccept`; the transaction is never broadcast. The
+release `ark0-witness-0.2.0` has a zip for Windows, a zip for macOS and a tarball each for Linux on x86_64
+and on aarch64, their `SHA256SUMS` and the signature of that file by the release key. None of the programs
+is code-signed, and the macOS ones are not notarized.
 `witness/README.md` says what it does and does not do, how it is built (Go and its standard library only,
 reproducibly) and how it is tested.
