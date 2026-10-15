@@ -101,42 +101,6 @@ func readCookie(path string) ([]byte, error) {
 	return data, nil
 }
 
-func readPageFile(path string) ([]byte, error) {
-	f, err := openRegularFile(path, os.O_RDONLY|syscall.O_NOFOLLOW)
-	if err != nil {
-		return nil, fmt.Errorf("cannot safely open page file %q: %w", path, err)
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("cannot inspect page file %q: %w", path, err)
-	}
-	stat := info.Sys().(*syscall.Stat_t)
-	if reason := instanceFileProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
-		return nil, fmt.Errorf("unsafe page file %q: %s; delete it or the data folder and retry", path, reason)
-	}
-	if err := checkInstanceFileACL(path); err != nil {
-		return nil, fmt.Errorf("unsafe page file %q: %w; delete it or the data folder and retry", path, err)
-	}
-	return io.ReadAll(io.LimitReader(f, 1024))
-}
-
-func writePageFile(path string, data []byte) error {
-	f, err := exclusiveTemporary(filepath.Dir(path), 0o600)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	defer f.Close()
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
-}
-
 func shutdownNode(n *node, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	n.stop()

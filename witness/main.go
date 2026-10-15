@@ -34,6 +34,10 @@ func main() {
 }
 
 func run() int {
+	return runWithBrowser(openBrowser)
+}
+
+func runWithBrowser(openBrowser func(string) error) int {
 	// Terminal closure (SIGHUP on Unix, CTRL_CLOSE_EVENT as SIGTERM on Windows) and Ctrl+C are caught from the
 	// start, so that a node is stopped or never started.
 	signals := make(chan os.Signal, 1)
@@ -67,8 +71,16 @@ func run() int {
 	}
 	release, err := lockInstance(filepath.Join(dataDir, lockFile))
 	if err != nil {
-		if runtime.GOOS != "windows" && !errors.Is(err, errInstanceRunning) {
-			return fail(fmt.Sprintf(t.StartFailed, err))
+		if runtime.GOOS != "windows" {
+			if !errors.Is(err, errInstanceRunning) {
+				return fail(fmt.Sprintf(t.StartFailed, err))
+			}
+			fmt.Println(t.AlreadyElsewhere)
+			select {
+			case <-signals:
+			case <-time.After(5 * time.Second):
+			}
+			return 0
 		}
 		// Another window already runs the witness on this data folder: show its page rather than start a second node.
 		url, pageErr := readPageURL(dataDir)
@@ -82,9 +94,6 @@ func run() int {
 			case <-time.After(5 * time.Second):
 			}
 			return 0
-		}
-		if runtime.GOOS != "windows" {
-			return fail(t.Busy + "\n" + pageErr.Error())
 		}
 		return fail(t.Busy)
 	}
@@ -103,9 +112,11 @@ func run() int {
 	}
 	n.start()
 	url := srv.url()
-	pagePath := filepath.Join(dataDir, pageFile)
-	_ = writePageFile(pagePath, []byte(url+"\n"))
-	defer os.Remove(pagePath)
+	if runtime.GOOS == "windows" {
+		pagePath := filepath.Join(dataDir, pageFile)
+		_ = os.WriteFile(pagePath, []byte(url+"\n"), 0o600)
+		defer os.Remove(pagePath)
+	}
 	attempted := shouldOpenBrowser(runtime.GOOS, *noBrowser, os.Getenv("DISPLAY"), os.Getenv("WAYLAND_DISPLAY"))
 	var browserErr error
 	if attempted {
@@ -233,7 +244,7 @@ var pageURLPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/[0-9a-f
 // readPageURL is the page of the window that already runs on this data folder, if its file holds one.
 func readPageURL(dataDir string) (string, error) {
 	path := filepath.Join(dataDir, pageFile)
-	data, err := readPageFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}

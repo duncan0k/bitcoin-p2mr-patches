@@ -86,84 +86,68 @@ func TestFileACLParsing(t *testing.T) {
 	}
 }
 
-func TestDarwinInstanceFileACL(t *testing.T) {
-	for _, file := range []string{lockFile, pageFile} {
-		t.Run(file, func(t *testing.T) {
-			path := filepath.Join(privateTempDir(t), file)
-			writeTestFile(t, path, "saved page", 0o600)
-			if file == lockFile {
-				exe, err := os.Executable()
-				if err != nil {
-					t.Fatal(err)
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, exe, "-test.run=^TestDarwinInstanceLockHelper$")
-				cmd.Env = append(os.Environ(), "WITNESS_ACL_LOCK_HELPER="+path)
-				cmd.Stderr = os.Stderr
-				input, err := cmd.StdinPipe()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer input.Close()
-				output, err := cmd.StdoutPipe()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer output.Close()
-				if err := cmd.Start(); err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					_ = input.Close()
-					if err := cmd.Wait(); err != nil {
-						t.Errorf("lock helper: %v", err)
-					}
-				}()
-				if ready, err := bufio.NewReader(output).ReadString('\n'); err != nil || ready != "locked\n" {
-					t.Fatalf("lock helper readiness: %q %v", ready, err)
-				}
-				if release, err := lockInstance(path); !errors.Is(err, errInstanceRunning) {
-					if release != nil {
-						release()
-					}
-					t.Fatalf("safe busy lock: %v", err)
-				}
-			} else if data, err := readPageFile(path); err != nil || string(data) != "saved page" {
-				t.Fatalf("safe page file: %q %v", data, err)
-			}
-			if output, err := exec.Command("/bin/chmod", "+a", "everyone allow read,write", path).CombinedOutput(); err != nil {
-				t.Fatalf("add file ACL: %v: %s", err, output)
-			}
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			stat := info.Sys().(*syscall.Stat_t)
-			if info.Mode().Perm() != 0o600 || !ownedByUser(info) || stat.Nlink != 1 {
-				t.Fatalf("ACL fixture must pass descriptor checks: %v", info)
-			}
-			if file == lockFile {
-				release, err := lockInstance(path)
-				if release != nil {
-					release()
-				}
-				if err == nil || errors.Is(err, errInstanceRunning) {
-					t.Fatalf("unsafe busy lock must return an error with advice: %v", err)
-				}
-				for _, text := range []string{path, "allow access control entry", "delete this file", "retry"} {
-					if !strings.Contains(err.Error(), text) {
-						t.Errorf("missing %q in lock error: %v", text, err)
-					}
-				}
-			} else {
-				data, err := readPageFile(path)
-				if err == nil || data != nil || !strings.Contains(err.Error(), path) ||
-					!strings.Contains(err.Error(), "allow access control entry") || !strings.Contains(err.Error(), "delete") {
-					t.Fatalf("unsafe page file must be refused with advice: %q %v", data, err)
-				}
-			}
-		})
+func TestDarwinLockFileACL(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), lockFile)
+	writeTestFile(t, path, "saved page", 0o600)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestDarwinInstanceLockHelper$")
+	cmd.Env = append(os.Environ(), "WITNESS_ACL_LOCK_HELPER="+path)
+	cmd.Stderr = os.Stderr
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = input.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("lock helper: %v", err)
+		}
+	}()
+	if ready, err := bufio.NewReader(output).ReadString('\n'); err != nil || ready != "locked\n" {
+		t.Fatalf("lock helper readiness: %q %v", ready, err)
+	}
+	if release, err := lockInstance(path); !errors.Is(err, errInstanceRunning) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("safe busy lock: %v", err)
+	}
+	if output, err := exec.Command("/bin/chmod", "+a", "everyone allow read,write", path).CombinedOutput(); err != nil {
+		t.Fatalf("add file ACL: %v: %s", err, output)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	if info.Mode().Perm() != 0o600 || !ownedByUser(info) || stat.Nlink != 1 {
+		t.Fatalf("ACL fixture must pass descriptor checks: %v", info)
+	}
+	release, err := lockInstance(path)
+	if release != nil {
+		release()
+	}
+	if err == nil || errors.Is(err, errInstanceRunning) {
+		t.Fatalf("unsafe busy lock must return an error with advice: %v", err)
+	}
+	for _, text := range []string{path, "allow access control entry", "delete this file", "retry"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("missing %q in lock error: %v", text, err)
+		}
 	}
 }
 

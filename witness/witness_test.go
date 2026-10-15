@@ -380,7 +380,7 @@ func TestLanguages(t *testing.T) {
 		if !ok {
 			t.Fatalf("no console text for %s", lang)
 		}
-		for _, field := range []string{c.Title, c.Tagline, c.Running, c.KeepOpen, c.Already, c.Busy, c.MissingNode, c.WrongNode,
+		for _, field := range []string{c.Title, c.Tagline, c.Running, c.KeepOpen, c.Already, c.AlreadyElsewhere, c.Busy, c.MissingNode, c.WrongNode,
 			c.NoDataFolder, c.StartFailed, c.Stopping, c.Stopped, c.PressEnter} {
 			if strings.TrimSpace(field) == "" {
 				t.Errorf("%s: an empty console text", lang)

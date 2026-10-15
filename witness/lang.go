@@ -11,6 +11,7 @@ type console struct {
 	Leftover         string
 	KeepOpen         string
 	Already          string
+	AlreadyElsewhere string
 	Busy             string
 	MissingNode      string
 	WrongNode        string
@@ -30,6 +31,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "Stopping a node left from an earlier run…",
 		KeepOpen:         "Keep this window open. Closing it stops the node.",
 		Already:          "The witness is already running in another window. Its page:",
+		AlreadyElsewhere: "The witness is already running in another window, which shows the address of its page.",
 		Busy:             "Another program is using the witness's data folder. Close it and try again.",
 		MissingNode:      "{node} was not found next to {program}. Unzip the whole download into a folder first, then double-click {program} in that folder.",
 		WrongNode:        "{node} in this folder is not the one this witness was built with. Download the witness again.",
@@ -47,6 +49,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "正在停止上次运行留下的节点……",
 		KeepOpen:         "请不要关闭这个窗口。关闭它，节点就会停下。",
 		Already:          "见证器已经在另一个窗口里运行，它的状态页：",
+		AlreadyElsewhere: "见证器已经在另一个窗口里运行，那个窗口里显示着它的状态页地址。",
 		Busy:             "有别的程序正在使用见证器的数据文件夹。请关掉它再试。",
 		MissingNode:      "在 {program} 旁边找不到 {node}。请先把下载的压缩包整个解压到一个文件夹，再双击那个文件夹里的 {program}。",
 		WrongNode:        "这个文件夹里的 {node} 不是见证器配套的那一个。请重新下载见证器。",
@@ -64,6 +67,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "前回の実行で残ったノードを停止しています…",
 		KeepOpen:         "このウィンドウは開いたままにしてください。閉じるとノードが停止します。",
 		Already:          "ウィットネスは別のウィンドウですでに動いています。状態ページ：",
+		AlreadyElsewhere: "ウィットネスは別のウィンドウですでに動いています。状態ページのアドレスは、そのウィンドウに表示されています。",
 		Busy:             "別のプログラムがウィットネスのデータフォルダーを使っています。そのプログラムを閉じてから、もう一度お試しください。",
 		MissingNode:      "{program} と同じ場所に {node} が見つかりません。ダウンロードしたファイルをまずフォルダーにすべて展開し、そのフォルダー内の {program} をダブルクリックしてください。",
 		WrongNode:        "このフォルダーの {node} は、このウィットネスと一緒に配布されたものではありません。ウィットネスをダウンロードし直してください。",
@@ -81,6 +85,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "이전 실행에서 남은 노드를 멈추는 중입니다…",
 		KeepOpen:         "이 창을 닫지 마세요. 창을 닫으면 노드가 멈춥니다.",
 		Already:          "위트니스가 이미 다른 창에서 실행 중입니다. 상태 페이지:",
+		AlreadyElsewhere: "위트니스가 이미 다른 창에서 실행 중입니다. 상태 페이지 주소는 그 창에 표시되어 있습니다.",
 		Busy:             "다른 프로그램이 위트니스의 데이터 폴더를 사용하고 있습니다. 그 프로그램을 닫고 다시 시도하세요.",
 		MissingNode:      "{program} 옆에 {node}가 없습니다. 내려받은 압축 파일을 먼저 폴더에 모두 풀고, 그 폴더의 {program}를 더블클릭하세요.",
 		WrongNode:        "이 폴더의 {node}는 이 위트니스와 함께 배포된 파일이 아닙니다. 위트니스를 다시 내려받으세요.",
@@ -98,6 +103,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "Останавливаем узел, оставшийся от прошлого запуска…",
 		KeepOpen:         "Не закрывайте это окно: если его закрыть, узел остановится.",
 		Already:          "Witness уже работает в другом окне. Его страница:",
+		AlreadyElsewhere: "Witness уже работает в другом окне. Адрес его страницы показан в том окне.",
 		Busy:             "Папку данных Witness занимает другая программа. Закройте её и попробуйте снова.",
 		MissingNode:      "Рядом с {program} нет {node}. Сначала распакуйте весь скачанный архив в папку, затем дважды щёлкните {program} в этой папке.",
 		WrongNode:        "{node} в этой папке — не тот, с которым собран этот Witness. Скачайте Witness заново.",
@@ -115,6 +121,7 @@ var consoleTexts = map[string]console{
 		Leftover:         "Deteniendo un nodo que quedó de una ejecución anterior…",
 		KeepOpen:         "No cierres esta ventana: si la cierras, el nodo se detiene.",
 		Already:          "Ark-0 Witness ya está en marcha en otra ventana. Su página:",
+		AlreadyElsewhere: "Ark-0 Witness ya está en marcha en otra ventana, que muestra la dirección de su página.",
 		Busy:             "Otro programa está usando la carpeta de datos de Ark-0 Witness. Ciérralo y vuelve a intentarlo.",
 		MissingNode:      "No se encuentra {node} junto a {program}. Primero descomprime toda la descarga en una carpeta y luego haz doble clic en el {program} de esa carpeta.",
 		WrongNode:        "El {node} de esta carpeta no es el que acompaña a este Ark-0 Witness. Vuelve a descargarlo.",

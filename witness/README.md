@@ -65,7 +65,8 @@ Ark-0 is a test network for trying things out. It may be reset at any time.
     Gatekeeper: a file the program writes carries no quarantine attribute.
 - What the page calls good rests on the node's own answers: it says so only once the node has confirmed
   block 1264 and reported both tripwires; anything it could not read shows as unknown, also in the report.
-- A second start while the program runs shows the running one's page.
+- A second start while the program runs shows the running one's page on Windows; on macOS and Linux it says
+  that the program already runs in another window, which shows the page's address.
 
 ## Before you run it
 

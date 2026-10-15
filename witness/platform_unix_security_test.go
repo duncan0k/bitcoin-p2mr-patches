@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -138,9 +139,8 @@ func TestDataTreeAfterFakeNodeRun(t *testing.T) {
 	if !stoppedWithin(n, 5*time.Second) {
 		t.Fatal("fake node did not stop")
 	}
-	if err := writePageFile(filepath.Join(dir, pageFile), []byte("saved page")); err != nil {
-		t.Fatal(err)
-	}
+	// A page file left by an older version is still part of the data folder scan.
+	writeTestFile(t, filepath.Join(dir, pageFile), "saved page", 0o600)
 	if err := writeNodePID(dir, 123); err != nil {
 		t.Fatal(err)
 	}
@@ -155,100 +155,154 @@ func TestDataTreeAfterFakeNodeRun(t *testing.T) {
 	}
 }
 
-func TestInstanceFileDecision(t *testing.T) {
-	for _, file := range []string{lockFile, pageFile} {
-		t.Run(file, func(t *testing.T) {
-			for _, c := range []struct {
-				name  string
-				mode  os.FileMode
-				owner uint32
-				links uint64
-				safe  bool
-			}{
-				{"private", 0o600, 1000, 1, true},
-				{"foreign owner", 0o600, 1001, 1, false},
-				{"two links", 0o600, 1000, 2, false},
-				{"group read", 0o640, 1000, 1, false},
-				{"group write", 0o620, 1000, 1, false},
-				{"group execute", 0o610, 1000, 1, false},
-				{"other read", 0o604, 1000, 1, false},
-				{"directory", os.ModeDir | 0o700, 1000, 2, false},
-			} {
-				t.Run(c.name, func(t *testing.T) {
-					if reason := instanceFileProblem(c.mode, c.owner, 1000, c.links); (reason == "") != c.safe {
-						t.Fatalf("safe=%v: %s", c.safe, reason)
-					}
-				})
+func TestLockFileDecision(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		mode  os.FileMode
+		owner uint32
+		links uint64
+		safe  bool
+	}{
+		{"private", 0o600, 1000, 1, true},
+		{"foreign owner", 0o600, 1001, 1, false},
+		{"two links", 0o600, 1000, 2, false},
+		{"group read", 0o640, 1000, 1, false},
+		{"group write", 0o620, 1000, 1, false},
+		{"group execute", 0o610, 1000, 1, false},
+		{"other read", 0o604, 1000, 1, false},
+		{"directory", os.ModeDir | 0o700, 1000, 2, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if reason := instanceFileProblem(c.mode, c.owner, 1000, c.links); (reason == "") != c.safe {
+				t.Fatalf("safe=%v: %s", c.safe, reason)
 			}
 		})
 	}
 }
 
-func TestUnsafeInstanceFiles(t *testing.T) {
-	for _, file := range []string{lockFile, pageFile} {
-		for _, kind := range []string{"symlink", "hard link", "group read", "group write", "group execute", "fifo", "directory"} {
-			t.Run(file+"/"+kind, func(t *testing.T) {
-				dir := privateTempDir(t)
-				path := filepath.Join(dir, file)
-				target := filepath.Join(privateTempDir(t), "target")
-				url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
-				writeTestFile(t, target, url, 0o600)
-				switch kind {
-				case "symlink":
-					if err := os.Symlink(target, path); err != nil {
-						t.Fatal(err)
-					}
-				case "hard link":
-					if err := os.Link(target, path); err != nil {
-						t.Fatal(err)
-					}
-				case "fifo":
-					if err := syscall.Mkfifo(path, 0o600); err != nil {
-						t.Fatal(err)
-					}
-				case "directory":
-					if err := os.Mkdir(path, 0o700); err != nil {
-						t.Fatal(err)
-					}
-				default:
-					mode := os.FileMode(0o640)
-					if kind == "group write" {
-						mode = 0o620
-					} else if kind == "group execute" {
-						mode = 0o610
-					}
-					writeTestFile(t, path, url, mode)
+func TestUnsafeLockFiles(t *testing.T) {
+	for _, kind := range []string{"symlink", "hard link", "group read", "group write", "group execute", "fifo", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := privateTempDir(t)
+			path := filepath.Join(dir, lockFile)
+			target := filepath.Join(privateTempDir(t), "target")
+			url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
+			writeTestFile(t, target, url, 0o600)
+			switch kind {
+			case "symlink":
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
 				}
-				if file == lockFile {
-					release, err := lockInstance(path)
-					if release != nil {
-						release()
-					}
-					if err == nil || errors.Is(err, errInstanceRunning) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "delete") {
-						t.Fatalf("unsafe lock must be an error, not a busy instance: %v", err)
-					}
-					if err := writePageFile(filepath.Join(dir, pageFile), []byte(url)); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if data, err := readPageFile(path); err == nil || data != nil || !strings.Contains(err.Error(), path) {
-						t.Fatalf("unsafe page file: %q %v", data, err)
-					}
-					if url, err := readPageURL(dir); err == nil || url != "" {
-						t.Fatalf("unsafe page yielded a URL: %q %v", url, err)
-					}
-					release, err := lockInstance(filepath.Join(dir, lockFile))
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer release()
+			case "hard link":
+				if err := os.Link(target, path); err != nil {
+					t.Fatal(err)
 				}
-				output, err := runWitnessStartup(t, dir)
-				if err == nil || !strings.Contains(output, path) || strings.Contains(output, url) {
-					t.Fatalf("unsafe instance file reached the page: %v\n%s", err, output)
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
 				}
-			})
-		}
+			case "directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				mode := os.FileMode(0o640)
+				if kind == "group write" {
+					mode = 0o620
+				} else if kind == "group execute" {
+					mode = 0o610
+				}
+				writeTestFile(t, path, url, mode)
+			}
+			release, err := lockInstance(path)
+			if release != nil {
+				release()
+			}
+			if err == nil || errors.Is(err, errInstanceRunning) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "delete") {
+				t.Fatalf("unsafe lock must be an error, not a busy instance: %v", err)
+			}
+			writeTestFile(t, filepath.Join(dir, pageFile), url, 0o600)
+			output, err := runWitnessStartup(t, dir)
+			if err == nil || !strings.Contains(output, path) || strings.Contains(output, url) {
+				t.Fatalf("unsafe instance file reached the page: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func checkBusyInstanceOutput(t *testing.T, output string, err error) {
+	t.Helper()
+	if err != nil || !strings.Contains(output, consoleTexts["en"].AlreadyElsewhere) ||
+		strings.Contains(output, "http://") || strings.Contains(output, "https://") || strings.Contains(output, "unexpected browser launch") {
+		t.Fatalf("busy instance must show only the other-window notice: %v\n%s", err, output)
+	}
+}
+
+func TestBusyInstanceDoesNotReadPageFile(t *testing.T) {
+	for _, kind := range []string{"retained descriptors", "fifo", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := privateTempDir(t)
+			lockPath := filepath.Join(dir, lockFile)
+			writeTestFile(t, lockPath, "", 0o666)
+			lock, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			if err := os.Chmod(lockPath, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Tightened permissions do not revoke the descriptor from an earlier exposure.
+			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, pageFile)
+			url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/\n"
+			var pipe *os.File
+			switch kind {
+			case "retained descriptors":
+				writeTestFile(t, path, "", 0o666)
+				writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer writer.Close()
+				if err := os.Chmod(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := writer.WriteString(url); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				pipe, err = os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pipe.Close()
+				if _, err := pipe.WriteString(url); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, err := runWitnessStartup(t, dir)
+			checkBusyInstanceOutput(t, output, err)
+			if pipe != nil {
+				// A read would consume these bytes, even if the URL were then discarded.
+				fd := int(pipe.Fd())
+				if err := syscall.SetNonblock(fd, true); err != nil {
+					t.Fatal(err)
+				}
+				data := make([]byte, len(url))
+				if n, err := syscall.Read(fd, data); err != nil || n != len(url) || string(data) != url {
+					t.Fatalf("page FIFO was read: %q %v", data, err)
+				}
+			}
+			if starts(dir) != 0 {
+				t.Fatal("a busy instance started a node")
+			}
+		})
 	}
 }
 
@@ -266,15 +320,14 @@ func TestBusyInstanceDoesNotScanDataTree(t *testing.T) {
 		t.Fatalf("busy flock did not identify a second instance: %v", err)
 	}
 	url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
-	if err := writePageFile(filepath.Join(dir, pageFile), []byte(url)); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(dir, pageFile), url, 0o600)
 	if err := syscall.Mkfifo(filepath.Join(dir, "unsafe-entry"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runWitnessStartup(t, dir)
-	if err != nil || !strings.Contains(output, url) || strings.Contains(output, "unsafe data folder entry") {
-		t.Fatalf("second instance did not show the existing page: %v\n%s", err, output)
+	checkBusyInstanceOutput(t, output, err)
+	if strings.Contains(output, "unsafe data folder entry") {
+		t.Fatalf("second instance scanned the data tree: %s", output)
 	}
 }
 
@@ -302,9 +355,71 @@ func TestWitnessStartupHelper(t *testing.T) {
 		return
 	}
 	flag.CommandLine = flag.NewFlagSet("witness", flag.ExitOnError)
-	os.Args = []string{os.Args[0], "-datadir", dir, "-bitcoind", os.Args[0], "-no-browser", "-lang", "en"}
-	if code := run(); code != 0 {
+	os.Args = []string{os.Args[0], "-datadir", dir, "-bitcoind", os.Args[0], "-lang", "en"}
+	if kind := os.Getenv("WITNESS_STARTUP_NODE"); kind != "" {
+		t.Setenv("WITNESS_FAKE_NODE", kind)
+		os.Args = append(os.Args, "-no-browser")
+	}
+	if code := runWithBrowser(func(string) error { panic("unexpected browser launch") }); code != 0 {
 		os.Exit(code)
+	}
+}
+
+func TestStartupDoesNotWritePageFile(t *testing.T) {
+	for _, saved := range []bool{false, true} {
+		t.Run(strconv.FormatBool(saved), func(t *testing.T) {
+			dir := privateTempDir(t)
+			path := filepath.Join(dir, pageFile)
+			if saved {
+				writeTestFile(t, path, "page from an older version", 0o600)
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, exe, "-test.run=^TestWitnessStartupHelper$")
+			cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=", "WITNESS_STARTUP_HELPER="+dir, "WITNESS_STARTUP_NODE=ready")
+			cmd.Stdin = strings.NewReader("\n")
+			cmd.Stderr = os.Stderr
+			output, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+				if err := cmd.Wait(); err != nil {
+					t.Errorf("startup helper: %v", err)
+				}
+				if saved {
+					if data, err := os.ReadFile(path); err != nil || string(data) != "page from an older version" {
+						t.Errorf("saved page was changed or removed: %q %v", data, err)
+					}
+				} else if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Errorf("shutdown left a page file: %v", err)
+				}
+			}()
+			scanner := bufio.NewScanner(output)
+			for scanner.Scan() {
+				if scanner.Text() != consoleTexts["en"].KeepOpen {
+					continue
+				}
+				if saved {
+					if data, err := os.ReadFile(path); err != nil || string(data) != "page from an older version" {
+						t.Fatalf("startup changed the saved page: %q %v", data, err)
+					}
+				} else if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("startup wrote a page file: %v", err)
+				}
+				return
+			}
+			t.Fatalf("startup did not reach the running notice: %v; %v", scanner.Err(), ctx.Err())
+		})
 	}
 }
 
