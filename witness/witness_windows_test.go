@@ -5,8 +5,55 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"unsafe"
 )
+
+func checkCookieOwnerAndLinks(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var info syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(syscall.Handle(f.Fd()), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.NumberOfLinks != 1 {
+		t.Fatalf("cookie has %d links, want one", info.NumberOfLinks)
+	}
+	var owner *syscall.SID
+	var descriptor syscall.Handle
+	getSecurityInfo := syscall.NewLazyDLL("advapi32.dll").NewProc("GetSecurityInfo")
+	// SE_FILE_OBJECT and OWNER_SECURITY_INFORMATION both have value 1.
+	result, _, _ := getSecurityInfo.Call(f.Fd(), 1, 1, uintptr(unsafe.Pointer(&owner)), 0, 0, 0, uintptr(unsafe.Pointer(&descriptor)))
+	if result != 0 {
+		t.Fatal(syscall.Errno(result))
+	}
+	defer syscall.LocalFree(descriptor)
+	ownerSID, err := owner.String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := syscall.OpenCurrentProcessToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID, err := user.User.Sid.String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerSID != userSID {
+		t.Fatalf("cookie owner=%s, want current user=%s", ownerSID, userSID)
+	}
+}
 
 // A file id left empty by the file system is no id, even on a volume with a serial number.
 func TestFileIDCheck(t *testing.T) {

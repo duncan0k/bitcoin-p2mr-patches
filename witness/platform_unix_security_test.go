@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+func checkCookieOwnerAndLinks(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	if !ownedByUser(info) || stat.Nlink != 1 {
+		t.Fatalf("cookie owner=%d links=%d, want effective uid=%d and one link", stat.Uid, stat.Nlink, os.Geteuid())
+	}
+}
+
 func TestFolderPermissions(t *testing.T) {
 	const uid = uint32(1000)
 	for _, c := range []struct {
@@ -90,6 +102,18 @@ func TestFolderWalk(t *testing.T) {
 		!strings.Contains(err.Error(), "could be changed by other users because they are writable by group or others") ||
 		!strings.Contains(err.Error(), "-datadir") {
 		t.Fatalf("unsafe parents: %v; want one command %s", err, command)
+	}
+	if !strings.HasPrefix(err.Error(), "parent folders ") {
+		t.Fatalf("multiple parents need a plural error: %v", err)
+	}
+	walk = folderWalk{uid: uid}
+	if err := walk.check(local, os.ModeDir|0o775, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	err = walk.check(local+"/data", os.ModeDir|0o700, uid, true)
+	want := "parent folder '" + local + "' could be changed by other users because it is writable by group or others; run chmod go-w '" + local + "' or choose another folder with -datadir"
+	if err == nil || err.Error() != want {
+		t.Fatalf("single parent: %v; want %s", err, want)
 	}
 
 	for _, shield := range []bool{false, true} {

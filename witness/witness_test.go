@@ -78,7 +78,10 @@ func fakeBitcoind(kind string, args []string) int {
 		fmt.Fprintln(os.Stderr, "Error: Unable to start HTTP server. See debug log for details.")
 		return 1
 	}
-	if os.MkdirAll(filepath.Join(dataDir, "signet"), 0o700) != nil || os.WriteFile(cookiePath(dataDir), []byte("__cookie__:fake"), 0o600) != nil {
+	// Like Core, truncate the temporary file (following links), then rename it to .cookie.
+	if os.MkdirAll(filepath.Join(dataDir, "signet"), 0o700) != nil ||
+		os.WriteFile(cookieTempPath(dataDir), []byte("__cookie__:fake"), 0o600) != nil ||
+		os.Rename(cookieTempPath(dataDir), cookiePath(dataDir)) != nil {
 		return 1
 	}
 	stopped := make(chan struct{})
@@ -219,6 +222,70 @@ func TestStaleCookie(t *testing.T) {
 	}
 	if _, err := os.Stat(cookiePath(dir)); err == nil {
 		t.Error("the stale cookie is still there")
+	}
+}
+
+func TestStaleCookieTempLinks(t *testing.T) {
+	for _, kind := range []string{"hard link", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := privateTempDir(t)
+			if err := os.Mkdir(filepath.Join(dir, "signet"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(privateTempDir(t), "outside-cookie")
+			const oldContent = "outside content must stay unchanged"
+			if err := os.WriteFile(target, []byte(oldContent), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := os.Link
+			if kind == "symlink" {
+				link = os.Symlink
+			}
+			if err := link(target, cookieTempPath(dir)); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("cannot create %s: %v", kind, err)
+				}
+				t.Fatal(err)
+			}
+			n := fakeNodeProcess(t, "ready", dir, "")
+			n.start()
+			if !eventually(10*time.Second, func() bool { return n.client() != nil }) {
+				t.Fatal("the node's new cookie was not trusted")
+			}
+			if data, err := os.ReadFile(target); err != nil || string(data) != oldContent {
+				t.Fatalf("outside file changed: %q %v", data, err)
+			}
+			path := cookiePath(dir)
+			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("cookie is not a regular file: %v %v", info, err)
+			}
+			checkCookieOwnerAndLinks(t, path)
+			if data, err := readCookie(path); err != nil || string(data) != "__cookie__:fake" {
+				t.Fatalf("new cookie: %q %v", data, err)
+			}
+			if err := n.client().callWithin(time.Second, "getblockchaininfo", nil, nil); err != nil {
+				t.Fatalf("the trusted node did not answer: %v", err)
+			}
+		})
+	}
+}
+
+func TestCookieTempRemovalFailure(t *testing.T) {
+	dir := privateTempDir(t)
+	path := cookieTempPath(dir)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := newNode("unused", "", dir)
+	_, err := n.runOnce(1)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", path)) || !strings.Contains(err.Error(), "remove it before retrying") {
+		t.Fatalf("temporary cookie removal error: %v", err)
+	}
+	if starts(dir) != 0 {
+		t.Fatal("a node was started despite the temporary cookie removal failure")
 	}
 }
 

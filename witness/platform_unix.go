@@ -492,6 +492,9 @@ func (w *folderWalk) check(path string, mode os.FileMode, owner uint32, data boo
 		for i, parent := range w.writableParents {
 			quoted[i] = shellFolder(parent)
 		}
+		if len(quoted) == 1 {
+			return fmt.Errorf("parent folder %s could be changed by other users because it is writable by group or others; run chmod go-w %s or choose another folder with -datadir", quoted[0], quoted[0])
+		}
 		return fmt.Errorf("parent folders %s could be changed by other users because they are writable by group or others; run chmod go-w %s or choose another folder with -datadir", strings.Join(quoted, ", "), strings.Join(quoted, " "))
 	}
 	// A folder owned by the user that gives neither group nor others search permission keeps other users out of

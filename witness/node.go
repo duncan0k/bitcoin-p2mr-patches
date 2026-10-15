@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -56,6 +57,11 @@ func nodeArgs(dataDir string, rpcPort int) []string {
 // cookiePath is where the node writes its RPC credentials; every signet keeps its files in signet/.
 func cookiePath(dataDir string) string {
 	return filepath.Join(dataDir, "signet", ".cookie")
+}
+
+// cookieTempPath is where the node writes its cookie before renaming it to .cookie.
+func cookieTempPath(dataDir string) string {
+	return filepath.Join(dataDir, "signet", ".cookie.tmp")
 }
 
 // node runs the Ark-0 node in the background and keeps track of it.
@@ -204,6 +210,10 @@ func (n *node) runOnce(port int) (string, error) {
 	}
 	if err := os.Remove(cookiePath(n.dataDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", err
+	}
+	path := cookieTempPath(n.dataDir)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("cannot remove temporary cookie %q; remove it before retrying: %w", path, err)
 	}
 	stderr := &tail{limit: 8 << 10}
 	cmd := exec.Command(n.exe, nodeArgs(n.dataDir, port)...)
