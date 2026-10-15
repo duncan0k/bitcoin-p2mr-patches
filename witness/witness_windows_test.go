@@ -24,34 +24,32 @@ func checkCookieOwnerAndLinks(t *testing.T, path string) {
 	if info.NumberOfLinks != 1 {
 		t.Fatalf("cookie has %d links, want one", info.NumberOfLinks)
 	}
-	var owner *syscall.SID
-	var descriptor syscall.Handle
 	getSecurityInfo := syscall.NewLazyDLL("advapi32.dll").NewProc("GetSecurityInfo")
-	// SE_FILE_OBJECT and OWNER_SECURITY_INFORMATION both have value 1.
-	result, _, _ := getSecurityInfo.Call(f.Fd(), 1, 1, uintptr(unsafe.Pointer(&owner)), 0, 0, 0, uintptr(unsafe.Pointer(&descriptor)))
-	if result != 0 {
-		t.Fatal(syscall.Errno(result))
+	ownerSID := func(file *os.File) string {
+		t.Helper()
+		var owner *syscall.SID
+		var descriptor syscall.Handle
+		// SE_FILE_OBJECT and OWNER_SECURITY_INFORMATION both have value 1.
+		result, _, _ := getSecurityInfo.Call(file.Fd(), 1, 1, uintptr(unsafe.Pointer(&owner)), 0, 0, 0, uintptr(unsafe.Pointer(&descriptor)))
+		if result != 0 {
+			t.Fatal(syscall.Errno(result))
+		}
+		defer syscall.LocalFree(descriptor)
+		sid, err := owner.String()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sid
 	}
-	defer syscall.LocalFree(descriptor)
-	ownerSID, err := owner.String()
+	// Elevated administrators can create files owned by the token's default owner, BUILTIN\Administrators.
+	reference, err := os.CreateTemp(filepath.Dir(path), ".cookie-owner-*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := syscall.OpenCurrentProcessToken()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil {
-		t.Fatal(err)
-	}
-	userSID, err := user.User.Sid.String()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ownerSID != userSID {
-		t.Fatalf("cookie owner=%s, want current user=%s", ownerSID, userSID)
+	defer os.Remove(reference.Name())
+	defer reference.Close()
+	if got, want := ownerSID(f), ownerSID(reference); got != want {
+		t.Fatalf("cookie owner=%s, want newly created file owner=%s", got, want)
 	}
 }
 

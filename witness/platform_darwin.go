@@ -19,24 +19,30 @@ import (
 const aclInspectionTimeout = time.Second
 
 func checkFolderACL(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), aclInspectionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
-	cmd.Env = []string{"LC_ALL=C"}
-	data, err := cmd.Output()
-	if err == nil {
-		err = folderACLProblem(string(data))
-	}
-	if err != nil {
+	if err := inspectACL(path, 'd'); err != nil {
 		return fmt.Errorf("unsafe or unreadable access list on folder %q; remove the access list with chmod -N or choose another folder with -datadir: %w", path, err)
 	}
 	return nil
 }
 
+func checkInstanceFileACL(path string) error { return inspectACL(path, '-') }
+
+func inspectACL(path string, kind byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), aclInspectionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/ls", "-led", "--", path)
+	cmd.Env = []string{"LC_ALL=C"}
+	data, err := cmd.Output()
+	if err == nil {
+		err = pathACLProblem(string(data), kind)
+	}
+	return err
+}
+
 func checkDataTreeACL(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), aclInspectionTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/ls", "-leR", "--", path)
+	cmd := exec.CommandContext(ctx, "/bin/ls", "-AleR", "--", path)
 	cmd.Env = []string{"LC_ALL=C"}
 	data, err := cmd.Output()
 	if err != nil {
@@ -68,13 +74,13 @@ func dataTreeACLProblem(dataDir, output string) error {
 	return nil
 }
 
-var folderACLHeader = regexp.MustCompile(`^d[rwxstST-]{9}[+@]?\s+[0-9]+\s+\S.+$`)
-var folderACLEntry = regexp.MustCompile(`^\s+([0-9]+): (user|group):.+ (allow|deny) [a-z_]+(,[a-z_]+)*$`)
+var pathACLHeader = regexp.MustCompile(`^[d-][rwxstST-]{9}[+@]?\s+[0-9]+\s+\S.+$`)
+var pathACLEntry = regexp.MustCompile(`^\s+([0-9]+): (user|group):.+ (allow|deny) [a-z_]+(,[a-z_]+)*$`)
 
-// Only the folder's own line followed by deny entries numbered in order is accepted; any other output is refused.
-func folderACLProblem(output string) error {
+// Only the expected file or folder line followed by deny entries numbered in order is accepted.
+func pathACLProblem(output string, kind byte) error {
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
-	if len(lines) == 0 || !folderACLHeader.MatchString(lines[0]) {
+	if len(lines) == 0 || !pathACLHeader.MatchString(lines[0]) || lines[0][0] != kind {
 		return errors.New("cannot parse ls access list header")
 	}
 	header := strings.Fields(lines[0])
@@ -82,7 +88,7 @@ func folderACLProblem(output string) error {
 		return errors.New("incomplete ls access list header")
 	}
 	if _, err := strconv.ParseUint(header[4], 10, 64); err != nil {
-		return errors.New("cannot parse ls folder size")
+		return errors.New("cannot parse ls file size")
 	}
 	for i, line := range lines[1:] {
 		// ls prints inheritance flags before allow or deny, so every field is checked: no name can hide an allow entry.
@@ -91,7 +97,7 @@ func folderACLProblem(output string) error {
 				return errors.New("contains an allow access control entry")
 			}
 		}
-		entry := folderACLEntry.FindStringSubmatch(line)
+		entry := pathACLEntry.FindStringSubmatch(line)
 		if entry == nil || entry[1] != strconv.Itoa(i) || entry[3] != "deny" {
 			return errors.New("cannot parse ls access control entry")
 		}

@@ -16,6 +16,9 @@ import (
 
 func checkDataTreeACL(string) error { return nil }
 
+// With no group or other permission bits, the POSIX ACL mask grants no named entry access.
+func checkInstanceFileACL(string) error { return nil }
+
 func checkFolderACL(path string) error {
 	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
 		_, err := syscall.Getxattr(path, name, nil)

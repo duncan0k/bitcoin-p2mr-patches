@@ -115,6 +115,9 @@ func readPageFile(path string) ([]byte, error) {
 	if reason := instanceFileProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
 		return nil, fmt.Errorf("unsafe page file %q: %s; delete it or the data folder and retry", path, reason)
 	}
+	if err := checkInstanceFileACL(path); err != nil {
+		return nil, fmt.Errorf("unsafe page file %q: %w; delete it or the data folder and retry", path, err)
+	}
 	return io.ReadAll(io.LimitReader(f, 1024))
 }
 
@@ -159,6 +162,9 @@ func lockInstance(path string) (func(), error) {
 		if reason := instanceFileProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
 			err = errors.New(reason)
 		}
+	}
+	if err == nil {
+		err = checkInstanceFileACL(path)
 	}
 	if err != nil {
 		_ = f.Close()

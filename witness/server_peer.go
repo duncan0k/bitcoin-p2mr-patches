@@ -24,8 +24,18 @@ func (l *pageListener) Accept() (net.Conn, error) {
 		}
 		// Inspect kernel metadata only: a client that sends no data must not hold up Accept.
 		data, err := os.ReadFile("/proc/net/tcp")
-		if err == nil && procTCPAllows(string(data), procTCPAddress(conn.RemoteAddr()), procTCPAddress(conn.LocalAddr()), l.uid) {
-			return conn, nil
+		if err == nil {
+			client, server := procTCPAddress(conn.RemoteAddr()), procTCPAddress(conn.LocalAddr())
+			first := procTCPClient(string(data), client, server, l.uid)
+			// procfs reads state before uid and inode, which can become zero when a socket is orphaned.
+			// close moves it out of ESTABLISHED before orphaning it, so an independent read after parsing
+			// cannot show that closing socket as ESTABLISHED again. Require the same uid and nonzero inode.
+			if first.inode != 0 {
+				data, err = os.ReadFile("/proc/net/tcp")
+				if err == nil && procTCPAllows(first, procTCPClient(string(data), client, server, l.uid)) {
+					return conn, nil
+				}
+			}
 		}
 		_ = conn.Close()
 	}
@@ -39,27 +49,36 @@ func procTCPAddress(addr net.Addr) string {
 	return fmt.Sprintf("%08X:%04X", binary.NativeEndian.Uint32(tcp.IP.To4()), tcp.Port)
 }
 
-// procTCPAllows looks for the client's socket, whose endpoints reverse the accepted socket's endpoints.
-func procTCPAllows(text, client, server string, uid uint32) bool {
+type procTCPPeer struct {
+	uid   uint32
+	inode uint64
+}
+
+func procTCPAllows(first, second procTCPPeer) bool {
+	return first.inode != 0 && first == second
+}
+
+// procTCPClient looks for the client's socket, whose endpoints reverse the accepted socket's endpoints.
+func procTCPClient(text, client, server string, uid uint32) procTCPPeer {
 	if !procTCPHexPair(client, 8, 4) || !procTCPHexPair(server, 8, 4) {
-		return false
+		return procTCPPeer{}
 	}
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	if !scanner.Scan() {
-		return false
+		return procTCPPeer{}
 	}
 	header := strings.Fields(scanner.Text())
 	if len(header) < 12 || header[0] != "sl" || header[1] != "local_address" ||
-		header[2] != "rem_address" || header[3] != "st" || header[9] != "uid" {
-		return false
+		header[2] != "rem_address" || header[3] != "st" || header[9] != "uid" || header[11] != "inode" {
+		return procTCPPeer{}
 	}
-	allowed := false
+	var peer procTCPPeer
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 10 || !strings.HasSuffix(fields[0], ":") ||
 			!procTCPHexPair(fields[1], 8, 4) || !procTCPHexPair(fields[2], 8, 4) ||
 			len(fields[3]) != 2 || !procTCPHexPair(fields[4], 8, 8) || !procTCPHexPair(fields[5], 2, 8) {
-			return false
+			return procTCPPeer{}
 		}
 		for _, number := range []struct {
 			value string
@@ -71,20 +90,22 @@ func procTCPAllows(text, client, server string, uid uint32) bool {
 			{fields[8], 10, 32}, {fields[9], 10, 64},
 		} {
 			if _, err := strconv.ParseUint(number.value, number.base, number.bits); err != nil {
-				return false
+				return procTCPPeer{}
 			}
 		}
 		if fields[1] == client && fields[2] == server {
 			owner, _ := strconv.ParseUint(fields[7], 10, 32)
-			// Only ESTABLISHED counts: closing before this check can leave an orphaned socket in
-			// FIN_WAIT2 or TIME_WAIT with uid 0, which must not authorize a different user's client.
-			if fields[3] != "01" || owner != uint64(uid) && owner != 0 {
-				return false
+			inode, _ := strconv.ParseUint(fields[9], 10, 64)
+			if fields[3] != "01" || owner != uint64(uid) && owner != 0 || inode == 0 {
+				return procTCPPeer{}
 			}
-			allowed = true
+			peer = procTCPPeer{uid: uint32(owner), inode: inode}
 		}
 	}
-	return allowed && scanner.Err() == nil
+	if scanner.Err() != nil {
+		return procTCPPeer{}
+	}
+	return peer
 }
 
 func procTCPHexPair(value string, left, right int) bool {

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestProcTCPAllows(t *testing.T) {
+func TestProcTCPClient(t *testing.T) {
 	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
 	const client = "0100007F:C350"
 	const server = "0100007F:9C40"
@@ -37,10 +37,43 @@ func TestProcTCPAllows(t *testing.T) {
 		{"bad uid", header + strings.Replace(entry, " 1000 ", " user ", 1), false},
 		{"bad queue", header + strings.Replace(entry, "00000000:00000000", "invalid", 1), false},
 		{"bad inode", header + strings.Replace(entry, "12345", "invalid", 1), false},
+		{"zero inode", header + strings.Replace(entry, "12345", "0", 1), false},
 		{"malformed after match", header + entry + "invalid\n", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := procTCPAllows(c.text, client, server, 1000); got != c.want {
+			if got := procTCPClient(c.text, client, server, 1000).inode != 0; got != c.want {
+				t.Fatalf("allowed = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestProcTCPAllows(t *testing.T) {
+	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	const entry = "  1: 0100007F:C350 0100007F:9C40 01 00000000:00000000 00:00000000 00000000 1000 0 12345\n"
+	root := strings.Replace(entry, " 1000 ", " 0 ", 1)
+	zeroInode := strings.Replace(entry, "12345", "0", 1)
+	for _, c := range []struct {
+		name, first, second string
+		want                bool
+	}{
+		{"agreeing user", entry, entry, true},
+		{"agreeing root", root, root, true},
+		{"second closing", entry, strings.Replace(entry, " 01 ", " 04 ", 1), false},
+		{"second root", entry, root, false},
+		{"second user", root, entry, false},
+		{"second foreign uid", entry, strings.Replace(entry, " 1000 ", " 1001 ", 1), false},
+		{"second zero inode", entry, zeroInode, false},
+		{"second different inode", entry, strings.Replace(entry, "12345", "12346", 1), false},
+		{"both zero inode", zeroInode, zeroInode, false},
+		{"closing race", root, strings.Replace(root, " 01 ", " 04 ", 1), false},
+		{"second missing", entry, "", false},
+		{"second malformed", entry, "invalid\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			first := procTCPClient(header+c.first, "0100007F:C350", "0100007F:9C40", 1000)
+			second := procTCPClient(header+c.second, "0100007F:C350", "0100007F:9C40", 1000)
+			if got := procTCPAllows(first, second); got != c.want {
 				t.Fatalf("allowed = %v, want %v", got, c.want)
 			}
 		})
