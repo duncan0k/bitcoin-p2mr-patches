@@ -557,7 +557,7 @@ func (w *folderWalk) check(path string, mode os.FileMode, owner uint32, data boo
 		if owner != 0 && owner != w.uid {
 			return fmt.Errorf("parent folder %q %s; other users could change it; fix its ownership or choose another folder with -datadir", path, reason)
 		}
-		if owner == 0 || !mode.IsDir() {
+		if (owner == 0 && w.uid != 0) || !mode.IsDir() {
 			return fmt.Errorf("parent folder %q %s; other users could change it; choose another folder with -datadir", path, reason)
 		}
 		w.writableParents = append(w.writableParents, path)

@@ -434,6 +434,37 @@ func TestFolderWalk(t *testing.T) {
 	}
 }
 
+func TestFolderWalkRootOwnedParent(t *testing.T) {
+	const parent = "/root-parent"
+	for _, uid := range []uint32{0, 1000} {
+		t.Run("uid "+strconv.Itoa(int(uid)), func(t *testing.T) {
+			walk := folderWalk{uid: uid}
+			err := walk.check(parent, os.ModeDir|0o775, 0, false)
+			if uid != 0 {
+				if err == nil || !strings.Contains(err.Error(), parent) ||
+					!strings.Contains(err.Error(), "-datadir") || strings.Contains(err.Error(), "chmod") {
+					t.Fatalf("root-owned parent must fail immediately without chmod advice: %v", err)
+				}
+				if len(walk.writableParents) != 0 {
+					t.Fatalf("must not collect another owner's parent: %v", walk.writableParents)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("must collect the effective user's writable parent: %v", err)
+			}
+			if len(walk.writableParents) != 1 || walk.writableParents[0] != parent {
+				t.Fatalf("writable parents: %v; want [%s]", walk.writableParents, parent)
+			}
+			err = walk.check(parent+"/data", os.ModeDir|0o700, uid, true)
+			command := "chmod go-w " + shellFolder(parent)
+			if err == nil || !strings.Contains(err.Error(), command) || !strings.Contains(err.Error(), "-datadir") {
+				t.Fatalf("root-owned parent must have chmod advice for root: %v; want %s", err, command)
+			}
+		})
+	}
+}
+
 func TestFolderWalkBelowPrivateParent(t *testing.T) {
 	for _, stickyMode := range []os.FileMode{0o770, 0o777} {
 		walk := folderWalk{uid: 1000}
@@ -659,6 +690,10 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got, err := dataFolder(alias); err != nil || got != want {
 		t.Fatalf("resolved folder: %q %v; want %q", got, err, want)
 	}
@@ -676,7 +711,7 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(root)) {
+	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(resolvedRoot)) {
 		t.Fatalf("other writable parent below private parent: %v", err)
 	}
 	if err := os.Chmod(root, os.ModeSticky|0o777); err != nil {
@@ -688,7 +723,7 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(root)) {
+	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(resolvedRoot)) {
 		t.Fatalf("group writable parent below private parent: %v", err)
 	}
 	if err := os.Chmod(root, 0o700); err != nil {
