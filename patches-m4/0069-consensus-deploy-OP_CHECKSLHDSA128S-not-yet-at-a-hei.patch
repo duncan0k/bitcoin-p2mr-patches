@@ -1,0 +1,337 @@
+From 4a79b89e61a4b4f4bf45dde3b02b0806a80a5d65 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 69/77] consensus: deploy OP_CHECKSLHDSA128S, not yet at a
+ height on Ark-0
+
+A buried deployment, p2mr_slhdsa128s, sets SCRIPT_VERIFY_P2MR_SLHDSA128S
+on blocks at or above its height where P2MR is active too.
+
+- On the Ark-0 signet the height is a rule of that network,
+  ARK0_SLHDSA128S_HEIGHT. It is not decided yet: it is to be set at the
+  release, from the chain height then, together with the final
+  validation weight. Until then it is std::numeric_limits<int>::max(), so
+  this build never activates the rules on Ark-0, and a unit test later in
+  this series checks exactly that. A static_assert keeps it above the
+  height of the P2MR tripwire rules.
+- Another custom signet gets the rules from -signetslhdsa128s=<height>,
+  which requires -signetchallenge and which Ark-0 refuses. A node refuses
+  to start with it on any other chain, whatever its value.
+- Regtest activates them at genesis unless
+  -testactivationheight=p2mr_slhdsa128s@N says otherwise.
+- Mainnet, testnet3, testnet4 and the default signet never activate them.
+
+getdeploymentinfo reports the deployment, and a node where it is enabled
+logs "P2MR SLH-DSA-SHA2-128s rules active from height N (leaf versions
+0xc0, 0xe0)" at startup.
+---
+ src/chainparams.cpp               | 27 +++++++++++++++++++++++++--
+ src/chainparamsbase.cpp           |  3 ++-
+ src/consensus/params.h            |  9 ++++++++-
+ src/deploymentinfo.cpp            |  4 ++++
+ src/init.cpp                      |  6 ++++++
+ src/kernel/chainparams.cpp        | 16 ++++++++++++++++
+ src/kernel/chainparams.h          | 22 ++++++++++++++++++++++
+ src/rpc/blockchain.cpp            |  1 +
+ src/validation.cpp                |  6 ++++++
+ test/functional/rpc_blockchain.py |  3 ++-
+ 10 files changed, 92 insertions(+), 5 deletions(-)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 35114b2..9d0c10c 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -156,6 +156,26 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.mldsa44_height = *height;
+     }
++    if (!args.GetArgs("-signetslhdsa128s").empty()) {
++        const auto values = args.GetArgs("-signetslhdsa128s");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetslhdsa128s cannot be multiple values.");
++        }
++        if (!options.challenge) {
++            throw std::runtime_error("-signetslhdsa128s requires -signetchallenge.");
++        }
++        if (IsArk0SignetChallenge(*options.challenge)) {
++            throw std::runtime_error("-signetslhdsa128s cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++        }
++        const auto height{ToIntegral<int32_t>(values[0])};
++        if (!height) {
++            throw std::runtime_error(strprintf("-signetslhdsa128s must be a height, not '%s'.", values[0]));
++        }
++        if (*height < 1 || *height == std::numeric_limits<int>::max()) {
++            throw std::runtime_error(strprintf("-signetslhdsa128s height must be at least 1 and below %d, not %d.", std::numeric_limits<int>::max(), *height));
++        }
++        options.slhdsa128s_height = *height;
++    }
+     if (auto tripwire{ReadTripwireArg(args)}) {
+         if (!options.challenge) {
+             throw std::runtime_error("-signettripwire requires -signetchallenge.");
+@@ -264,11 +284,14 @@ const CChainParams &Params() {
+ 
+ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
+ {
+-    // The options of OP_CHECKMLDSA44 on a signet and of the P2MR tripwire rules (doc/p2mr-tripwire.md)
+-    // are refused, whatever their value, on the chains they are not for.
++    // The options of OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S on a signet and of the P2MR tripwire rules
++    // (doc/p2mr-tripwire.md) are refused, whatever their value, on the chains they are not for.
+     if (chain != ChainType::SIGNET && args.IsArgSet("-signetmldsa44")) {
+         throw std::runtime_error("-signetmldsa44 can only be used with signet.");
+     }
++    if (chain != ChainType::SIGNET && args.IsArgSet("-signetslhdsa128s")) {
++        throw std::runtime_error("-signetslhdsa128s can only be used with signet.");
++    }
+     if (chain != ChainType::SIGNET && chain != ChainType::REGTEST && args.IsArgSet("-signettripwire")) {
+         throw std::runtime_error("-signettripwire can only be used with signet or regtest.");
+     }
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index 38c27d1..61e5716 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+@@ -27,6 +27,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetpqblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1) to also carry an ML-DSA-44 signature by <pubkey> (1312 bytes, hex) in its witness commitment output; see doc/signet-pqblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetmldsa44=<height>", "Execute OP_CHECKMLDSA44 in P2MR leaves from <height> (at least 1) on; see doc/p2mr-mldsa44.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signettripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe0 from <height> (at least 1) on, and from there fail their elliptic curve signature checks in every block whose parent leaves one of these tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge and -signetmldsa44 below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_tripwire, which must be above that of p2mr_mldsa44 (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetslhdsa128s=<height>", "Execute OP_CHECKSLHDSA128S in P2MR leaves from <height> (at least 1) on; see doc/p2mr-slhdsa128s.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+ static std::unique_ptr<CBaseChainParams> globalChainBaseParams;
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index c9dbe0e..ccf4cc7 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -34,8 +34,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_P2MR,
+     DEPLOYMENT_P2MR_MLDSA44,
+     DEPLOYMENT_P2MR_TRIPWIRE,
++    DEPLOYMENT_P2MR_SLHDSA128S,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_TRIPWIRE; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_SLHDSA128S; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -154,6 +155,10 @@ struct Params {
+      * but the Ark-0 signet (where it is not set yet), a custom signet given -signettripwire,
+      * and regtest. */
+     int P2MRTripwireHeight;
++    /** Block height at which OP_CHECKSLHDSA128S executes in P2MR leaves (doc/p2mr-slhdsa128s.md).
++     * std::numeric_limits<int>::max() on every chain but the Ark-0 signet (where it is not set
++     * yet, so never), a custom signet given -signetslhdsa128s, and regtest. */
++    int P2MRSLHDSA128SHeight;
+     /** Don't warn about unknown BIP 9 activations below this height.
+      * This prevents us from warning about the CSV and segwit activations. */
+     int MinBIP9WarningHeight;
+@@ -235,6 +240,8 @@ struct Params {
+             return P2MRMLDSA44Height;
+         case DEPLOYMENT_P2MR_TRIPWIRE:
+             return P2MRTripwireHeight;
++        case DEPLOYMENT_P2MR_SLHDSA128S:
++            return P2MRSLHDSA128SHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index b90f6d0..797d024 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -39,6 +39,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "p2mr_mldsa44";
+     case Consensus::DEPLOYMENT_P2MR_TRIPWIRE:
+         return "p2mr_tripwire";
++    case Consensus::DEPLOYMENT_P2MR_SLHDSA128S:
++        return "p2mr_slhdsa128s";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -61,6 +63,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_MLDSA44;
+     } else if (name == "p2mr_tripwire") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_TRIPWIRE;
++    } else if (name == "p2mr_slhdsa128s") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index c348446..8803d8a 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -963,6 +963,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+     if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_MLDSA44)) {
+         LogInfo("P2MR ML-DSA-44 rules active from height %d", chainparams.GetConsensus().P2MRMLDSA44Height);
+     }
++    // OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) is only enabled on a signet given
++    // -signetslhdsa128s and on regtest, and on the Ark-0 signet once its height is set. It executes
++    // in the leaf versions that execute as tapscript: 0xc0, and 0xe0 from the P2MR tripwire height.
++    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
++        LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0)", chainparams.GetConsensus().P2MRSLHDSA128SHeight);
++    }
+ 
+     // Warn if unrecognized section name are present in the config file.
+     bilingual_str warnings;
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 74626fc..af4007a 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -199,6 +199,7 @@ public:
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on mainnet
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
++        consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -333,6 +334,7 @@ public:
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet3
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
++        consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -443,6 +445,7 @@ public:
+         consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet4
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
++        consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -607,6 +610,15 @@ public:
+         } else {
+             consensus.P2MRMLDSA44Height = std::ranges::equal(bin, ARK0_SIGNET_CHALLENGE) ? ARK0_MLDSA44_HEIGHT : std::numeric_limits<int>::max();
+         }
++        // OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md): on the Ark-0 signet from the
++        // height this code fixes for that network, which is not set yet, so never; on another custom
++        // signet only from the height -signetslhdsa128s gives. ReadSigNetArgs refuses the option on Ark-0.
++        if (options.slhdsa128s_height) {
++            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge));
++            consensus.P2MRSLHDSA128SHeight = *options.slhdsa128s_height;
++        } else {
++            consensus.P2MRSLHDSA128SHeight = IsArk0SignetChallenge(bin) ? ARK0_SLHDSA128S_HEIGHT : std::numeric_limits<int>::max();
++        }
+         // Leaf version 0xe0 and its tripwire outputs (doc/p2mr-tripwire.md): on the Ark-0 signet as
+         // this code fixes them, on another custom signet only as -signettripwire gives them, which
+         // ReadSigNetArgs refuses on Ark-0 and accepts only above the height of OP_CHECKMLDSA44.
+@@ -747,6 +759,7 @@ public:
+         consensus.P2MRHeight = 0;   // Always active unless overridden
+         consensus.P2MRMLDSA44Height = 0; // Always active unless overridden
+         consensus.P2MRTripwireHeight = 0; // Always active unless overridden, without tripwire outputs
++        consensus.P2MRSLHDSA128SHeight = 0; // Always active unless overridden
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -807,6 +820,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_TRIPWIRE:
+                 consensus.P2MRTripwireHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S:
++                consensus.P2MRSLHDSA128SHeight = int{height};
++                break;
+             }
+         }
+         // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index bcdd31f..f85cea9 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -59,6 +59,22 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
+ // Leaf version 0xe0 runs OP_CHECKMLDSA44, which has to be active before the leaves are.
+ static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
+ 
++/**
++ * Height from which the Ark-0 signet executes OP_CHECKSLHDSA128S in P2MR leaves
++ * (doc/p2mr-slhdsa128s.md). Like the heights above, a rule of that network, fixed here
++ * rather than given by an option.
++ *
++ * NOT SET YET: H4 is decided at release (H4 = the chain height then + 7 * 960, rounded up
++ * to a multiple of 1000), together with the final VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK.
++ * Until then it is std::numeric_limits<int>::max(), so this build never activates M4-S on
++ * Ark-0, and a unit test (p2mr_slhdsa128s_tests) checks exactly that. Setting it is a change
++ * of its own; once set, it does not change after a build carrying it has left the network's
++ * own nodes.
++ */
++inline constexpr int ARK0_SLHDSA128S_HEIGHT{std::numeric_limits<int>::max()};
++// M4 follows M3: H1 < H2 < H3 < H4.
++static_assert(ARK0_SLHDSA128S_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
++
+ /** Height of the block that created both tripwire outputs of the Ark-0 signet. */
+ inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
+ // An output counts as present only when it was created below the height of the rules.
+@@ -210,6 +226,12 @@ public:
+          * below its height.
+          */
+         std::optional<TripwireOptions> tripwire{};
++        /**
++         * Height from which OP_CHECKSLHDSA128S executes (-signetslhdsa128s,
++         * doc/p2mr-slhdsa128s.md). Only accepted together with a challenge of
++         * its own that is not the Ark-0 signet's.
++         */
++        std::optional<int> slhdsa128s_height{};
+     };
+ 
+     /**
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 15dca2c..8c349c9 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1484,6 +1484,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+diff --git a/src/validation.cpp b/src/validation.cpp
+index c46c1f7..0331ad7 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2419,6 +2419,12 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_P2MR_TRIPWIRE;
+     }
+ 
++    // Enforce OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md), which needs P2MR
++    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR) &&
++        DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
++        flags |= SCRIPT_VERIFY_P2MR_SLHDSA128S;
++    }
++
+     return flags;
+ }
+ 
+diff --git a/test/functional/rpc_blockchain.py b/test/functional/rpc_blockchain.py
+index d8d2b19..c331fdd 100755
+--- a/test/functional/rpc_blockchain.py
++++ b/test/functional/rpc_blockchain.py
+@@ -213,7 +213,7 @@ class BlockchainTest(BitcoinTestFramework):
+         assert_equal(gdi_result, {
+           "hash": blockhash,
+           "height": height,
+-          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2MR_MLDSA44","P2MR_TRIPWIRE","P2SH","TAPROOT","WITNESS"],
++          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2MR_MLDSA44","P2MR_SLHDSA128S","P2MR_TRIPWIRE","P2SH","TAPROOT","WITNESS"],
+           "deployments": {
+             'bip34': {'type': 'buried', 'active': True, 'height': 2},
+             'bip66': {'type': 'buried', 'active': True, 'height': 3},
+@@ -223,6 +223,7 @@ class BlockchainTest(BitcoinTestFramework):
+             'p2mr': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_mldsa44': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_tripwire': {'type': 'buried', 'active': True, 'height': 0},
++            'p2mr_slhdsa128s': {'type': 'buried', 'active': True, 'height': 0},
+             'testdummy': {
+                 'type': 'bip9',
+                 'bip9': {
+-- 
+2.43.0
+

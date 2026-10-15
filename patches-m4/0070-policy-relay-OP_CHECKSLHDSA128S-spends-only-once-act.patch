@@ -1,0 +1,176 @@
+From 5a25983bf211883630b8b4fb124fd6dbe57e901f Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 70/77] policy: relay OP_CHECKSLHDSA128S spends only once
+ active, and in one template
+
+- SCRIPT_VERIFY_P2MR_SLHDSA128S joins the mandatory, and so the standard,
+  script verification flags, but the mempool leaves it out while the
+  next block is below the activation height. There the byte is still an
+  OP_SUCCESSx, and DISCOURAGE_OP_SUCCESS keeps every spend that executes
+  it out of the mempool, validly signed or not, -acceptnonstdtxn or not:
+  an output that is not protected yet is not relayed as if it were.
+- A reorganization that puts the next block back below the activation
+  height removes the transactions that execute the opcode in a P2MR leaf
+  of version 0xc0 or 0xe0, with their descendants. A node with
+  -acceptnonstdtxn=1 can hold spends of other scripts than the template,
+  so the test is any executed leaf whose opcodes include
+  OP_CHECKSLHDSA128S.
+- P2MR leaves keep the 80-byte limit on witness elements, except for the
+  sixteen signature chunks of one leaf template, byte for byte:
+  SLH1 <32-byte public key> OP_CHECKSLHDSA128S. The chunks must be the
+  whole initial stack and have their exact sizes, and the leaf must be at
+  depth one or more, of version 0xc0 or 0xe0. Any other leaf that uses
+  the opcode is not standard, whatever its elements.
+---
+ src/policy/policy.cpp | 41 ++++++++++++++++++++++++++++++++++++++---
+ src/policy/policy.h   |  5 ++++-
+ src/validation.cpp    | 22 ++++++++++++++++++++++
+ 3 files changed, 64 insertions(+), 4 deletions(-)
+
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 89d0447..74a3268 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -286,6 +286,32 @@ bool HasMLDSA44Opcode(std::span<const unsigned char> script)
+     return false;
+ }
+ 
++bool HasSLHDSA128SOpcode(std::span<const unsigned char> script)
++{
++    const CScript leaf{script.begin(), script.end()};
++    opcodetype opcode;
++    for (CScript::const_iterator pc{leaf.begin()}; leaf.GetOp(pc, opcode);) {
++        if (opcode == OP_CHECKSLHDSA128S) return true;
++    }
++    return false;
++}
++
++/** Whether a P2MR leaf script is the OP_CHECKSLHDSA128S template SLH1 of doc/p2mr-slhdsa128s.md,
++ *  byte for byte apart from the key: <32-byte public key> OP_CHECKSLHDSA128S. */
++static bool IsSLHDSA128STemplate(std::span<const unsigned char> script)
++{
++    return script.size() == 2 + SLHDSA128S_PUBKEY_SIZE && script[0] == SLHDSA128S_PUBKEY_SIZE && script.back() == OP_CHECKSLHDSA128S;
++}
++
++/** Whether a size is that of the signature chunk at index `index` (0 to 15) of OP_CHECKSLHDSA128S. */
++static bool IsSLHDSA128SSigChunkSize(size_t index, size_t size)
++{
++    if (index >= SLHDSA128S_SIG_CHUNK_SIZES.size()) return false;
++    // The last chunk may end in an explicit hash type.
++    const bool last{index + 1 == SLHDSA128S_SIG_CHUNK_SIZES.size()};
++    return size == SLHDSA128S_SIG_CHUNK_SIZES[index] || (last && size == SLHDSA128S_SIG_CHUNK_SIZES[index] + 1);
++}
++
+ /** Whether a size is that of the signature chunk at index `index` (0 to 4) of OP_CHECKMLDSA44. */
+ static bool IsMLDSA44SigChunkSize(size_t index, size_t size)
+ {
+@@ -413,16 +439,25 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 // below hold at every height, at depth zero too, where a node without these rules has none:
+                 // policy with no boundary at that height, past which the mempool would need checking again.
+                 // A leaf that is executed (m >= 1) may use OP_CHECKMLDSA44 only as one of its two templates,
+-                // whose ML-DSA-44 signature chunks may then have their sizes (doc/p2mr-mldsa44.md).
++                // whose ML-DSA-44 signature chunks may then have their sizes (doc/p2mr-mldsa44.md), and
++                // OP_CHECKSLHDSA128S only as its template SLH1, whose sixteen SLH-DSA-SHA2-128s signature
++                // chunks, the whole initial stack, may then have theirs (doc/p2mr-slhdsa128s.md). Like the
++                // rest, this holds at every height: before OP_CHECKSLHDSA128S is active, the mempool's
++                // script checks turn away any leaf that executes it, as one with an OP_SUCCESSx.
+                 std::optional<size_t> sig_chunks_at;
++                bool slhdsa128s_template{false};
+                 if (control_block.size() > P2MR_CONTROL_BASE_SIZE) {
+                     sig_chunks_at = MatchMLDSA44Template(script);
+                     if (!sig_chunks_at && HasMLDSA44Opcode(script)) return false;
++                    slhdsa128s_template = IsSLHDSA128STemplate(script);
++                    if (!slhdsa128s_template && HasSLHDSA128SOpcode(script)) return false;
+                 }
+                 if (sig_chunks_at && stack.size() != *sig_chunks_at + MLDSA44_SIG_CHUNK_SIZES.size()) sig_chunks_at.reset();
++                if (slhdsa128s_template && stack.size() != SLHDSA128S_SIG_CHUNK_SIZES.size()) slhdsa128s_template = false;
+                 for (size_t j = 0; j < stack.size(); ++j) {
+-                    if (sig_chunks_at && j >= *sig_chunks_at && IsMLDSA44SigChunkSize(j - *sig_chunks_at, stack[j].size())) continue;
+-                    if (stack[j].size() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) return false;
++                    if (stack[j].size() <= MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) continue;
++                    if (slhdsa128s_template && IsSLHDSA128SSigChunkSize(j, stack[j].size())) continue;
++                    if (!sig_chunks_at || j < *sig_chunks_at || !IsMLDSA44SigChunkSize(j - *sig_chunks_at, stack[j].size())) return false;
+                 }
+             }
+         }
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index d249515..308f4d1 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -111,7 +111,8 @@ static constexpr script_verify_flags MANDATORY_SCRIPT_VERIFY_FLAGS{SCRIPT_VERIFY
+                                                              SCRIPT_VERIFY_TAPROOT |
+                                                              SCRIPT_VERIFY_P2MR |
+                                                              SCRIPT_VERIFY_P2MR_MLDSA44 |
+-                                                             SCRIPT_VERIFY_P2MR_TRIPWIRE};
++                                                             SCRIPT_VERIFY_P2MR_TRIPWIRE |
++                                                             SCRIPT_VERIFY_P2MR_SLHDSA128S};
+ 
+ /**
+  * Standard script verification flags that standard transactions will comply
+@@ -176,6 +177,8 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
+ /** Whether a script has OP_CHECKMLDSA44 among its opcodes; a 0xf0 byte inside pushed data does not count. */
+ bool HasMLDSA44Opcode(std::span<const unsigned char> script);
++/** Whether a script has OP_CHECKSLHDSA128S among its opcodes; a 0xf1 byte inside pushed data does not count. */
++bool HasSLHDSA128SOpcode(std::span<const unsigned char> script);
+ /**
+  * Check whether this transaction spends any witness program but P2A, including not-yet-defined ones.
+  * May return `false` early for consensus-invalid transactions.
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 0331ad7..77820dc 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -324,6 +324,15 @@ static bool SpendsP2MRMLDSA44Leaf(const CTransaction& tx, const CCoinsView& view
+     });
+ }
+ 
++/** Whether an input of the transaction executes a P2MR leaf (leaf version 0xc0, or 0xe0, depth one
++ *  or more) that has OP_CHECKSLHDSA128S among its opcodes (doc/p2mr-slhdsa128s.md). */
++static bool SpendsP2MRSLHDSA128SLeaf(const CTransaction& tx, const CCoinsView& view)
++{
++    return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char> script) {
++        return (leaf_version == TAPROOT_LEAF_TAPSCRIPT || leaf_version == P2MR_LEAF_TRIPWIRED) && HasSLHDSA128SOpcode(script);
++    });
++}
++
+ /** Whether an input of the transaction spends a P2MR output through a leaf of version 0xe0 at depth
+  *  one or more, which executes once the P2MR tripwire rules apply (doc/p2mr-tripwire.md). */
+ static bool SpendsP2MRTripwiredLeaf(const CTransaction& tx, const CCoinsView& view)
+@@ -349,6 +358,13 @@ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoi
+     if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)) {
+         flags &= ~SCRIPT_VERIFY_P2MR_TRIPWIRE;
+     }
++    // And until OP_CHECKSLHDSA128S is active for the next block, its byte stays OP_SUCCESS241, which
++    // DISCOURAGE_OP_SUCCESS keeps out of the mempool, whatever the signature, -acceptnonstdtxn or
++    // not (doc/p2mr-slhdsa128s.md): an SLH-DSA leaf that is not yet protected is not relayed as if
++    // it were.
++    if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
++        flags &= ~SCRIPT_VERIFY_P2MR_SLHDSA128S;
++    }
+     // Elliptic curve checks in those leaves fail as they will in the next block. Whether a tripwire
+     // output is missing is read from the confirmed UTXO set: a spend of one that is only in the
+     // mempool changes nothing until a block confirms it.
+@@ -430,6 +446,11 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // executes nothing (doc/p2mr-tripwire.md): its spends at depth one or more are removed.
+     const bool remove_tripwired_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE) &&
+                                        !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE)};
++    // Likewise below its activation height OP_CHECKSLHDSA128S is OP_SUCCESS241 again
++    // (doc/p2mr-slhdsa128s.md): the spends that execute it in a P2MR leaf are removed, whatever the
++    // script around it, so on a node with -acceptnonstdtxn=1 too.
++    const bool remove_slhdsa128s_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S) &&
++                                        !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S)};
+     // And where the reorganized chain leaves elliptic curve checks in such leaves failing for the
+     // next block, every spend through one is checked again, whatever the state was before: ConnectTip
+     // checks none during a reorganization, because the parents some of these spends need were in
+@@ -455,6 +476,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+ 
+         if (remove_mldsa44_spends && SpendsP2MRMLDSA44Leaf(tx, mempool_view)) return true;
+         if (remove_tripwired_spends && SpendsP2MRTripwiredLeaf(tx, mempool_view)) return true;
++        if (remove_slhdsa128s_spends && SpendsP2MRSLHDSA128SLeaf(tx, mempool_view)) return true;
+         if (recheck_tripwired_spends && TripwiredSpendFails(tx, mempool_view, tripwired_flags, m_chainman.m_validation_cache)) return true;
+ 
+         // The transaction must be final.
+-- 
+2.43.0
+

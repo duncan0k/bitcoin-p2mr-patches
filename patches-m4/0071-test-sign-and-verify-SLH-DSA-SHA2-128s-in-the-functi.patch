@@ -1,0 +1,589 @@
+From 5ee50992a1bdc035cfa97dd10f988df2de6df22d Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 71/77] test: sign and verify SLH-DSA-SHA2-128s in the
+ functional test framework
+
+- test_framework/crypto/slhdsa128s.py implements SLH-DSA-SHA2-128s of
+  FIPS 205: key generation, pure and internal signing and verification.
+  It is written for this framework from the standard, for this one
+  parameter set, and shares no code with the slhdsa-c library the node
+  uses, so that each checks the other. It passes NIST ACVP-Server's
+  SLH-DSA-SHA2-128s keyGen (10), sigVer (28, external pure and internal)
+  and sigGen (28, deterministic and randomized) vectors, and its
+  deterministic signature on the fixture of slhdsa128s_tests is the one
+  @noble/post-quantum 0.7.1 made. A signature takes a few seconds: it
+  hashes from a SHA-256 state that has absorbed the PK.seed block, as FIPS
+  205 allows, and builds each tree once.
+- test_framework/p2mr_slhdsa128s.py builds the leaf SLH1, the tree, the
+  signature chunks and the signature message of OP_CHECKSLHDSA128S.
+---
+ .../test_framework/crypto/slhdsa128s.py       | 422 ++++++++++++++++++
+ .../test_framework/p2mr_slhdsa128s.py         | 126 ++++++
+ 2 files changed, 548 insertions(+)
+ create mode 100644 test/functional/test_framework/crypto/slhdsa128s.py
+ create mode 100644 test/functional/test_framework/p2mr_slhdsa128s.py
+
+diff --git a/test/functional/test_framework/crypto/slhdsa128s.py b/test/functional/test_framework/crypto/slhdsa128s.py
+new file mode 100644
+index 0000000..8ef6461
+--- /dev/null
++++ b/test/functional/test_framework/crypto/slhdsa128s.py
+@@ -0,0 +1,422 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""SLH-DSA-SHA2-128s (FIPS 205) for the functional test framework. Test-only code, not constant time.
++
++Written for this test framework from the text of FIPS 205, for one parameter set only:
++SLH-DSA-SHA2-128s, n = 16, h = 63, d = 7, h' = 9, a = 12, k = 14, lg_w = 4, m = 30, with the
++SHA2 functions of security category 1 (FIPS 205 section 11.2.1). It shares no code with the
++slhdsa-c library the node uses, so that each checks the other. The algorithm numbers in the
++comments are those of FIPS 205.
++
++Signing builds every XMSS and FORS tree it needs in full, bottom up, and hashes with
++hashlib's SHA-256 from a copy of the state that has absorbed the 64-byte block
++PK.seed || 0^48, as FIPS 205 allows. A signature takes a few seconds.
++"""
++
++import hashlib
++import hmac
++
++N = 16
++H = 63
++D = 7
++HP = 9
++A = 12
++K = 14
++LG_W = 4
++W = 1 << LG_W
++M = 30
++LEN1 = 32
++LEN2 = 3
++LEN = LEN1 + LEN2
++
++PUBKEY_SIZE = 2 * N
++SECKEY_SIZE = 4 * N
++SIGNATURE_SIZE = (1 + K * (1 + A) + H + D * LEN) * N
++assert SIGNATURE_SIZE == 7856
++
++# Address types (FIPS 205 section 4.2).
++WOTS_HASH = 0
++WOTS_PK = 1
++TREE = 2
++FORS_TREE = 3
++FORS_ROOTS = 4
++WOTS_PRF = 5
++FORS_PRF = 6
++
++
++class _Adrs:
++    """The 32-byte address of FIPS 205 section 4.2, with its 22-byte compressed form ADRSc."""
++
++    def __init__(self):
++        self.layer = 0
++        self.tree = 0
++        self.type = 0
++        self.w1 = 0  # key pair address
++        self.w2 = 0  # chain address, tree height
++        self.w3 = 0  # hash address, tree index
++
++    def copy(self):
++        other = _Adrs()
++        other.layer, other.tree, other.type = self.layer, self.tree, self.type
++        other.w1, other.w2, other.w3 = self.w1, self.w2, self.w3
++        return other
++
++    def set_type_and_clear(self, t):
++        self.type = t
++        self.w1 = self.w2 = self.w3 = 0
++
++    def compressed(self):
++        # ADRSc = ADRS[3] || ADRS[8:16] || ADRS[19] || ADRS[20:32]
++        return (bytes([self.layer & 0xff]) + (self.tree & ((1 << 64) - 1)).to_bytes(8, "big") +
++                bytes([self.type]) + self.w1.to_bytes(4, "big") + self.w2.to_bytes(4, "big") +
++                self.w3.to_bytes(4, "big"))
++
++
++def _base_2b(x, b, out_len):
++    """Algorithm 4: base_2b(X, b, out_len)."""
++    out = []
++    bits = 0
++    total = 0
++    pos = 0
++    for _ in range(out_len):
++        while bits < b:
++            total = (total << 8) | x[pos]
++            pos += 1
++            bits += 8
++        bits -= b
++        out.append((total >> bits) & ((1 << b) - 1))
++    return out
++
++
++def _mgf1_sha256(seed, length):
++    out = b""
++    counter = 0
++    while len(out) < length:
++        out += hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
++        counter += 1
++    return out[:length]
++
++
++class _Ctx:
++    """Hash functions keyed by PK.seed (FIPS 205 section 11.2.1, security category 1)."""
++
++    def __init__(self, pk_seed, sk_seed=None):
++        assert len(pk_seed) == N
++        self.pk_seed = pk_seed
++        self.sk_seed = sk_seed
++        self.base = hashlib.sha256(pk_seed + bytes(64 - N))
++
++    def _hash(self, adrsc, data):
++        h = self.base.copy()
++        h.update(adrsc + data)
++        return h.digest()[:N]
++
++    def f(self, adrs, m1):
++        return self._hash(adrs.compressed(), m1)
++
++    def h(self, adrs, m1, m2):
++        return self._hash(adrs.compressed(), m1 + m2)
++
++    def t(self, adrs, m):
++        return self._hash(adrs.compressed(), m)
++
++    def prf(self, adrs):
++        return self._hash(adrs.compressed(), self.sk_seed)
++
++    def chain(self, x, i, s, adrs):
++        """Algorithm 5: chain(X, i, s, PK.seed, ADRS), with the address bytes but the hash address
++        fixed for the loop."""
++        if s == 0:
++            return x
++        prefix = adrs.compressed()[:18]
++        tmp = x
++        for j in range(i, i + s):
++            h = self.base.copy()
++            h.update(prefix + j.to_bytes(4, "big") + tmp)
++            tmp = h.digest()[:N]
++        adrs.w3 = i + s - 1
++        return tmp
++
++
++def _h_msg(r, pk_seed, pk_root, m):
++    return _mgf1_sha256(r + pk_seed + hashlib.sha256(r + pk_seed + pk_root + m).digest(), M)
++
++
++def _prf_msg(sk_prf, opt_rand, m):
++    return hmac.new(sk_prf, opt_rand + m, hashlib.sha256).digest()[:N]
++
++
++def _wots_digits(m):
++    """The base-w digits of a WOTS+ message and of its checksum (Algorithms 7 and 8)."""
++    msg = _base_2b(m, LG_W, LEN1)
++    csum = sum(W - 1 - v for v in msg)
++    csum <<= (8 - ((LEN2 * LG_W) % 8)) % 8
++    return msg + _base_2b(csum.to_bytes((LEN2 * LG_W + 7) // 8, "big"), LG_W, LEN2)
++
++
++def _wots_pk_gen(ctx, adrs):
++    """Algorithm 6: wots_pkGen(SK.seed, PK.seed, ADRS)."""
++    sk_adrs = adrs.copy()
++    sk_adrs.set_type_and_clear(WOTS_PRF)
++    sk_adrs.w1 = adrs.w1
++    tmp = b""
++    for i in range(LEN):
++        sk_adrs.w2 = i
++        sk = ctx.prf(sk_adrs)
++        adrs.w2 = i
++        tmp += ctx.chain(sk, 0, W - 1, adrs)
++    pk_adrs = adrs.copy()
++    pk_adrs.set_type_and_clear(WOTS_PK)
++    pk_adrs.w1 = adrs.w1
++    return ctx.t(pk_adrs, tmp)
++
++
++def _wots_sign(ctx, m, adrs):
++    """Algorithm 7: wots_sign(M, SK.seed, PK.seed, ADRS)."""
++    digits = _wots_digits(m)
++    sk_adrs = adrs.copy()
++    sk_adrs.set_type_and_clear(WOTS_PRF)
++    sk_adrs.w1 = adrs.w1
++    sig = b""
++    for i in range(LEN):
++        sk_adrs.w2 = i
++        sk = ctx.prf(sk_adrs)
++        adrs.w2 = i
++        sig += ctx.chain(sk, 0, digits[i], adrs)
++    return sig
++
++
++def _wots_pk_from_sig(ctx, sig, m, adrs):
++    """Algorithm 8: wots_pkFromSig(sig, M, PK.seed, ADRS)."""
++    digits = _wots_digits(m)
++    tmp = b""
++    for i in range(LEN):
++        adrs.w2 = i
++        tmp += ctx.chain(sig[i * N:(i + 1) * N], digits[i], W - 1 - digits[i], adrs)
++    pk_adrs = adrs.copy()
++    pk_adrs.set_type_and_clear(WOTS_PK)
++    pk_adrs.w1 = adrs.w1
++    return ctx.t(pk_adrs, tmp)
++
++
++def _xmss_tree(ctx, adrs):
++    """Every node of the XMSS tree at ADRS's layer and tree address, as levels[z][i] = xmss_node(i, z)
++    of Algorithm 9."""
++    leaves = []
++    for i in range(1 << HP):
++        leaf_adrs = adrs.copy()
++        leaf_adrs.set_type_and_clear(WOTS_HASH)
++        leaf_adrs.w1 = i
++        leaves.append(_wots_pk_gen(ctx, leaf_adrs))
++    levels = [leaves]
++    for z in range(1, HP + 1):
++        below = levels[-1]
++        level = []
++        for i in range(len(below) // 2):
++            node_adrs = adrs.copy()
++            node_adrs.set_type_and_clear(TREE)
++            node_adrs.w2 = z
++            node_adrs.w3 = i
++            level.append(ctx.h(node_adrs, below[2 * i], below[2 * i + 1]))
++        levels.append(level)
++    return levels
++
++
++def _xmss_sign(ctx, m, idx, adrs):
++    """Algorithm 10: xmss_sign(M, SK.seed, idx, PK.seed, ADRS). Also returns the tree's root."""
++    levels = _xmss_tree(ctx, adrs)
++    auth = b"".join(levels[j][(idx >> j) ^ 1] for j in range(HP))
++    sig_adrs = adrs.copy()
++    sig_adrs.set_type_and_clear(WOTS_HASH)
++    sig_adrs.w1 = idx
++    return _wots_sign(ctx, m, sig_adrs) + auth, levels[HP][0]
++
++
++def _xmss_pk_from_sig(ctx, idx, sig_xmss, m, adrs):
++    """Algorithm 11: xmss_pkFromSig(idx, SIG_XMSS, M, PK.seed, ADRS)."""
++    adrs.set_type_and_clear(WOTS_HASH)
++    adrs.w1 = idx
++    node = _wots_pk_from_sig(ctx, sig_xmss[:LEN * N], m, adrs)
++    auth = sig_xmss[LEN * N:]
++    adrs.set_type_and_clear(TREE)
++    adrs.w3 = idx
++    for k in range(HP):
++        adrs.w2 = k + 1
++        node_auth = auth[k * N:(k + 1) * N]
++        if (idx >> k) & 1 == 0:
++            adrs.w3 = adrs.w3 // 2
++            node = ctx.h(adrs, node, node_auth)
++        else:
++            adrs.w3 = (adrs.w3 - 1) // 2
++            node = ctx.h(adrs, node_auth, node)
++    return node
++
++
++def _ht_sign(ctx, m, idx_tree, idx_leaf):
++    """Algorithm 12: ht_sign(M, SK.seed, PK.seed, idx_tree, idx_leaf)."""
++    adrs = _Adrs()
++    adrs.tree = idx_tree
++    sig, root = _xmss_sign(ctx, m, idx_leaf, adrs)
++    sig_ht = sig
++    for j in range(1, D):
++        idx_leaf = idx_tree % (1 << HP)
++        idx_tree >>= HP
++        adrs.layer = j
++        adrs.tree = idx_tree
++        sig, root = _xmss_sign(ctx, root, idx_leaf, adrs)
++        sig_ht += sig
++    return sig_ht
++
++
++def _ht_verify(ctx, m, sig_ht, idx_tree, idx_leaf, pk_root):
++    """Algorithm 13: ht_verify(M, SIG_HT, PK.seed, idx_tree, idx_leaf, PK.root)."""
++    size = (HP + LEN) * N
++    adrs = _Adrs()
++    adrs.tree = idx_tree
++    node = _xmss_pk_from_sig(ctx, idx_leaf, sig_ht[:size], m, adrs)
++    for j in range(1, D):
++        idx_leaf = idx_tree % (1 << HP)
++        idx_tree >>= HP
++        adrs = _Adrs()
++        adrs.layer = j
++        adrs.tree = idx_tree
++        node = _xmss_pk_from_sig(ctx, idx_leaf, sig_ht[j * size:(j + 1) * size], node, adrs)
++    return node == pk_root
++
++
++def _fors_sign(ctx, md, adrs):
++    """Algorithm 16: fors_sign(md, SK.seed, PK.seed, ADRS), each tree built in full (Algorithms 14
++    and 15)."""
++    indices = _base_2b(md, A, K)
++    sig = b""
++    for i in range(K):
++        level = []
++        for j in range(1 << A):
++            sk_adrs = adrs.copy()
++            sk_adrs.set_type_and_clear(FORS_PRF)
++            sk_adrs.w1 = adrs.w1
++            sk_adrs.w3 = (i << A) + j
++            sk = ctx.prf(sk_adrs)
++            if j == indices[i]:
++                sig += sk
++            leaf_adrs = adrs.copy()
++            leaf_adrs.w2 = 0
++            leaf_adrs.w3 = (i << A) + j
++            level.append(ctx.f(leaf_adrs, sk))
++        for z in range(A):
++            sig += level[(indices[i] >> z) ^ 1]
++            node_adrs = adrs.copy()
++            node_adrs.w2 = z + 1
++            above = []
++            for t in range(len(level) // 2):
++                node_adrs.w3 = (i << (A - z - 1)) + t
++                above.append(ctx.h(node_adrs, level[2 * t], level[2 * t + 1]))
++            level = above
++    return sig
++
++
++def _fors_pk_from_sig(ctx, sig_fors, md, adrs):
++    """Algorithm 17: fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)."""
++    indices = _base_2b(md, A, K)
++    roots = b""
++    for i in range(K):
++        part = sig_fors[i * (A + 1) * N:(i + 1) * (A + 1) * N]
++        adrs.w2 = 0
++        adrs.w3 = (i << A) + indices[i]
++        node = ctx.f(adrs, part[:N])
++        for j in range(A):
++            adrs.w2 = j + 1
++            node_auth = part[(j + 1) * N:(j + 2) * N]
++            if (indices[i] >> j) & 1 == 0:
++                adrs.w3 = adrs.w3 // 2
++                node = ctx.h(adrs, node, node_auth)
++            else:
++                adrs.w3 = (adrs.w3 - 1) // 2
++                node = ctx.h(adrs, node_auth, node)
++        roots += node
++    pk_adrs = adrs.copy()
++    pk_adrs.set_type_and_clear(FORS_ROOTS)
++    pk_adrs.w1 = adrs.w1
++    return ctx.t(pk_adrs, roots)
++
++
++def _split_digest(digest):
++    md = digest[:(K * A + 7) // 8]
++    tree_size = (H - HP + 7) // 8
++    leaf_size = (HP + 7) // 8
++    rest = digest[(K * A + 7) // 8:]
++    idx_tree = int.from_bytes(rest[:tree_size], "big") % (1 << (H - HP))
++    idx_leaf = int.from_bytes(rest[tree_size:tree_size + leaf_size], "big") % (1 << HP)
++    return md, idx_tree, idx_leaf
++
++
++def keygen_internal(sk_seed, sk_prf, pk_seed):
++    """Algorithm 18: slh_keygen_internal(SK.seed, SK.prf, PK.seed). Returns (pk, sk)."""
++    assert len(sk_seed) == len(sk_prf) == len(pk_seed) == N
++    ctx = _Ctx(pk_seed, sk_seed)
++    adrs = _Adrs()
++    adrs.layer = D - 1
++    pk_root = _xmss_tree(ctx, adrs)[HP][0]
++    return pk_seed + pk_root, sk_seed + sk_prf + pk_seed + pk_root
++
++
++def keygen(seed):
++    """A key pair (pk, sk) from 48 bytes: SK.seed, SK.prf and PK.seed in that order."""
++    assert len(seed) == 3 * N
++    return keygen_internal(seed[:N], seed[N:2 * N], seed[2 * N:])
++
++
++def sign_internal(m, sk, addrnd=None):
++    """Algorithm 19: slh_sign_internal(M, SK, addrnd); addrnd None is the deterministic variant."""
++    assert len(sk) == SECKEY_SIZE
++    sk_seed, sk_prf, pk_seed, pk_root = sk[:N], sk[N:2 * N], sk[2 * N:3 * N], sk[3 * N:]
++    ctx = _Ctx(pk_seed, sk_seed)
++    opt_rand = pk_seed if addrnd is None else addrnd
++    r = _prf_msg(sk_prf, opt_rand, m)
++    md, idx_tree, idx_leaf = _split_digest(_h_msg(r, pk_seed, pk_root, m))
++    adrs = _Adrs()
++    adrs.tree = idx_tree
++    adrs.set_type_and_clear(FORS_TREE)
++    adrs.w1 = idx_leaf
++    sig_fors = _fors_sign(ctx, md, adrs)
++    pk_fors = _fors_pk_from_sig(ctx, sig_fors, md, adrs.copy())
++    sig = r + sig_fors + _ht_sign(ctx, pk_fors, idx_tree, idx_leaf)
++    assert len(sig) == SIGNATURE_SIZE
++    return sig
++
++
++def verify_internal(m, sig, pk):
++    """Algorithm 20: slh_verify_internal(M, SIG, PK)."""
++    if len(sig) != SIGNATURE_SIZE or len(pk) != PUBKEY_SIZE:
++        return False
++    pk_seed, pk_root = pk[:N], pk[N:]
++    ctx = _Ctx(pk_seed)
++    r = sig[:N]
++    sig_fors = sig[N:N + K * (A + 1) * N]
++    sig_ht = sig[N + K * (A + 1) * N:]
++    md, idx_tree, idx_leaf = _split_digest(_h_msg(r, pk_seed, pk_root, m))
++    adrs = _Adrs()
++    adrs.tree = idx_tree
++    adrs.set_type_and_clear(FORS_TREE)
++    adrs.w1 = idx_leaf
++    pk_fors = _fors_pk_from_sig(ctx, sig_fors, md, adrs)
++    return _ht_verify(ctx, pk_fors, sig_ht, idx_tree, idx_leaf, pk_root)
++
++
++def _pure_message(m, ctx):
++    assert len(ctx) <= 255
++    return bytes([0, len(ctx)]) + ctx + m
++
++
++def sign(m, ctx, sk, addrnd=None):
++    """Algorithm 22: slh_sign(M, ctx, SK), pure SLH-DSA; addrnd None is the deterministic variant."""
++    return sign_internal(_pure_message(m, ctx), sk, addrnd)
++
++
++def verify(m, sig, ctx, pk):
++    """Algorithm 24: slh_verify(M, SIG, ctx, PK), pure SLH-DSA."""
++    if len(ctx) > 255:
++        return False
++    return verify_internal(_pure_message(m, ctx), sig, pk)
+diff --git a/test/functional/test_framework/p2mr_slhdsa128s.py b/test/functional/test_framework/p2mr_slhdsa128s.py
+new file mode 100644
+index 0000000..9ac32f1
+--- /dev/null
++++ b/test/functional/test_framework/p2mr_slhdsa128s.py
+@@ -0,0 +1,126 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Helpers for OP_CHECKSLHDSA128S, the experimental SLH-DSA-SHA2-128s check in P2MR leaves.
++
++See doc/p2mr-slhdsa128s.md. No stack element may exceed 520 bytes, so the 7856-byte signature
++(7857 with an explicit hash type) is given in sixteen chunks; the 32-byte public key fits in one
++push of the leaf:
++
++    leaf SLH1:  <pk:32> OP_CHECKSLHDSA128S
++    witness:    <sig[0]:520> ... <sig[14]:520> <sig[15]:56 or 57> <leaf> <control block>
++
++The signed message is the BIP-342 signature message with key_version 2, and the FIPS 205
++context string is "P2MR/SLHDSA128S/EXP0". The default output puts the leaf next to a leaf that
++can only fail, so that both sit at depth one: a single leaf tree has depth zero, and P2MR does
++not execute a leaf at depth zero.
++
++Signing takes a few seconds in Python (test_framework/crypto/slhdsa128s.py), so tests should
++sign as few times as they can.
++"""
++
++from .crypto import slhdsa128s
++from .p2mr import p2mr_construct
++from .p2mr_mldsa44 import LEAF_FAIL, NO_CODESEPARATOR, split_chunks
++from .script import (
++    CScript,
++    CScriptOp,
++    LEAF_VERSION_TAPSCRIPT,
++    SIGHASH_DEFAULT,
++    TaprootSignatureHash,
++)
++
++# Byte 0xf1: OP_SUCCESS241 everywhere but in an executed P2MR leaf once active.
++OP_CHECKSLHDSA128S = CScriptOp(0xf1)
++
++SLHDSA128S_PUBKEY_SIZE = slhdsa128s.PUBKEY_SIZE
++SLHDSA128S_SIGNATURE_SIZE = slhdsa128s.SIGNATURE_SIZE
++SLHDSA128S_SIG_CHUNK_SIZES = (520,) * 15 + (56,)
++SLHDSA128S_KEY_VERSION = 2
++SLHDSA128S_CONTEXT = b"P2MR/SLHDSA128S/EXP0"
++# Validation weight one OP_CHECKSLHDSA128S with a signature uses up (provisional, see
++# VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK in src/script/script.h).
++VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK = 2000
++
++assert sum(SLHDSA128S_SIG_CHUNK_SIZES) == SLHDSA128S_SIGNATURE_SIZE
++
++__all__ = [
++    "LEAF_FAIL",
++    "NO_CODESEPARATOR",
++    "OP_CHECKSLHDSA128S",
++    "SLHDSA128S_CONTEXT",
++    "SLHDSA128S_KEY_VERSION",
++    "SLHDSA128S_PUBKEY_SIZE",
++    "SLHDSA128S_SIGNATURE_SIZE",
++    "SLHDSA128S_SIG_CHUNK_SIZES",
++    "VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK",
++    "slhdsa128s_keygen",
++    "slhdsa128s_leaf",
++    "slhdsa128s_sig_chunks",
++    "slhdsa128s_sighash",
++    "slhdsa128s_sign",
++    "slhdsa128s_sign_input",
++    "slhdsa128s_tree",
++    "slhdsa128s_verify",
++]
++
++
++def slhdsa128s_keygen(seed):
++    """An SLH-DSA-SHA2-128s key pair (public key, secret key) from a 48-byte seed: SK.seed, SK.prf
++    and PK.seed."""
++    assert len(seed) == 48
++    return slhdsa128s.keygen(bytes(seed))
++
++
++def slhdsa128s_sign(seckey, msg, *, context=SLHDSA128S_CONTEXT, addrnd=None):
++    """Sign with pure SLH-DSA-SHA2-128s. addrnd None is the deterministic variant of FIPS 205."""
++    sig = slhdsa128s.sign(bytes(msg), bytes(context), bytes(seckey), addrnd)
++    assert len(sig) == SLHDSA128S_SIGNATURE_SIZE
++    return sig
++
++
++def slhdsa128s_verify(pubkey, msg, sig, *, context=SLHDSA128S_CONTEXT):
++    """Verify with pure SLH-DSA-SHA2-128s. A key or signature of the wrong size is invalid."""
++    if len(pubkey) != SLHDSA128S_PUBKEY_SIZE or len(sig) != SLHDSA128S_SIGNATURE_SIZE:
++        return False
++    return slhdsa128s.verify(bytes(msg), bytes(sig), bytes(context), bytes(pubkey))
++
++
++def slhdsa128s_sig_chunks(sig):
++    """The sixteen witness elements that carry a signature (with or without hash type)."""
++    assert len(sig) in (SLHDSA128S_SIGNATURE_SIZE, SLHDSA128S_SIGNATURE_SIZE + 1)
++    return split_chunks(bytes(sig), SLHDSA128S_SIG_CHUNK_SIZES)
++
++
++def slhdsa128s_leaf(pubkey):
++    """Leaf SLH1 for a public key."""
++    assert len(pubkey) == SLHDSA128S_PUBKEY_SIZE
++    return CScript([bytes(pubkey), OP_CHECKSLHDSA128S])
++
++
++def slhdsa128s_tree(leaf, *, leaf_ver=LEAF_VERSION_TAPSCRIPT):
++    """The default output: the SLH-DSA leaf and LEAF_FAIL, both at depth one, both of leaf version
++    leaf_ver."""
++    return p2mr_construct([("slh", leaf, leaf_ver), ("fail", LEAF_FAIL, leaf_ver)])
++
++
++def slhdsa128s_sighash(tx, spent_utxos, input_index, leaf_script, *, hash_type=SIGHASH_DEFAULT,
++                       annex=None, codeseparator_pos=NO_CODESEPARATOR, key_ver=SLHDSA128S_KEY_VERSION,
++                       leaf_ver=LEAF_VERSION_TAPSCRIPT):
++    """The 32-byte message an OP_CHECKSLHDSA128S signature signs: TapSighash with key_version 2."""
++    return TaprootSignatureHash(tx, spent_utxos, hash_type, input_index, scriptpath=True,
++                                leaf_script=leaf_script, leaf_ver=leaf_ver, annex=annex,
++                                codeseparator_pos=codeseparator_pos, key_ver=key_ver)
++
++
++def slhdsa128s_sign_input(seckey, tx, spent_utxos, input_index, leaf_script, *, hash_type=SIGHASH_DEFAULT,
++                          annex=None, codeseparator_pos=NO_CODESEPARATOR, key_ver=SLHDSA128S_KEY_VERSION,
++                          context=SLHDSA128S_CONTEXT, leaf_ver=LEAF_VERSION_TAPSCRIPT):
++    """Sign an input that spends an OP_CHECKSLHDSA128S leaf; a non-default hash type is appended."""
++    msg = slhdsa128s_sighash(tx, spent_utxos, input_index, leaf_script, hash_type=hash_type, annex=annex,
++                             codeseparator_pos=codeseparator_pos, key_ver=key_ver, leaf_ver=leaf_ver)
++    sig = slhdsa128s_sign(seckey, msg, context=context)
++    if hash_type != SIGHASH_DEFAULT:
++        sig += bytes([hash_type])
++    return sig
+-- 
+2.43.0
+

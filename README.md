@@ -10,7 +10,7 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
 - Contact: duncan0k <dev@ark0.si>
 - Status: experimental. **Not deployed on, and not intended for, mainnet or the public signet** (the
   deployments never activate there).
-- Three experimental extensions for the Ark-0 test signet. None of them is proposed for Bitcoin.
+- Experimental extensions for the Ark-0 test signet. None of them is proposed for Bitcoin.
   - The M1 series in `patches-m1/` adds an ML-DSA-44 signature check in P2MR leaves,
     `OP_CHECKMLDSA44`; BIP-360 defines no post-quantum signature check. It is active on Ark-0 from
     height 8600 and on regtest by default, and never on the default signet, a testnet or mainnet.
@@ -24,6 +24,10 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     height 30000, and the operator holds the key of one of its two such outputs and will spend it in
     an announced drill. Another custom signet gets it only if it sets `-signettripwire`. See
     "Experimental M3 series" below.
+  - The M4-S series in `patches-m4/`, not released, adds an SLH-DSA-SHA2-128s signature check in
+    P2MR leaves, `OP_CHECKSLHDSA128S`. It is not active on Ark-0 (its height there is not set yet),
+    and its validation weight is provisional. Another custom signet gets it only if it sets
+    `-signetslhdsa128s`. See "Experimental M4-S series" below.
 
 ## Layout
 
@@ -36,17 +40,20 @@ patches-m2/         6 further patches, the experimental M2 series and a later te
 patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
+patches-m4/         12 further patches, the experimental M4-S series, not released and not active on Ark-0 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
 SHA256SUMS-m1       checksums of the M1 patches
 SHA256SUMS-m2       checksums of the M2 patches; SHA256SUMS-m2a and SHA256SUMS-m2b for the candidates
 SHA256SUMS-m3       checksums of the M3 patches
+SHA256SUMS-m4       checksums of the M4-S patches
 apply.sh            clone v31.1, verify, apply the consensus series, build, run the core tests
 ark0/               evidence pack and joining guide for the experimental custom signet (see below)
 contrib/k3s/        build, test and run the series inside a k3s cluster
 contrib/cross/      cross-compile the M3 node for macOS and Linux, as the witness program ships it
 contrib/windows/    cross-compile the M3 node for 64-bit Windows, as the witness program ships it
+contrib/m4-measure/ the measurement-only build of the M4-S validation weight; never part of a node (see below)
 witness/            Ark0Witness, a small program for watching the M3 drill with a node of one's own
 ```
 
@@ -445,6 +452,79 @@ the height, is the last of the series:
 ```bash
 git format-patch --start-number 55 924e9f7..dde712f -o patches-m3
 (cd patches-m3 && sha256sum -b *.patch) > SHA256SUMS-m3
+```
+
+## Experimental M4-S series (`patches-m4/`)
+
+Twelve patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
+`patches-m2/` and `patches-m3/`, in that order. **Not released, and not active on Ark-0**: the
+activation height of Ark-0, `ARK0_SLHDSA128S_HEIGHT`, is left unset (`std::numeric_limits<int>::max()`),
+and the validation weight of 2,000 per check is provisional, both to be fixed before a release.
+
+They add `OP_CHECKSLHDSA128S` (byte `0xf1`, `OP_SUCCESS241`), an SLH-DSA-SHA2-128s (FIPS 205)
+signature check in P2MR leaves that are executed, of leaf version `0xc0` and, once it executes, `0xe0`:
+part M4-S of the M4 design, `docs/m4/m4-design-2026-10-14.md` §2.1–§2.2. The public key, 32 bytes, is
+pushed by the leaf; the 7,856-byte signature comes in sixteen witness elements, `520 x 15, 56` (57 with
+an explicit hash type); the message is the BIP-341 signature message with key_version 2, and the check
+is pure SLH-DSA with the context string `P2MR/SLHDSA128S/EXP0`. The one relayed template is SLH1,
+`<pk> OP_CHECKSLHDSA128S`. Another custom signet activates it with `-signetslhdsa128s=<height>`, which
+Ark-0 refuses. It is an experiment of the Ark-0 test signet; it is not part of BIP-360, and it is not
+proposed for Bitcoin. `doc/p2mr-slhdsa128s.md`, added by the series, is its specification;
+`docs/m4/C1-REPORT.md` maps each rule to the code and the tests.
+
+| # | Commit | Content |
+|---|---|---|
+| 66 | crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature verification | [slhdsa-c](https://github.com/pq-code-package/slhdsa-c) at `a0fc1ff2`, the commit liboqs 0.15.0 uses (Apache-2.0 OR ISC OR MIT, used under MIT), unmodified, the SHA2 files only, in `src/crypto/slhdsa128s/` with a README of every file's SHA-256, compiled with Core's hardening, Fortify and sanitizer options and a warning set of its own; `SLHDSA128SVerify` over a 32-byte message, which checks every length before it calls the library |
+| 67 | test: check SLH-DSA-SHA2-128s verification against the ACVP vectors | NIST ACVP sigVer (14 external pure cases, 2 valid, 4 of a wrong signature length; 14 internal) and sigGen (14) for SLH-DSA-SHA2-128s, through a test-only adapter for their message lengths; no wrong length reaches the library; a signature made by @noble/post-quantum; other interfaces and malformed signatures |
+| 68 | script: add OP_CHECKSLHDSA128S for SLH-DSA-SHA2-128s checks in P2MR leaves | byte `0xf1` with `SCRIPT_VERIFY_P2MR_SLHDSA128S` in executed P2MR leaves of version `0xc0` and `0xe0`; sixteen signature chunks; key_version 2; context `P2MR/SLHDSA128S/EXP0`; `VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK`, provisionally 2000; four new script errors; cache entries padded with `H`; `DeferringSignatureChecker` forwards the check |
+| 69 | consensus: deploy OP_CHECKSLHDSA128S, not yet at a height on Ark-0 | buried deployment `p2mr_slhdsa128s`; `ARK0_SLHDSA128S_HEIGHT` left at `std::numeric_limits<int>::max()`; `-signetslhdsa128s` for other custom signets, refused on Ark-0 and on other chains; regtest from genesis or `-testactivationheight=p2mr_slhdsa128s@N`; the startup log |
+| 70 | policy: relay OP_CHECKSLHDSA128S spends only once active, and in one template | no spend executing `0xf1` while the next block is below the height, `-acceptnonstdtxn` or not; removed from the mempool by a reorganization below the height; SLH1 the only standard leaf with the opcode, its sixteen chunks exempt from the 80-byte limit |
+| 71 | test: sign and verify SLH-DSA-SHA2-128s in the functional test framework | an SLH-DSA-SHA2-128s implementation of its own, which passes the ACVP keyGen, sigGen and sigVer vectors of the parameter set, and the SLH1 helpers |
+| 72 | test: add OP_CHECKSLHDSA128S script tests and signature message vectors | `p2mr_slhdsa128s_tests`: the parameters, signature messages for key_version 0, 1 and 2, and every rule with spends signed in the test by the vendored library |
+| 73 | test: add feature_p2mr_slhdsa128s.py | activation, including the first active block in leaf versions `0xc0` and `0xe0`, relay, reorganization, block-level rejection of each new error, the validation weight, policy, mixed inputs |
+| 74 | test: add fuzz targets for SLHDSA128SVerify and OP_CHECKSLHDSA128S | `slhdsa128s_verify`, `p2mr_slhdsa128s` |
+| 75 | bench: time SLH-DSA-SHA2-128s verification and the whole path of its check | `VerifySLHDSA128S`, `VerifyScriptP2MRSLHDSA128S` |
+| 76 | test: check OP_CHECKSLHDSA128S against the M4 vectors of p2mr-ts | the spend and construction vectors of the wallet side, pinned: signature messages for key_version 0, 1 and 2, signatures, witnesses through `VerifyScript`, keys, leaves, trees and addresses |
+| 77 | doc: describe OP_CHECKSLHDSA128S | `doc/p2mr-slhdsa128s.md` |
+
+It is a soft fork. A node built without `patches-m4/` accepts every block a node with it accepts; to it,
+`0xf1` stays `OP_SUCCESS241`. Bitcoin Core's wallet does not create or sign these leaves.
+
+Verified on 2026-10-15 in a cloud session (4 vCPU Xeon at 2.8 GHz, no SHA extensions, GCC 13.3), from a
+fresh clone of v31.1 with all 77 patches applied as their `SHA256SUMS` files name them: `test_bitcoin`
+passed 780 of 786 test cases and one more with a warning, and skipped 5 (22 test cases are new); the P2MR,
+signet and related functional scripts of the M3 verification (16 runs) passed, and `feature_p2mr_slhdsa128s.py`
+with them. The build had no compiler warnings. After the first review round the unit tests also ran in a
+`-DSANITIZERS=address,undefined` build (all pass but `net_tests`, stopped by a UBSan report in upstream code
+the patches do not touch), and both fuzz targets ran 10 minutes each in Core's own fuzz build
+(`-DBUILD_FOR_FUZZING=ON -DSANITIZERS=fuzzer,address,undefined`, the vendored library instrumented too)
+without a finding. After the third round (the C options chosen in the library's own CMake: Core's
+hardening probed with the C compiler, Fortify's pair kept together, sanitizers as for libsecp256k1, a warning
+set of its own), the same 77 patches gave the same unit test results from a fresh checkout, and seven
+configurations (default, `-D_FORTIFY_SOURCE=2 -Werror` in `CMAKE_C_FLAGS`, `THREADS_HAVE_PTHREAD_ARG`,
+`CC=clang CXX=g++`, a source path with a space, the fuzz build, ASan/UBSan) configure, each giving the
+vendored files `_FORTIFY_SOURCE` 3 like Core's C++.
+The first measurement of the validation weight gives a required C of 2,550 to 3,658 on that machine,
+above the provisional 2,000; `docs/m4/C1-REPORT.md` has the numbers and the open questions.
+
+The measurement needs a hook in the library that makes verification walk its slowest path. That hook
+and the scripts are in `contrib/m4-measure/`, as a patch applied on top of the series in a separate
+tree, for `bench_bitcoin` only: nothing applies it, it is not in `patches-m4/`, and with it applied
+`bitcoind` fails to compile. Its README says how to repeat the measurement.
+
+```bash
+git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
+       ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch \
+       ../bitcoin-p2mr-patches/patches-m2/*.patch ../bitcoin-p2mr-patches/patches-m3/*.patch \
+       ../bitcoin-p2mr-patches/patches-m4/*.patch
+```
+
+The series is exported from the Core tree, where the twelve M4-S commits sit on the six earlier patch
+sets as `git am` applies them; `d9c0c03` is the last commit of `patches-m3/` there:
+
+```bash
+git format-patch --start-number 66 d9c0c03..22f236f -o patches-m4
+(cd patches-m4 && sha256sum -b *.patch) > SHA256SUMS-m4
 ```
 
 ## Prebuilt node

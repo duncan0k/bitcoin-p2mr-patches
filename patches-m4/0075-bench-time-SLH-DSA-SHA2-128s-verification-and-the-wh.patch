@@ -1,0 +1,165 @@
+From a9ecb9412649ff822982cb100a16709339f7726d Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:47 +0000
+Subject: [PATCH 75/77] bench: time SLH-DSA-SHA2-128s verification and the
+ whole path of its check
+
+VerifySLHDSA128S times the verification on its own. VerifyScriptP2MRSLHDSA128S
+times the whole path of a check as a block validates it: VerifyScript on
+a P2MR input with the caching checker, whose cache never fills, over 16
+spends with keys and messages of their own, signed when the benchmark
+starts, one check per epoch so that -output-json holds the distribution
+of single checks. Next to VerifyScriptP2MRSchnorr, these are the
+measurements that fix the validation weight of the opcode:
+C >= 1.25 x 50 x p99(SLH-DSA, worst case) / median(Schnorr), with a
+SHA-256 that uses no SHA extensions.
+---
+ src/bench/CMakeLists.txt |   2 +
+ src/bench/slhdsa128s.cpp | 115 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+)
+ create mode 100644 src/bench/slhdsa128s.cpp
+
+diff --git a/src/bench/CMakeLists.txt b/src/bench/CMakeLists.txt
+index 852fd70..9c228e2 100644
+--- a/src/bench/CMakeLists.txt
++++ b/src/bench/CMakeLists.txt
+@@ -49,6 +49,7 @@ add_executable(bench_bitcoin
+   rpc_blockchain.cpp
+   rpc_mempool.cpp
+   sign_transaction.cpp
++  slhdsa128s.cpp
+   streams_findbyte.cpp
+   strencodings.cpp
+   txgraph.cpp
+@@ -69,6 +70,7 @@ target_link_libraries(bench_bitcoin
+   core_interface
+   test_util
+   bitcoin_node
++  bitcoin_slhdsa128s
+   Boost::headers
+ )
+ 
+diff --git a/src/bench/slhdsa128s.cpp b/src/bench/slhdsa128s.cpp
+new file mode 100644
+index 0000000..063905f
+--- /dev/null
++++ b/src/bench/slhdsa128s.cpp
+@@ -0,0 +1,115 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <bench/bench.h>
++#include <crypto/slhdsa128s.h>
++#include <hash.h>
++#include <primitives/transaction.h>
++#include <script/interpreter.h>
++#include <script/script.h>
++#include <script/sigcache.h>
++#include <test/util/slhdsa128s.h>
++#include <test/util/slhdsa128s_fixture.h>
++#include <uint256.h>
++#include <util/strencodings.h>
++
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++// What M4-S weighs against BIP 340 when it fixes the validation weight of an SLH-DSA-SHA2-128s
++// check (doc/p2mr-slhdsa128s.md): the verification on its own, and the whole path of a check as a
++// block validates it. VerifySchnorrBIP340 and VerifyScriptP2MRSchnorr (bench/mldsa44.cpp) are the
++// other side; run them in the same process on the same machine.
++
++static void VerifySLHDSA128S(benchmark::Bench& bench)
++{
++    const std::vector<unsigned char> pubkey{ParseHex(SLHDSA128S_FIXTURE_PUBKEY_HEX)};
++    const std::vector<unsigned char> msg{ParseHex(SLHDSA128S_FIXTURE_MSG_HEX)};
++    const std::vector<unsigned char> ctx{SLHDSA128S_FIXTURE_CONTEXT.begin(), SLHDSA128S_FIXTURE_CONTEXT.end()};
++    const std::vector<unsigned char> sig{ParseHex(SLHDSA128S_FIXTURE_SIG_HEX)};
++    assert(SLHDSA128SVerify(pubkey, msg, ctx, sig));
++
++    bench.unit("verification").run([&] {
++        const bool ok{SLHDSA128SVerify(pubkey, msg, ctx, sig)};
++        assert(ok);
++    });
++}
++
++namespace {
++struct Spend {
++    CTransaction tx;
++    CTxOut spent;
++    PrecomputedTransactionData txdata;
++};
++
++/** A one-input spend of an SLH1 leaf (<pk> OP_CHECKSLHDSA128S next to OP_RETURN, both at depth one),
++ *  signed with a key of its own derived from `index`. */
++Spend MakeSpend(uint32_t index)
++{
++    const std::vector<unsigned char> label{'b', 'e', 'n', 'c', 'h', static_cast<unsigned char>(index), static_cast<unsigned char>(index >> 8)};
++    const SLHDSA128SKey key{SLHDSA128SKey::FromLabel(label)};
++    const CScript leaf{CScript{} << std::vector<unsigned char>(key.pubkey.begin(), key.pubkey.end()) << OP_CHECKSLHDSA128S};
++    const CScript fail{CScript{} << OP_RETURN};
++    const uint256 fail_hash{ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, fail)};
++    const CTxOut spent{100'000, CScript{} << OP_2 << ToByteVector(ComputeTapbranchHash(ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf), fail_hash))};
++    CMutableTransaction tx;
++    tx.version = 2;
++    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{static_cast<uint8_t>(index + 1)}), index});
++    tx.vout.emplace_back(90'000, CScript{} << OP_TRUE);
++    PrecomputedTransactionData txdata;
++    txdata.Init(tx, {spent}, /*force=*/true);
++    ScriptExecutionData execdata;
++    execdata.m_annex_init = true;
++    execdata.m_annex_present = false;
++    execdata.m_tapleaf_hash = ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, leaf);
++    execdata.m_tapleaf_hash_init = true;
++    execdata.m_codeseparator_pos = 0xffffffff;
++    execdata.m_codeseparator_pos_init = true;
++    uint256 msg;
++    const bool hashed{SignatureHashSchnorr(msg, execdata, tx, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL, SLHDSA128S_KEY_VERSION)};
++    assert(hashed);
++    const std::vector<unsigned char> sig{key.Sign(MakeUCharSpan(msg), MakeUCharSpan(SLHDSA128S_CONTEXT))};
++    size_t pos{0};
++    for (const size_t size : SLHDSA128S_SIG_CHUNK_SIZES) {
++        tx.vin[0].scriptWitness.stack.emplace_back(sig.begin() + pos, sig.begin() + pos + size);
++        pos += size;
++    }
++    tx.vin[0].scriptWitness.stack.emplace_back(leaf.begin(), leaf.end());
++    std::vector<unsigned char> control{static_cast<unsigned char>(TAPROOT_LEAF_TAPSCRIPT | 1)};
++    control.insert(control.end(), fail_hash.begin(), fail_hash.end());
++    tx.vin[0].scriptWitness.stack.push_back(control);
++    Spend spend{CTransaction{tx}, spent, {}};
++    spend.txdata.Init(spend.tx, {spend.spent});
++    return spend;
++}
++} // namespace
++
++/** The whole path of one OP_CHECKSLHDSA128S check as a block validates it: VerifyScript on a P2MR
++ *  input with the caching checker blocks use, whose cache it never fills, so that every check
++ *  hashes its cache entry, misses, and verifies, as a block does with signatures it has not seen.
++ *  The spends have 16 different keys and messages, signed when the benchmark starts. Every epoch is
++ *  a single check, so that the results written by -output-json hold the distribution of single
++ *  checks, as for VerifyScriptP2MRSchnorr. */
++static void VerifyScriptP2MRSLHDSA128S(benchmark::Bench& bench)
++{
++    // bench_bitcoin -sanity-check runs one epoch without output; one spend is enough there.
++    const bool measuring{bench.output() != nullptr};
++    std::vector<Spend> spends;
++    for (uint32_t i = 0; i < (measuring ? 16 : 1); ++i) spends.push_back(MakeSpend(i));
++    SignatureCache signature_cache{DEFAULT_SIGNATURE_CACHE_BYTES};
++    constexpr script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT |
++                                        SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_SLHDSA128S};
++    if (measuring) bench.epochs(10'000).epochIterations(1);
++    size_t next{0};
++    bench.unit("verification").run([&] {
++        Spend& spend{spends[next++ % spends.size()]};
++        const CachingTransactionSignatureChecker checker{&spend.tx, 0, spend.spent.nValue, /*storeIn=*/false, signature_cache, spend.txdata};
++        const bool ok{VerifyScript(CScript{}, spend.spent.scriptPubKey, &spend.tx.vin[0].scriptWitness, flags, checker)};
++        assert(ok);
++    });
++}
++
++BENCHMARK(VerifySLHDSA128S);
++BENCHMARK(VerifyScriptP2MRSLHDSA128S);
+-- 
+2.43.0
+

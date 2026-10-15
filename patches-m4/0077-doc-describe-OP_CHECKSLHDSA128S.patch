@@ -1,0 +1,281 @@
+From 22f236fbd5b6117997f4b5699208abf5c8334e87 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:47 +0000
+Subject: [PATCH 77/77] doc: describe OP_CHECKSLHDSA128S
+
+doc/p2mr-slhdsa128s.md is the specification of the opcode in this build:
+where it executes, the encoding and its one template, the order of the
+checks, the verification library, the provisional validation weight and
+how it is to be fixed, the activation (not yet on Ark-0), the relay
+policy, what a wallet should do, and the tests.
+---
+ doc/p2mr-slhdsa128s.md | 227 +++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr.md            |  11 +-
+ 2 files changed, 234 insertions(+), 4 deletions(-)
+ create mode 100644 doc/p2mr-slhdsa128s.md
+
+diff --git a/doc/p2mr-slhdsa128s.md b/doc/p2mr-slhdsa128s.md
+new file mode 100644
+index 0000000..5ae3712
+--- /dev/null
++++ b/doc/p2mr-slhdsa128s.md
+@@ -0,0 +1,227 @@
++# OP_CHECKSLHDSA128S: an experimental SLH-DSA-SHA2-128s check in P2MR leaves
++
++This build adds one opcode, `OP_CHECKSLHDSA128S`, that verifies an SLH-DSA-SHA2-128s signature
++([FIPS 205](https://doi.org/10.6028/NIST.FIPS.205)) inside a P2MR script leaf (see
++[p2mr.md](p2mr.md)). It is an experiment for the Ark-0 test signet, part M4-S of its M4 series.
++It is not part of BIP 360, which defines no post-quantum signature check, it is not the
++"Algorithm Agility" proposal or any other draft's opcode, and it is not proposed for mainnet.
++
++What it shows is narrow: a node running these rules refuses, at the block level, any spend
++through the leaf template SLH1 below that lacks a valid SLH-DSA-SHA2-128s signature. Other
++scripts can use the opcode in ways that need no signature at all (sixteen empty signature chunks
++push false, which `OP_NOT` turns into true), so only the template is relayed, and only it should
++be used. SLH-DSA does not bind the message (FIPS 205 section 11): the holder of a key can make
++one signature that is valid for two messages, so a signature must never be taken as a commitment
++to the message it signs.
++
++**Not active on Ark-0 yet.** The activation height of the Ark-0 signet, `ARK0_SLHDSA128S_HEIGHT`,
++is decided at release; until then it is `std::numeric_limits<int>::max()` and this build never
++applies the rules there (see [Activation](#activation)). The validation weight is provisional
++too (see [Validation weight](#validation-weight)).
++
++## Where the opcode executes
++
++`OP_CHECKSLHDSA128S` is byte `0xf1`, which BIP 342 defines as `OP_SUCCESS241`. The byte executes
++as `OP_CHECKSLHDSA128S` only when all of these hold:
++
++- the script is executed as tapscript (`SigVersion::TAPSCRIPT`);
++- it is a P2MR leaf that is executed: leaf version `0xc0`, or `0xe0` once it executes
++  ([p2mr-tripwire.md](p2mr-tripwire.md)), at depth one or more (a leaf at depth zero is not
++  executed at all);
++- `SCRIPT_VERIFY_P2MR_SLHDSA128S` applies, i.e. the rules are active for the block (see
++  [Activation](#activation)).
++
++Then the pre-scan of the leaf no longer treats `0xf1` as an `OP_SUCCESSx`; any other
++`OP_SUCCESSx` in the same leaf still makes the whole script succeed.
++
++Everywhere else the byte keeps its current meaning: a bad opcode in legacy and witness v0
++scripts, and `OP_SUCCESS241` in P2TR tapscript leaves and in P2MR leaves before activation.
++**A leaf using the opcode therefore protects nothing in a P2TR output, or in a P2MR output spent
++before activation: an inactive SLH-DSA leaf is not a safe fallback.**
++
++Neither the disabled elliptic curve checks of leaf version `0xe0`
++([p2mr-tripwire.md](p2mr-tripwire.md)) nor anything else turns this opcode off.
++
++## Encoding
++
++No stack element may exceed 520 bytes, and this opcode does not change that. The parameter set
++has n = 16, h = 63, d = 7, h' = 9, a = 12, k = 14 and lg_w = 4, so the signature is
++(1 + 182 + 63 + 245) x 16 = 7,856 bytes (7,857 with an explicit hash type), split into chunks of
++fixed sizes so that each signature has exactly one encoding:
++
++- the public key: 32 bytes, PK.seed followed by PK.root, pushed by the leaf itself;
++- the signature: sixteen witness elements, fifteen of 520 bytes and one of 56 (57 when it ends in
++  a hash type).
++
++The one template, **SLH1**, is the leaf `20 <32-byte public key> f1`, 34 bytes:
++
++    leaf:     <pk> OP_CHECKSLHDSA128S
++    witness:  <sig[0]:520> ... <sig[14]:520> <sig[15]:56 or 57> <leaf> <control block>
++
++A single-signature spend at depth one has a witness of 7,972 bytes (7,973 with a hash type), and
++so a validation weight budget of 8,022.
++
++## Execution
++
++The opcode takes seventeen stack elements: the public key on top, then `sig[15]` down to
++`sig[0]`. The checks run in this order, which follows `OP_CHECKMLDSA44`, which follows BIP 342's
++`OP_CHECKSIG`:
++
++1. at least seventeen elements on the stack, or `SCRIPT_ERR_INVALID_STACK_OPERATION`;
++2. the key and the sixteen chunks are taken;
++3. if any chunk is non-empty, `VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK` is taken from the input's
++   budget, and a negative budget fails the script (`SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT`);
++4. the public key must be exactly 32 bytes (`SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE`), even when the
++   signature is empty; there is no upgradable key type;
++5. sixteen empty chunks are an empty signature: the opcode pushes an empty element (false) and
++   execution goes on;
++6. otherwise the chunks must be `520 x 15, 56` or `520 x 15, 57` (`SCRIPT_ERR_SLHDSA128S_SIG_SIZE`).
++   A chunk over 520 bytes never gets here: the initial stack check refuses it first
++   (`SCRIPT_ERR_PUSH_SIZE`);
++7. a 57th byte of the last chunk is an explicit hash type with the rules of BIP 341: `0x00` written
++   out, any value but `0x01` to `0x03` and `0x81` to `0x83`, and `SIGHASH_SINGLE` without an output
++   of the same index fail (`SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE`);
++8. the message is the BIP 341 signature message of a tapscript spend with **key_version 2**
++   (`SignatureHashSchnorr`), which commits to the annex, the position of the last executed
++   `OP_CODESEPARATOR` and the tapleaf hash, leaf version included. key_version is 0 for BIP 342
++   signatures and 1 for `OP_CHECKMLDSA44`, so no signature message of one is that of another;
++9. the signature is checked with `slh_verify` of FIPS 205, the external interface of pure
++   SLH-DSA, with the context string `P2MR/SLHDSA128S/EXP0` (20 bytes). It is not HashSLH-DSA and
++   not the internal interface. An invalid signature fails the script
++   (`SCRIPT_ERR_SLHDSA128S_SIG`): it does not push false, so `OP_NOT` cannot turn it around;
++10. a valid signature pushes `0x01`.
++
++The order only decides which error is reported, not whether the script passes.
++
++The caching signature checker of block and mempool validation caches valid checks in the
++signature cache under their own salted hasher, padded with `H`, apart from the ECDSA (`E`),
++Schnorr (`S`) and ML-DSA-44 (`M`) entries. `DeferringSignatureChecker` passes the check through.
++
++## Verification library
++
++The verifier is [slhdsa-c](https://github.com/pq-code-package/slhdsa-c) at commit
++`a0fc1ff253930060d0246aebca06c2538eb92b88`, the commit liboqs 0.15.0 uses, in
++`src/crypto/slhdsa128s/` with its own portable C SHA-256 (no SHA extensions, the same code on
++every machine). `src/crypto/slhdsa128s/README.md` lists every file taken and its SHA-256. The
++upstream project calls the library work in progress, so it is checked against the NIST ACVP
++vectors and another implementation, and fuzzed.
++
++`SLHDSA128SVerify` in `src/crypto/slhdsa128s.h` is the only entry point. It checks the lengths of
++the key (32), the message (32, a signature message), the signature (7,856) and the context string
++(at most 255) before it calls the library: the vendored `slh_verify` hashes the first 16 bytes of the signature before it checks
++the signature's length, so a shorter one must never reach it.
++
++## Validation weight
++
++Each check with a signature uses `VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK` units of the input's
++budget, which BIP 342 sets to the witness size plus 50 and charges 50 per Schnorr check.
++
++**The value in this build, 2,000, is provisional.** It is to be fixed by measurement before any
++release, and then never changes on a network once a build carrying it has been published:
++
++- the condition is `C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr check)`, both
++  over the whole path of a check, measured with a SHA-256 that uses no SHA extensions;
++- the worst case is that of the verification itself: every WOTS+ chain of every layer at its
++  longest (510 steps), 3,894 SHA-256 compressions against about 2,194 on average. An honest
++  signature cannot be pushed there, but the weight is set for it so that it does not depend on
++  how much work an attacker spends grinding;
++- the decisive check is a whole block that uses up its budget on such checks against one that
++  uses it up on Schnorr checks;
++- it must stay below 8,022, or a single-signature spend would not fit its own budget; if the
++  measurement does not allow that, M4-S is not released.
++
++First measurement (2026-10-15, not yet a gate result): on a cloud virtual machine (Intel Xeon at
++2.8 GHz, no SHA extensions, release build, GCC 13.3), `bench_bitcoin -filter='VerifyScriptP2MR.*'`
++over 10,000 single checks per run, three runs per SHA-256 implementation of Core (generic and
++SSE4/AVX2; the vendored library always uses its own portable code):
++
++- a Schnorr check over its whole path took 48 to 75 us (median), an SLH-DSA check with real
++  signatures 622 to 677 us, and the worst case 1,041 to 1,170 us, through a measurement-only hook
++  that takes every WOTS+ message digit as zero (3,894 SHA-256 compressions per check against a
++  measured mean of 2,183 for real signatures);
++- `1.25 x 50 x p99(worst case) / median(Schnorr)` came to 2,549 to 3,658 across the runs, so the
++  provisional 2,000 does **not** pass this condition there. The p99 of that machine is about twice
++  its median for Schnorr checks too, which inflates the result; the measurement is to be repeated
++  on a quiet machine, and the whole-block comparison done, before the value is fixed.
++
++The measurement-only build (the worst-case hook, and a choice of Core's SHA-256 implementation in
++`bench_bitcoin`) is not part of this series: it is `contrib/m4-measure/` of the patch repository,
++with its scripts. Configured with it, CMake builds `bench_bitcoin` and nothing else: it refuses a
++configuration that defines any other executable or shared library target, and `bitcoind.cpp` and
++`qt/main.cpp` do not compile.
++
++Empty signatures use no weight. The budget of one input is shared by every check in it:
++`50 x N_Schnorr + 250 x N_ML-DSA-44 + C x N_SLH-DSA <= witness size + 50`.
++
++## Activation
++
++The rules are a buried deployment, `p2mr_slhdsa128s` in `getdeploymentinfo`. They require P2MR.
++
++- On the Ark-0 signet (challenge
++  `5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`) they apply from
++  `ARK0_SLHDSA128S_HEIGHT` in `src/kernel/chainparams.h`, which is **not set yet**: it is
++  `std::numeric_limits<int>::max()`, and this build does not apply the rules on Ark-0. It is to
++  be set at release, to the chain height then plus 7 x 960 blocks rounded up to a multiple of
++  1,000, above the height of the P2MR tripwire rules. The height is a rule of that network, so
++  there is no option to change it; once a build that carries a height has been published, the
++  height and the validation weight do not change on that network.
++- On another custom signet they apply from `-signetslhdsa128s=<height>`, which requires
++  `-signetchallenge` and which the Ark-0 signet refuses. A node refuses the option on any other
++  chain.
++- On the default signet, testnet3, testnet4 and mainnet they never activate.
++- On regtest they apply from genesis, or from `-testactivationheight=p2mr_slhdsa128s@<height>`.
++
++When the rules are enabled, the node logs
++`P2MR SLH-DSA-SHA2-128s rules active from height <height> (leaf versions 0xc0, 0xe0)` at startup;
++leaf version `0xe0` executes from its own height.
++
++The change is a soft fork. A node without it treats the byte as `OP_SUCCESS241`, accepts every
++block that a node with it accepts, and keeps following the chain; it only does not enforce the
++signature check.
++
++## Policy
++
++- **Before activation** the mempool refuses every spend that executes the opcode, even with a
++  valid signature, with `-acceptnonstdtxn` too: while the next block is below the activation
++  height the byte is still an `OP_SUCCESSx`, which `DISCOURAGE_OP_SUCCESS` makes non-standard.
++  From the block before the activation height on, the mempool checks such spends by the new
++  rules.
++- **Reorganizations**: when the chain goes back so that the next block is below the activation
++  height, transactions that execute the opcode in a P2MR leaf of version `0xc0` or `0xe0` are
++  removed from the mempool, together with their descendants, whatever the rest of the leaf.
++- **Template only**: in a leaf at depth one or more of version `0xc0` or `0xe0`, a script that
++  has `OP_CHECKSLHDSA128S` among its opcodes is standard only if it is SLH1, byte for byte. P2MR
++  leaves follow the tapscript limit of 80 bytes per witness element; the sixteen signature chunks
++  of SLH1, which must be the whole initial stack, are exempt from it, and only at their exact
++  sizes. Multisignature leaves, a leaf with both an ML-DSA-44 and an SLH-DSA check, and anything
++  before or after the template are not standard.
++
++## Wallets
++
++Bitcoin Core's wallet does not create or sign `OP_CHECKSLHDSA128S` leaves. A wallet that does
++should follow what [p2mr-mldsa44.md](p2mr-mldsa44.md) says for its templates: SLH1 next to an
++`OP_RETURN` leaf of the same leaf version, both at depth one; addresses only once the tip is at
++least six blocks past the activation height; funding transactions locked to the activation
++height; an output protected only when its tree is exactly that and it confirmed at or above the
++activation height.
++
++## Tests
++
++- `src/test/slhdsa128s_tests.cpp`: the verifier against the NIST ACVP SLH-DSA sigVer and sigGen
++  vectors of SLH-DSA-SHA2-128s, a signature made by @noble/post-quantum, other interfaces and
++  malformed signatures, and that no wrong length reaches the library.
++- `src/test/p2mr_slhdsa128s_tests.cpp`: the parameters and options of each network, the
++  signature messages against `src/test/data/p2mr_slhdsa128s_sighash.json` (written by
++  `test/util/generate_p2mr_slhdsa128s_sighash.py`), and the script rules, with spends signed in
++  the test by the vendored library: every rule above, each hash type, the chunk layout, empty
++  signatures, the validation weight, where the byte executes, the caches and the relay policy.
++- `src/test/p2mr_ts_m4_tests.cpp`: vectors made by the wallet side, p2mr-ts, from the same design
++  (`src/test/data/p2mr_ts_m4_vectors.md`): their signature messages for key_version 0, 1 and 2,
++  their signatures, their witnesses through `VerifyScript`, their keys, leaves, trees, control
++  blocks, scriptPubKeys and addresses.
++- `test/functional/feature_p2mr_slhdsa128s.py`: activation, relay, reorganization and block-level
++  rejection on regtest; signatures by the test framework's own implementation
++  (`test/functional/test_framework/crypto/slhdsa128s.py`).
++- Fuzz targets `slhdsa128s_verify` and `p2mr_slhdsa128s`.
++- `bench_bitcoin -filter='Verify(SLHDSA128S|SchnorrBIP340)|VerifyScriptP2MR.*'` for the
++  measurements above.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index 78f59df..b747d3c 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -7,8 +7,10 @@ This build implements the Pay-to-Merkle-Root (P2MR) spending rules of
+ The scope is the consensus and policy treatment of witness v2 outputs, plus the wallet support
+ needed to receive and spend such outputs. P2MR itself adds no post-quantum signature algorithm;
+ the experimental `OP_CHECKMLDSA44` described in [p2mr-mldsa44.md](p2mr-mldsa44.md) checks ML-DSA-44
+-signatures in P2MR leaves, and [p2mr-tripwire.md](p2mr-tripwire.md) describes leaf version `0xe0`,
+-whose elliptic curve checks stop working once a tripwire output is spent.
++signatures in P2MR leaves, [p2mr-tripwire.md](p2mr-tripwire.md) describes leaf version `0xe0`,
++whose elliptic curve checks stop working once a tripwire output is spent, and the experimental
++`OP_CHECKSLHDSA128S` described in [p2mr-slhdsa128s.md](p2mr-slhdsa128s.md) checks SLH-DSA-SHA2-128s
++signatures in P2MR leaves.
+ 
+ ## Output format
+ 
+@@ -202,8 +204,9 @@ All other failures reuse existing script errors: `SCRIPT_ERR_WITNESS_PROGRAM_WIT
+ - BIP 360 is a draft. This build follows one specific draft revision and is not compatible with
+   other revisions or with other implementations that pin a different one.
+ - BIP 360 defines no post-quantum signature check, and apart from the experimental
+-  `OP_CHECKMLDSA44` ([p2mr-mldsa44.md](p2mr-mldsa44.md)) a P2MR leaf script can only use the
+-  opcodes that BIP 342 already defines.
++  `OP_CHECKMLDSA44` ([p2mr-mldsa44.md](p2mr-mldsa44.md)) and `OP_CHECKSLHDSA128S`
++  ([p2mr-slhdsa128s.md](p2mr-slhdsa128s.md)) a P2MR leaf script can only use the opcodes that
++  BIP 342 already defines.
+ - The `tmr()` descriptor is provisional and unspecified, as is the reuse of the BIP 371 PSBT fields
+   for P2MR inputs. Neither is interoperable with anything outside this build.
+ - The wallet never generates P2MR addresses or change, because P2MR has no output type. It can only
+-- 
+2.43.0
+

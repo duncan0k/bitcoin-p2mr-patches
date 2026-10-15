@@ -1,0 +1,12 @@
+948201fd499d5036f8c3ddbe94011ca9a14806f5dca0274b0ccdadaefd6bdfbc *0066-crypto-vendor-slhdsa-c-for-SLH-DSA-SHA2-128s-signatu.patch
+93c69a0541e4abd35bdaf4b2da729e905a2bacb9f870473fb029d770d154c889 *0067-test-check-SLH-DSA-SHA2-128s-verification-against-th.patch
+0f81bd436a26f4363f882a28d2bdf2043d992aafcbd40d90a043fb6805a23edd *0068-script-add-OP_CHECKSLHDSA128S-for-SLH-DSA-SHA2-128s-.patch
+09b2bc81bb7fd185c0e33deaf9e6662bfb5c790cb573728bebae5361d54bf17d *0069-consensus-deploy-OP_CHECKSLHDSA128S-not-yet-at-a-hei.patch
+3e5ff55338f946ddedb72bd61875e82e7b9d040581f5b780368857444b805994 *0070-policy-relay-OP_CHECKSLHDSA128S-spends-only-once-act.patch
+72722018edad8b0279a6b9e4c9653cd2f1086d630314b040925f851aa7a74ae9 *0071-test-sign-and-verify-SLH-DSA-SHA2-128s-in-the-functi.patch
+2bbc0e06781f835fbe47a1ac2be2a26873616eccfbc03613aec670315dea123d *0072-test-add-OP_CHECKSLHDSA128S-script-tests-and-signatu.patch
+0867389ec010f24dc781ed254bae4aaf5bb85f73decbc9f04badac4960456378 *0073-test-add-feature_p2mr_slhdsa128s.py.patch
+11119c05a4eeb01d5e0c514808ec936a0b354e8f31986055ccb554a58646fc19 *0074-test-add-fuzz-targets-for-SLHDSA128SVerify-and-OP_CH.patch
+00df4b758a3d767a1fa8ec106b339cd3f4e353ec9f9799f673adb2d1771d7ef8 *0075-bench-time-SLH-DSA-SHA2-128s-verification-and-the-wh.patch
+147fa5b265ce0fa7e3390d99c78734ca007af3da447f8c786ee7cab77331ad87 *0076-test-check-OP_CHECKSLHDSA128S-against-the-M4-vectors.patch
+8f0f4c801d9842eb8f3d6e9ad3f3986faa6cf020c42483c1752d7f10308a69db *0077-doc-describe-OP_CHECKSLHDSA128S.patch

@@ -1,0 +1,311 @@
+From 120d2be25644e66f0ec4e6781edd98095e982e7f Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 74/77] test: add fuzz targets for SLHDSA128SVerify and
+ OP_CHECKSLHDSA128S
+
+- slhdsa128s_verify calls the verification wrapper with keys, messages,
+  context strings and signatures of any length, or the valid fixture with
+  a few bytes or lengths changed. It checks that a wrong length never
+  reaches the library, which reads the start of the signature before it
+  checks its length, and that nothing but the fixture itself verifies.
+- p2mr_slhdsa128s runs an executed or unexecuted SLH-DSA leaf through
+  VerifyScript with every combination of the flags around it, chunk and
+  key sizes at each boundary and hash types around the valid ones, and
+  compares the result with the rules written independently of the
+  interpreter, in their order. The verification itself returns a result
+  the fuzzer picks, so that both outcomes are reached. The same input
+  through DeferringSignatureChecker must give the same result.
+---
+ src/test/fuzz/CMakeLists.txt        |   2 +
+ src/test/fuzz/p2mr_slhdsa128s.cpp   | 176 ++++++++++++++++++++++++++++
+ src/test/fuzz/slhdsa128s_verify.cpp |  74 ++++++++++++
+ 3 files changed, 252 insertions(+)
+ create mode 100644 src/test/fuzz/p2mr_slhdsa128s.cpp
+ create mode 100644 src/test/fuzz/slhdsa128s_verify.cpp
+
+diff --git a/src/test/fuzz/CMakeLists.txt b/src/test/fuzz/CMakeLists.txt
+index 0bdbcd3..b5f3e11 100644
+--- a/src/test/fuzz/CMakeLists.txt
++++ b/src/test/fuzz/CMakeLists.txt
+@@ -77,6 +77,7 @@ add_executable(fuzz
+   overflow.cpp
+   p2mr.cpp
+   p2mr_mldsa44.cpp
++  p2mr_slhdsa128s.cpp
+   p2p_handshake.cpp
+   p2p_headers_presync.cpp
+   p2p_transport_serialization.cpp
+@@ -117,6 +118,7 @@ add_executable(fuzz
+   secp256k1_ecdsa_signature_parse_der_lax.cpp
+   signature_checker.cpp
+   signet.cpp
++  slhdsa128s_verify.cpp
+   socks5.cpp
+   span.cpp
+   string.cpp
+diff --git a/src/test/fuzz/p2mr_slhdsa128s.cpp b/src/test/fuzz/p2mr_slhdsa128s.cpp
+new file mode 100644
+index 0000000..2b05c7d
+--- /dev/null
++++ b/src/test/fuzz/p2mr_slhdsa128s.cpp
+@@ -0,0 +1,176 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <consensus/amount.h>
++#include <crypto/slhdsa128s.h>
++#include <primitives/transaction.h>
++#include <script/interpreter.h>
++#include <script/script.h>
++#include <serialize.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/fuzz/util.h>
++#include <uint256.h>
++
++#include <algorithm>
++#include <array>
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++namespace {
++/** Stands in for SLH-DSA-SHA2-128s verification with a result the fuzzer picks, so that both
++ *  outcomes are reached. Everything before it is the real code: splitting off the hash type, and
++ *  computing the signature message. */
++class FuzzedSLHDSA128SChecker : public MutableTransactionSignatureChecker
++{
++    const bool m_valid;
++
++public:
++    FuzzedSLHDSA128SChecker(const CMutableTransaction* tx, const CAmount& amount, const PrecomputedTransactionData& txdata, bool valid)
++        : MutableTransactionSignatureChecker(tx, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL), m_valid{valid} {}
++
++protected:
++    bool VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE>, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE>, const uint256&) const override
++    {
++        return m_valid;
++    }
++};
++
++/** Sizes around every boundary the opcode checks. */
++constexpr std::array<size_t, 12> CHUNK_SIZES{0, 1, 31, 32, 33, 55, 56, 57, 58, 81, 519, 520};
++/** Hash types around the valid ones. */
++constexpr std::array<uint8_t, 10> HASH_TYPES{0x00, 0x01, 0x02, 0x03, 0x04, 0x80, 0x81, 0x82, 0x83, 0x84};
++
++/** The outcome of an executed OP_CHECKSLHDSA128S leaf `<pk> OP_CHECKSLHDSA128S`, from the rules of
++ *  doc/p2mr-slhdsa128s.md in their order (4S-4 to 4S-11), written independently of the interpreter. */
++ScriptError ExpectedError(const std::vector<std::vector<unsigned char>>& items, size_t pubkey_size, int64_t budget, bool valid)
++{
++    // The initial stack may not hold elements over 520 bytes.
++    for (const auto& item : items) {
++        if (item.size() > MAX_SCRIPT_ELEMENT_SIZE) return SCRIPT_ERR_PUSH_SIZE;
++    }
++    if (items.size() + 1 < 17) return SCRIPT_ERR_INVALID_STACK_OPERATION;
++    const std::vector<std::vector<unsigned char>> sig_chunks{items.end() - 16, items.end()};
++    const bool signed_check{std::ranges::any_of(sig_chunks, [](const auto& chunk) { return !chunk.empty(); })};
++    if (signed_check && budget - VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK < 0) return SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT;
++    if (pubkey_size != 32) return SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE;
++    // What is left on the stack below the seventeen elements the opcode takes.
++    const size_t left_below{items.size() - 16};
++    if (!signed_check) return left_below == 0 ? SCRIPT_ERR_EVAL_FALSE : SCRIPT_ERR_CLEANSTACK;
++    for (size_t i = 0; i < 15; ++i) {
++        if (sig_chunks[i].size() != 520) return SCRIPT_ERR_SLHDSA128S_SIG_SIZE;
++    }
++    if (sig_chunks[15].size() != 56 && sig_chunks[15].size() != 57) return SCRIPT_ERR_SLHDSA128S_SIG_SIZE;
++    if (sig_chunks[15].size() == 57) {
++        const uint8_t hash_type{sig_chunks[15].back()};
++        // The spending transaction has an output for input 0, so SIGHASH_SINGLE has a message.
++        if (!(hash_type == 0x01 || hash_type == 0x02 || hash_type == 0x03 || hash_type == 0x81 || hash_type == 0x82 || hash_type == 0x83)) {
++            return SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE;
++        }
++    }
++    if (!valid) return SCRIPT_ERR_SLHDSA128S_SIG;
++    return left_below == 0 ? SCRIPT_ERR_OK : SCRIPT_ERR_CLEANSTACK;
++}
++} // namespace
++
++// The execution path of OP_CHECKSLHDSA128S: the three conditions under which byte 0xf1 executes as
++// it (4S-2, here the P2MR leaf version and depth, and the flag), the chunk and key sizes, the hash
++// type, the validation weight and the order they are checked in.
++FUZZ_TARGET(p2mr_slhdsa128s)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    // Mostly the sizes the rules accept, so that the later rules are reached; now and then another.
++    const auto size_or_other{[&](size_t size) {
++        return provider.ConsumeIntegralInRange<int>(0, 3) == 0 ? PickValue(provider, CHUNK_SIZES) : size;
++    }};
++
++    // The leaf: a push of the key, then byte 0xf1.
++    const size_t pubkey_size{size_or_other(SLHDSA128S_PUBKEY_SIZE)};
++    CScript leaf;
++    leaf << std::vector<unsigned char>(pubkey_size, provider.ConsumeIntegral<uint8_t>()) << OP_CHECKSLHDSA128S;
++    // Leaf version 0xc0, 0xe0 or another.
++    uint8_t leaf_version{TAPROOT_LEAF_TAPSCRIPT};
++    switch (provider.ConsumeIntegralInRange<int>(0, 5)) {
++    case 0: leaf_version = P2MR_LEAF_TRIPWIRED; break;
++    case 1: leaf_version = static_cast<uint8_t>(provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK); break;
++    default: break;
++    }
++    // Depth one (a sibling hash in the control block) or depth zero.
++    const bool depth_one{provider.ConsumeIntegralInRange<int>(0, 3) != 0};
++    std::vector<unsigned char> control{static_cast<unsigned char>(leaf_version | 1)};
++    if (depth_one) control.resize(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE, 0x5a);
++    const uint256 root{ComputeP2MRMerkleRoot(control, ComputeTapleafHash(leaf_version, leaf))};
++    const CScript script_pubkey{CScript{} << OP_2 << ToByteVector(root)};
++
++    // The initial stack: up to two other elements, then sixteen signature chunks; or an arbitrary count.
++    const size_t below{provider.ConsumeIntegralInRange<size_t>(0, 2)};
++    const size_t count{provider.ConsumeIntegralInRange<int>(0, 3) == 0 ? provider.ConsumeIntegralInRange<size_t>(0, 18) : below + 16};
++    const bool empty_signature{provider.ConsumeIntegralInRange<int>(0, 7) == 0};
++    std::vector<std::vector<unsigned char>> items(count);
++    for (size_t i = 0; i < count; ++i) {
++        const size_t chunk{i + std::min<size_t>(16, count) - count}; // index among the last sixteen, if one of them
++        size_t size;
++        if (i + 16 < count) {
++            size = PickValue(provider, CHUNK_SIZES);
++        } else if (empty_signature) {
++            size = 0;
++        } else if (chunk < 15) {
++            size = provider.ConsumeIntegralInRange<int>(0, 15) == 0 ? provider.ConsumeIntegralInRange<size_t>(519, 522) : size_or_other(520);
++        } else {
++            size = size_or_other(provider.ConsumeBool() ? 56 : 57);
++        }
++        items[i].assign(size, 0x33);
++        // A 57-byte last chunk ends in the hash type.
++        if (!items[i].empty()) items[i].back() = provider.ConsumeBool() ? PickValue(provider, HASH_TYPES) : provider.ConsumeIntegral<uint8_t>();
++    }
++    CScriptWitness witness;
++    witness.stack = items;
++    witness.stack.emplace_back(leaf.begin(), leaf.end());
++    witness.stack.push_back(control);
++
++    CMutableTransaction tx;
++    tx.version = 2;
++    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
++    tx.vin[0].scriptWitness = witness;
++    tx.vout.emplace_back(1000, CScript{} << OP_TRUE);
++    const CTxOut spent{2000, script_pubkey};
++    PrecomputedTransactionData txdata;
++    txdata.Init(tx, {spent}, /*force=*/true);
++
++    const bool active{provider.ConsumeBool()};
++    const bool tripwire{provider.ConsumeBool()};
++    const bool discourage{provider.ConsumeBool()};
++    script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR};
++    if (active) flags |= SCRIPT_VERIFY_P2MR_SLHDSA128S;
++    if (tripwire) flags |= SCRIPT_VERIFY_P2MR_TRIPWIRE;
++    // Disabled elliptic curve checks (doc/p2mr-tripwire.md) never touch OP_CHECKSLHDSA128S.
++    if (provider.ConsumeBool()) flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
++    if (discourage) flags |= SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS;
++
++    const bool valid{provider.ConsumeBool()};
++    const FuzzedSLHDSA128SChecker checker{&tx, spent.nValue, txdata, valid};
++    ScriptError serror;
++    const bool ret{VerifyScript(CScript{}, script_pubkey, &witness, flags, checker, &serror)};
++    assert(ret == (serror == SCRIPT_ERR_OK));
++
++    const bool executes{leaf_version == TAPROOT_LEAF_TAPSCRIPT || (leaf_version == P2MR_LEAF_TRIPWIRED && tripwire)};
++    ScriptError expected;
++    if (!depth_one || !executes) {
++        // A leaf at depth zero is not executed, and another leaf version is an upgradable one.
++        expected = SCRIPT_ERR_OK;
++    } else if (!active) {
++        // Without the rules the byte is an OP_SUCCESSx, which overrides everything else.
++        expected = discourage ? SCRIPT_ERR_DISCOURAGE_OP_SUCCESS : SCRIPT_ERR_OK;
++    } else {
++        const int64_t budget{static_cast<int64_t>(::GetSerializeSize(witness.stack)) + VALIDATION_WEIGHT_OFFSET};
++        expected = ExpectedError(items, pubkey_size, budget, valid);
++    }
++    assert(serror == expected);
++
++    // A signing wrapper passes every check through unchanged.
++    ScriptError deferred_serror;
++    assert(VerifyScript(CScript{}, script_pubkey, &witness, flags, DeferringSignatureChecker{checker}, &deferred_serror) == ret);
++    assert(deferred_serror == serror);
++}
+diff --git a/src/test/fuzz/slhdsa128s_verify.cpp b/src/test/fuzz/slhdsa128s_verify.cpp
+new file mode 100644
+index 0000000..a832459
+--- /dev/null
++++ b/src/test/fuzz/slhdsa128s_verify.cpp
+@@ -0,0 +1,74 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <crypto/slhdsa128s.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/util/slhdsa128s_fixture.h>
++#include <util/strencodings.h>
++
++#include <cassert>
++#include <cstdint>
++#include <string_view>
++#include <vector>
++
++namespace {
++const std::vector<unsigned char> FIXTURE_PUBKEY{ParseHex(SLHDSA128S_FIXTURE_PUBKEY_HEX)};
++const std::vector<unsigned char> FIXTURE_MSG{ParseHex(SLHDSA128S_FIXTURE_MSG_HEX)};
++const std::vector<unsigned char> FIXTURE_CTX{SLHDSA128S_FIXTURE_CONTEXT.begin(), SLHDSA128S_FIXTURE_CONTEXT.end()};
++const std::vector<unsigned char> FIXTURE_SIG{ParseHex(SLHDSA128S_FIXTURE_SIG_HEX)};
++
++/** Mostly the size a field must have, so that the library is reached; now and then another. */
++size_t SizeOrOther(FuzzedDataProvider& provider, size_t size, size_t max)
++{
++    return provider.ConsumeIntegralInRange<int>(0, 3) == 0 ? provider.ConsumeIntegralInRange<size_t>(0, max) : size;
++}
++} // namespace
++
++// SLHDSA128SVerify (src/crypto/slhdsa128s.h) on inputs of any length: it must never read out of
++// bounds (the vendored slh_verify hashes the first 16 bytes of the signature before it checks its
++// length), never call the library with a wrong length, and accept nothing but the valid fixture
++// signature on its own message, key and context string.
++FUZZ_TARGET(slhdsa128s_verify)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    const bool from_fixture{provider.ConsumeBool()};
++    std::vector<unsigned char> pubkey, msg, ctx, sig;
++    if (from_fixture) {
++        // The valid signature, its key, message and context, with a few bytes changed and lengths
++        // perhaps changed too.
++        pubkey = FIXTURE_PUBKEY;
++        msg = FIXTURE_MSG;
++        ctx = FIXTURE_CTX;
++        sig = FIXTURE_SIG;
++        const int edits{provider.ConsumeIntegralInRange<int>(0, 4)};
++        for (int i = 0; i < edits; ++i) {
++            const uint8_t mask{provider.ConsumeIntegral<uint8_t>()};
++            switch (provider.ConsumeIntegralInRange<int>(0, 4)) {
++            case 0: if (!sig.empty()) sig[provider.ConsumeIntegralInRange<size_t>(0, sig.size() - 1)] ^= mask; break;
++            case 1: pubkey[provider.ConsumeIntegralInRange<size_t>(0, pubkey.size() - 1)] ^= mask; break;
++            case 2: if (!msg.empty() && provider.ConsumeBool()) msg[provider.ConsumeIntegralInRange<size_t>(0, msg.size() - 1)] ^= mask; else msg.resize(SizeOrOther(provider, msg.size(), 64), mask); break;
++            case 3: if (!ctx.empty()) ctx[provider.ConsumeIntegralInRange<size_t>(0, ctx.size() - 1)] ^= mask; break;
++            case 4: sig.resize(SizeOrOther(provider, sig.size(), SLHDSA128S_SIGNATURE_SIZE + 2), mask); break;
++            }
++        }
++    } else {
++        pubkey = provider.ConsumeBytes<unsigned char>(SizeOrOther(provider, SLHDSA128S_PUBKEY_SIZE, 64));
++        msg = provider.ConsumeBytes<unsigned char>(SizeOrOther(provider, SLHDSA128S_MESSAGE_SIZE, 64));
++        ctx = provider.ConsumeBytes<unsigned char>(SizeOrOther(provider, provider.ConsumeIntegralInRange<size_t>(0, 32), 300));
++        sig = provider.ConsumeBytes<unsigned char>(SizeOrOther(provider, SLHDSA128S_SIGNATURE_SIZE, SLHDSA128S_SIGNATURE_SIZE + 2));
++        // ConsumeBytes gives fewer bytes when the input runs out; pad to the length asked for.
++        if (sig.size() + 2 >= SLHDSA128S_SIGNATURE_SIZE) sig.resize(SLHDSA128S_SIGNATURE_SIZE, 0x00);
++    }
++
++    const bool lengths_ok{pubkey.size() == SLHDSA128S_PUBKEY_SIZE && msg.size() == SLHDSA128S_MESSAGE_SIZE && sig.size() == SLHDSA128S_SIGNATURE_SIZE && ctx.size() <= SLHDSA128S_MAX_CONTEXT_SIZE};
++    const uint64_t calls_before{SLHDSA128SVerifyLibraryCalls()};
++    // Copies of exactly the given lengths, so that a sanitizer sees any read beyond them.
++    const std::vector<unsigned char> exact_sig{sig.begin(), sig.end()};
++    const bool valid{SLHDSA128SVerify(pubkey, msg, ctx, exact_sig)};
++    assert(SLHDSA128SVerifyLibraryCalls() == calls_before + (lengths_ok ? 1 : 0));
++    if (!lengths_ok) assert(!valid);
++    const bool fixture{pubkey == FIXTURE_PUBKEY && msg == FIXTURE_MSG && ctx == FIXTURE_CTX && sig == FIXTURE_SIG};
++    assert(valid == fixture);
++}
+-- 
+2.43.0
+

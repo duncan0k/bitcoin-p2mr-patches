@@ -1,0 +1,170 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6109639..d5c06ee 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -184,6 +184,46 @@ endif()
+ option(BUILD_BENCH "Build bench_bitcoin executable." OFF)
+ option(BUILD_FUZZ_BINARY "Build fuzz binary." OFF)
+ option(BUILD_FOR_FUZZING "Build for fuzzing. Enabling this will disable all other targets and override BUILD_FUZZ_BINARY." OFF)
++# MEASUREMENT ONLY (contrib/m4-measure): the worst-case hook of the vendored SLH-DSA code, and a choice
++# of SHA-256 in bench_bitcoin. Every executable or shared library linking the consensus code would get
++# the hook, so this configuration may define no such target but bench_bitcoin. The check looks at the
++# targets themselves, not at options: at the end of the top-level CMakeLists.txt (cmake_language(DEFER))
++# it walks every directory's BUILDSYSTEM_TARGETS and stops on any EXECUTABLE, SHARED_LIBRARY or
++# MODULE_LIBRARY other than bench_bitcoin, whichever option created it.
++option(SLH_MEASURE_WORST "Measurement build of contrib/m4-measure (bench_bitcoin only, never a node)." OFF)
++if(SLH_MEASURE_WORST)
++  if(NOT BUILD_BENCH)
++    message(FATAL_ERROR "SLH_MEASURE_WORST needs -DBUILD_BENCH=ON.")
++  endif()
++  function(slh_measure_collect_targets dir out)
++    set(found)
++    get_property(targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
++    foreach(target IN LISTS targets)
++      get_target_property(type ${target} TYPE)
++      if(type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$" AND NOT target STREQUAL "bench_bitcoin")
++        list(APPEND found ${target})
++      endif()
++    endforeach()
++    get_property(subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
++    foreach(subdir IN LISTS subdirs)
++      slh_measure_collect_targets("${subdir}" sub_found)
++      list(APPEND found ${sub_found})
++    endforeach()
++    set(${out} ${found} PARENT_SCOPE)
++  endfunction()
++  function(slh_measure_check_targets)
++    slh_measure_collect_targets("${PROJECT_SOURCE_DIR}" others)
++    if(others)
++      list(JOIN others ", " others)
++      message(FATAL_ERROR "SLH_MEASURE_WORST builds bench_bitcoin only, but this configuration also defines: ${others}. Turn their options off (contrib/m4-measure/build.sh does).")
++    endif()
++    if(NOT TARGET bench_bitcoin)
++      message(FATAL_ERROR "SLH_MEASURE_WORST: no bench_bitcoin target.")
++    endif()
++  endfunction()
++  cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL slh_measure_check_targets)
++  add_compile_definitions(SLH_MEASURE_WORST)
++endif()
+ 
+ option(INSTALL_MAN "Install man pages." ON)
+ 
+diff --git a/src/bench/bench_bitcoin.cpp b/src/bench/bench_bitcoin.cpp
+index 987523a..6bd0a5c 100644
+--- a/src/bench/bench_bitcoin.cpp
++++ b/src/bench/bench_bitcoin.cpp
+@@ -10,6 +10,14 @@
+ #include <util/string.h>
+ #include <test/util/setup_common.h>
+ 
++#include <iostream>
++#include <string>
++
++#ifndef SLH_MEASURE_WORST
++#error "this bench_bitcoin.cpp is the measurement-only one of contrib/m4-measure; configure with -DSLH_MEASURE_WORST=ON"
++#endif
++extern "C" int slh_measure_worst; // MEASUREMENT ONLY
++
+ #include <chrono>
+ #include <cstdint>
+ #include <cstdlib>
+@@ -64,7 +72,19 @@ int main(int argc, char** argv)
+ {
+     ArgsManager argsman;
+     SetupBenchArgs(argsman);
+-    SHA256AutoDetect();
++    {
++        // MEASUREMENT ONLY: BENCH_SHA256=standard|sse4|sse4_avx2 picks Core's SHA-256; SLH_WORST=1
++        // turns on the worst-case hook of the vendored SLH-DSA code.
++        const char* impl{std::getenv("BENCH_SHA256")};
++        sha256_implementation::UseImplementation use{sha256_implementation::USE_ALL};
++        if (impl && std::string{impl} == "standard") use = sha256_implementation::STANDARD;
++        if (impl && std::string{impl} == "sse4") use = sha256_implementation::USE_SSE4;
++        if (impl && std::string{impl} == "sse4_avx2") use = sha256_implementation::USE_SSE4_AND_AVX2;
++        std::cerr << "SHA256: " << SHA256AutoDetect(use) << std::endl;
++        const char* worst{std::getenv("SLH_WORST")};
++        if (worst && std::string{worst} == "1") slh_measure_worst = 1;
++        std::cerr << "SLH worst-case hook: " << slh_measure_worst << std::endl;
++    }
+     std::string error;
+     if (!argsman.ParseParameters(argc, argv, error)) {
+         tfm::format(std::cerr, "Error parsing command line arguments: %s\n", error);
+diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
+index 323e757..7c234f0 100644
+--- a/src/bitcoind.cpp
++++ b/src/bitcoind.cpp
+@@ -3,6 +3,11 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++// MEASUREMENT ONLY (contrib/m4-measure): a build with the SLH-DSA worst-case hook must never make a node.
++#ifdef SLH_MEASURE_WORST
++#error "SLH_MEASURE_WORST is a measurement build: bitcoind and bitcoin-node cannot be built with it"
++#endif
++
+ #include <bitcoin-build-config.h> // IWYU pragma: keep
+ 
+ #include <chainparams.h>
+diff --git a/src/crypto/slhdsa128s/slh_dsa.c b/src/crypto/slhdsa128s/slh_dsa.c
+index 4fb3dad..e3e0bff 100644
+--- a/src/crypto/slhdsa128s/slh_dsa.c
++++ b/src/crypto/slhdsa128s/slh_dsa.c
+@@ -12,6 +12,13 @@
+ 
+ /* === Internal */
+ 
++#ifdef SLH_MEASURE_WORST
++/* MEASUREMENT ONLY (contrib/m4-measure of the patch repository, never part of the series): when
++   set, every WOTS+ message digit is taken as zero, the checksum computed from that, so that every
++   chain runs 510 steps per layer, and the hypertree check is judged valid. */
++int slh_measure_worst = 0;
++#endif
++
+ /* helper functions to compute "len = len1 + len2" */
+ 
+ static SLH_INLINE uint32_t get_len1(const slh_param_t *prm)
+@@ -150,7 +157,17 @@ static void wots_pk_from_sig(slh_var_t *var, uint8_t *pk, const uint8_t *sig,
+   uint8_t tmp[SLH_MAX_LEN * SLH_MAX_N];
+   size_t tmp_sz;
+ 
+-  wots_csum(vm, m, prm);
++#ifdef SLH_MEASURE_WORST
++  if (slh_measure_worst)
++  {
++    static const uint8_t zero[SLH_MAX_N] = {0};
++    wots_csum(vm, zero, prm);
++  }
++  else
++#endif
++  {
++    wots_csum(vm, m, prm);
++  }
+ 
+   len = get_len(prm);
+   t = (1 << prm->lg_w) - 1;
+@@ -338,6 +355,9 @@ static int ht_verify(slh_var_t *var, const uint8_t *m, const uint8_t *sig_ht,
+     xmss_pk_from_sig(var, node, i_leaf, sig_ht, node);
+   }
+ 
++#ifdef SLH_MEASURE_WORST
++  if (slh_measure_worst) return 1;
++#endif
+   return memcmp(node, var->pk_root, prm->n) == 0;
+ }
+ 
+diff --git a/src/qt/main.cpp b/src/qt/main.cpp
+index 422cf7f..ae3d8fa 100644
+--- a/src/qt/main.cpp
++++ b/src/qt/main.cpp
+@@ -2,6 +2,11 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++// MEASUREMENT ONLY (contrib/m4-measure): a build with the SLH-DSA worst-case hook must never make a node.
++#ifdef SLH_MEASURE_WORST
++#error "SLH_MEASURE_WORST is a measurement build: bitcoin-qt and bitcoin-gui cannot be built with it"
++#endif
++
+ #include <qt/bitcoin.h>
+ 
+ #include <compat/compat.h>

@@ -1,0 +1,3567 @@
+From 0c934569942bc3ff6bfda459ae23895084e02118 Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 11:40:07 +0000
+Subject: [PATCH 66/77] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
+ verification
+
+Ark-0's M4-S adds an experimental tapscript opcode inside P2MR leaves that
+verifies an SLH-DSA-SHA2-128s (FIPS 205) signature. This is the verifier
+it will use, on its own, before any consensus code: slhdsa-c at commit
+a0fc1ff253930060d0246aebca06c2538eb92b88 (Apache-2.0 OR ISC OR MIT, used
+here under MIT), the commit liboqs 0.15.0 integrates, taken unmodified
+into src/crypto/slhdsa128s/.
+
+- Only the files the SHA2 parameter sets need are taken: slh_sha2.c
+  defines all six SHA2 sets and the larger ones use SHA-512, so
+  sha2_512.c comes along, but only slh_dsa_sha2_128s is used. The SHAKE
+  sets, Keccak and HashSLH-DSA are left out.
+- The library's own portable C SHA-256 is used on every platform. It uses
+  no SHA extensions, so every machine runs the same verification code, and
+  the validation weight of the opcode is to be measured on that code.
+- The four C files get their compile options from src/crypto/CMakeLists.txt
+  rather than from core_interface, which also carries Threads' generator
+  expressions, -fmacro-prefix-map and C++ workarounds: Core's hardening,
+  probed again with the C compiler as Core probes it for C++ (the pair
+  "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" as one unit with Core's
+  optimization check, -Wstack-protector, -fstack-protector-all,
+  -fcf-protection=full, -fstack-clash-protection, -mbranch-protection on
+  aarch64), a rejected unit skipped as Core does, so a skipped pair leaves
+  what CMAKE_C_FLAGS defines; the -fsanitize flags of sanitize_interface,
+  required when SANITIZERS is set; a warning set of their own instead of
+  Core's, whose style warnings the upstream files do not follow: -Wall
+  -Wextra -Wformat -Wformat-security -Wvla -Wundef -Wimplicit-fallthrough
+  -Wbidi-chars=any; and APPEND_CPPFLAGS and APPEND_CFLAGS last on their
+  command line, as cmake/secp256k1.cmake arranges for libsecp256k1.
+- src/crypto/slhdsa128s.h exposes one function, SLHDSA128SVerify:
+  slh_verify of FIPS 205, the external interface of pure SLH-DSA with a
+  context string, over a 32-byte message. It is not HashSLH-DSA and not
+  the internal interface. It checks the length of the public key, the
+  message, the signature and the context string before it calls the
+  library, because the vendored slh_verify hashes the first 16 bytes of
+  the signature before it checks the signature's length. A counter of
+  library calls lets tests show that a wrong length never reaches the
+  library, and lets measurements count complete verifications.
+- Key generation and signing stay in slh_dsa.c, which is not modified;
+  only the unit tests and benchmarks call them.
+
+src/crypto/slhdsa128s/README.md records where every file came from, with
+its SHA-256.
+---
+ src/crypto/CMakeLists.txt          |  83 ++++
+ src/crypto/slhdsa128s.cpp          |  44 ++
+ src/crypto/slhdsa128s.h            |  44 ++
+ src/crypto/slhdsa128s/LICENSE      | 248 ++++++++++
+ src/crypto/slhdsa128s/README.md    |  79 ++++
+ src/crypto/slhdsa128s/cbmc.h       | 143 ++++++
+ src/crypto/slhdsa128s/plat_local.h | 266 +++++++++++
+ src/crypto/slhdsa128s/sha2_256.c   | 271 +++++++++++
+ src/crypto/slhdsa128s/sha2_512.c   | 355 ++++++++++++++
+ src/crypto/slhdsa128s/sha2_api.h   | 102 ++++
+ src/crypto/slhdsa128s/slh_adrs.h   | 176 +++++++
+ src/crypto/slhdsa128s/slh_dsa.c    | 718 +++++++++++++++++++++++++++++
+ src/crypto/slhdsa128s/slh_dsa.h    |  85 ++++
+ src/crypto/slhdsa128s/slh_param.h  |  63 +++
+ src/crypto/slhdsa128s/slh_sha2.c   | 581 +++++++++++++++++++++++
+ src/crypto/slhdsa128s/slh_sys.h    |  40 ++
+ src/crypto/slhdsa128s/slh_var.h    |  61 +++
+ 17 files changed, 3359 insertions(+)
+ create mode 100644 src/crypto/slhdsa128s.cpp
+ create mode 100644 src/crypto/slhdsa128s.h
+ create mode 100644 src/crypto/slhdsa128s/LICENSE
+ create mode 100644 src/crypto/slhdsa128s/README.md
+ create mode 100644 src/crypto/slhdsa128s/cbmc.h
+ create mode 100644 src/crypto/slhdsa128s/plat_local.h
+ create mode 100644 src/crypto/slhdsa128s/sha2_256.c
+ create mode 100644 src/crypto/slhdsa128s/sha2_512.c
+ create mode 100644 src/crypto/slhdsa128s/sha2_api.h
+ create mode 100644 src/crypto/slhdsa128s/slh_adrs.h
+ create mode 100644 src/crypto/slhdsa128s/slh_dsa.c
+ create mode 100644 src/crypto/slhdsa128s/slh_dsa.h
+ create mode 100644 src/crypto/slhdsa128s/slh_param.h
+ create mode 100644 src/crypto/slhdsa128s/slh_sha2.c
+ create mode 100644 src/crypto/slhdsa128s/slh_sys.h
+ create mode 100644 src/crypto/slhdsa128s/slh_var.h
+
+diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
+index e1ae782..2533005 100644
+--- a/src/crypto/CMakeLists.txt
++++ b/src/crypto/CMakeLists.txt
+@@ -21,6 +21,87 @@ set_target_properties(bitcoin_mldsa44 PROPERTIES
+   C_VISIBILITY_PRESET hidden
+ )
+ 
++# SLH-DSA-SHA2-128s (FIPS 205) verification, vendored from slhdsa-c: see
++# slhdsa128s/README.md. The files of the SHA2 parameter sets only, unmodified,
++# with the library's own portable C SHA-256. The include directory is PUBLIC
++# so that the unit tests can sign with the same code; the node only verifies,
++# through slhdsa128s.h.
++add_library(bitcoin_slhdsa128s STATIC EXCLUDE_FROM_ALL
++  slhdsa128s/sha2_256.c
++  slhdsa128s/sha2_512.c
++  slhdsa128s/slh_dsa.c
++  slhdsa128s/slh_sha2.c
++)
++target_include_directories(bitcoin_slhdsa128s
++  PUBLIC
++    ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s
++)
++set_target_properties(bitcoin_slhdsa128s PROPERTIES
++  C_VISIBILITY_PRESET hidden
++)
++# Compile options of the C files, chosen here rather than taken from core_interface (which also
++# carries Threads' generator expressions, -fmacro-prefix-map and C++ workarounds):
++# - Core's hardening, probed again with the C compiler as Core probes it for C++: the pair
++#   "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" as one unit, with the same check for optimization, then
++#   -Wstack-protector, -fstack-protector-all, -fcf-protection=full, -fstack-clash-protection (not on
++#   MinGW) and on aarch64 -mbranch-protection. A unit the C compiler rejects is skipped with a message,
++#   as try_append_cxx_flags does; a skipped Fortify pair leaves what CMAKE_C_FLAGS defines.
++# - the -fsanitize flags of sanitize_interface, required when SANITIZERS is set;
++# - a warning set of their own, not Core's, whose style warnings (-Wtrailing-whitespace, ...) the
++#   unmodified upstream files do not follow (libsecp256k1 likewise keeps its own);
++# - APPEND_CPPFLAGS and APPEND_CFLAGS at the end of the command line.
++# This follows cmake/secp256k1.cmake for libsecp256k1, plus the hardening. Each unit is a CMake list,
++# never joined and split again.
++include(CheckCSourceCompiles)
++function(slhdsa128s_try_add_c_options target required source)
++  set(unit ${ARGN})
++  list(JOIN unit " " unit_as_string)
++  string(MAKE_C_IDENTIFIER "SLHDSA128S_C_ACCEPTS_${unit_as_string}" accepted)
++  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
++  set(CMAKE_REQUIRED_FLAGS "${unit_as_string} ${working_compiler_werror_flag}")
++  check_c_source_compiles("${source}" ${accepted})
++  if(${accepted})
++    target_compile_options(${target} PRIVATE ${unit})
++  elseif(required)
++    message(FATAL_ERROR "The C compiler rejects ${unit_as_string}, which bitcoin_slhdsa128s requires.")
++  else()
++    message(STATUS "bitcoin_slhdsa128s: the C compiler rejects ${unit_as_string}; not used.")
++  endif()
++endfunction()
++set(slhdsa128s_main "int main(void) { return 0; }")
++if(NOT MSVC)
++  # _FORTIFY_SOURCE requires some optimization; the probe fails without it, as Core's does.
++  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "int main(void) {
++    #if !defined __OPTIMIZE__ || __OPTIMIZE__ <= 0
++    #error
++    #endif
++    return 0;
++    }" -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
++  foreach(flag IN ITEMS -Wstack-protector -fstack-protector-all -fcf-protection=full)
++    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" ${flag})
++  endforeach()
++  if(NOT MINGW)
++    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -fstack-clash-protection)
++  endif()
++  if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
++    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
++      slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -mbranch-protection=bti)
++    else()
++      slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -mbranch-protection=standard)
++    endif()
++  endif()
++endif()
++get_target_property(slhdsa128s_sanitize_options sanitize_interface INTERFACE_COMPILE_OPTIONS)
++if(slhdsa128s_sanitize_options)
++  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s TRUE "${slhdsa128s_main}" ${slhdsa128s_sanitize_options})
++elseif(SANITIZERS)
++  message(FATAL_ERROR "SANITIZERS is set, but sanitize_interface has no compile options for bitcoin_slhdsa128s.")
++endif()
++foreach(warning IN ITEMS -Wall -Wextra -Wformat -Wformat-security -Wvla -Wundef -Wimplicit-fallthrough -Wbidi-chars=any)
++  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" ${warning})
++endforeach()
++string(APPEND CMAKE_C_COMPILE_OBJECT " ${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
++
+ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
+   aes.cpp
+   chacha20.cpp
+@@ -39,6 +120,7 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
+   sha3.cpp
+   sha512.cpp
+   siphash.cpp
++  slhdsa128s.cpp
+   ../support/cleanse.cpp
+ )
+ 
+@@ -46,6 +128,7 @@ target_link_libraries(bitcoin_crypto
+   PRIVATE
+     core_interface
+     bitcoin_mldsa44
++    bitcoin_slhdsa128s
+ )
+ 
+ if(HAVE_SSE41)
+diff --git a/src/crypto/slhdsa128s.cpp b/src/crypto/slhdsa128s.cpp
+new file mode 100644
+index 0000000..7917101
+--- /dev/null
++++ b/src/crypto/slhdsa128s.cpp
+@@ -0,0 +1,44 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <crypto/slhdsa128s.h>
++
++#include <slh_dsa.h>
++
++#include <atomic>
++
++// The vendored code picks its byte order from these two macros, which GCC and Clang define. A
++// compiler without them would make it take a little-endian machine for a big-endian one.
++#if !defined(__BYTE_ORDER__) || !defined(__ORDER_BIG_ENDIAN__)
++#error "slhdsa-c needs __BYTE_ORDER__ and __ORDER_BIG_ENDIAN__"
++#endif
++
++namespace {
++std::atomic<uint64_t> g_library_calls{0};
++} // namespace
++
++bool SLHDSA128SVerify(std::span<const unsigned char> pubkey,
++                      std::span<const unsigned char> msg,
++                      std::span<const unsigned char> ctx,
++                      std::span<const unsigned char> sig)
++{
++    // slh_verify computes the message digest from the first n bytes of the signature, R, before it
++    // looks at the signature's length, and it reads 2n bytes of the public key whatever its size.
++    // Nothing of the wrong length may reach it.
++    if (pubkey.size() != SLHDSA128S_PUBKEY_SIZE) return false;
++    if (msg.size() != SLHDSA128S_MESSAGE_SIZE) return false;
++    if (sig.size() != SLHDSA128S_SIGNATURE_SIZE) return false;
++    if (ctx.size() > SLHDSA128S_MAX_CONTEXT_SIZE) return false;
++    // An empty span may have no data pointer, which C library code need not accept even for zero bytes.
++    static constexpr unsigned char EMPTY[1]{0};
++    const unsigned char* const ctx_data{ctx.empty() ? EMPTY : ctx.data()};
++    g_library_calls.fetch_add(1, std::memory_order_relaxed);
++    // One on success, zero for an invalid signature.
++    return slh_verify(msg.data(), msg.size(), sig.data(), sig.size(), ctx_data, ctx.size(), pubkey.data(), &slh_dsa_sha2_128s) == 1;
++}
++
++uint64_t SLHDSA128SVerifyLibraryCalls()
++{
++    return g_library_calls.load(std::memory_order_relaxed);
++}
+diff --git a/src/crypto/slhdsa128s.h b/src/crypto/slhdsa128s.h
+new file mode 100644
+index 0000000..3cd0125
+--- /dev/null
++++ b/src/crypto/slhdsa128s.h
+@@ -0,0 +1,44 @@
++// Copyright (c) 2026 CipherScope
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_CRYPTO_SLHDSA128S_H
++#define BITCOIN_CRYPTO_SLHDSA128S_H
++
++#include <cstddef>
++#include <cstdint>
++#include <span>
++
++/** Size in bytes of an SLH-DSA-SHA2-128s (FIPS 205) public key: PK.seed || PK.root. */
++static constexpr size_t SLHDSA128S_PUBKEY_SIZE{32};
++/** Size in bytes of an SLH-DSA-SHA2-128s (FIPS 205) signature: (1 + k(1 + a) + h + d len) n. */
++static constexpr size_t SLHDSA128S_SIGNATURE_SIZE{7856};
++/** Longest context string FIPS 205 allows. */
++static constexpr size_t SLHDSA128S_MAX_CONTEXT_SIZE{255};
++/** Size in bytes of the message OP_CHECKSLHDSA128S signs: a BIP 341 signature message hash. */
++static constexpr size_t SLHDSA128S_MESSAGE_SIZE{32};
++
++/** Verify an SLH-DSA-SHA2-128s signature on the 32-byte msg under the context string ctx.
++ *
++ *  This is slh_verify of FIPS 205 (Algorithm 24): the external interface of
++ *  pure SLH-DSA, which verifies over 0x00 || len(ctx) || ctx || msg. It is not
++ *  HashSLH-DSA and not the internal interface.
++ *
++ *  Every length is checked before the library is called, and a wrong one makes
++ *  this return false: the public key must be SLHDSA128S_PUBKEY_SIZE bytes, the
++ *  message SLHDSA128S_MESSAGE_SIZE bytes (the signature message of
++ *  OP_CHECKSLHDSA128S), the signature SLHDSA128S_SIGNATURE_SIZE bytes and the
++ *  context string at most SLHDSA128S_MAX_CONTEXT_SIZE bytes. The vendored
++ *  slh_verify reads the first 16 bytes of the signature before it checks its
++ *  length, so no caller may hand it a shorter one.
++ */
++bool SLHDSA128SVerify(std::span<const unsigned char> pubkey,
++                      std::span<const unsigned char> msg,
++                      std::span<const unsigned char> ctx,
++                      std::span<const unsigned char> sig);
++
++/** How many times SLHDSA128SVerify has called the library's slh_verify in this
++ *  process. For tests and measurements, which count complete verifications. */
++uint64_t SLHDSA128SVerifyLibraryCalls();
++
++#endif // BITCOIN_CRYPTO_SLHDSA128S_H
+diff --git a/src/crypto/slhdsa128s/LICENSE b/src/crypto/slhdsa128s/LICENSE
+new file mode 100644
+index 0000000..6b6fb03
+--- /dev/null
++++ b/src/crypto/slhdsa128s/LICENSE
+@@ -0,0 +1,248 @@
++(The code was originally written by Markku-Juhani O. Saarinen in 2023-25 and
++donated to the slhdsa-c project and derived projects.)
++
++
++ISC license
++-----------
++
++Copyright (c) The slhdsa-c project authors
++
++Permission to use, copy, modify, and/or distribute this software for any purpose
++with or without fee is hereby granted, provided that the above copyright notice
++and this permission notice appear in all copies.
++
++THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
++REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
++FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
++INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
++OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
++TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
++THIS SOFTWARE.
++
++
++MIT license
++-----------
++
++Copyright (c) The slhdsa-c project authors
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of
++this software and associated documentation files (the “Software”), to deal in
++the Software without restriction, including without limitation the rights to
++use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
++the Software, and to permit persons to whom the Software is furnished to do so,
++subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
++FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
++COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
++IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++
++Apache-2.0 license for slhdsa-c content
++---------------------------------------
++
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   APPENDIX: How to apply the Apache License to your work.
++
++      To apply the Apache License to your work, attach the following
++      boilerplate notice, with the fields enclosed by brackets "[]"
++      replaced with your own identifying information. (Don't include
++      the brackets!)  The text should be enclosed in the appropriate
++      comment syntax for the file format. We also recommend that a
++      file or class name and description of purpose be included on the
++      same "printed page" as the copyright notice for easier
++      identification within third-party archives.
++
++   Copyright (c) The slhdsa-c project authors
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+diff --git a/src/crypto/slhdsa128s/README.md b/src/crypto/slhdsa128s/README.md
+new file mode 100644
+index 0000000..84b90b4
+--- /dev/null
++++ b/src/crypto/slhdsa128s/README.md
+@@ -0,0 +1,79 @@
++# SLH-DSA-SHA2-128s verification (vendored slhdsa-c)
++
++This directory holds files of [slhdsa-c](https://github.com/pq-code-package/slhdsa-c),
++a portable C implementation of FIPS 205 (SLH-DSA) by the PQ Code Package project,
++at commit `a0fc1ff253930060d0246aebca06c2538eb92b88` (2025-07-22, "add slh_sys
++header to META sources"). That is the commit liboqs 0.15.0 integrates:
++`scripts/copy_from_upstream/copy_from_slh_dsa_c.py` of liboqs tag `0.15.0`
++(commit `97f6b86b1b6d109cfd43cf276ae39c2e776aed80`) sets
++`commit_hash = "a0fc1ff253930060d0246aebca06c2538eb92b88"`, and its README and
++`docs/algorithms/sig/slh_dsa.yml` name the same commit. The commit is no longer
++on a branch of the upstream repository; it was fetched by its hash. The files
++below that liboqs 0.15.0 carries in `src/sig/slh_dsa/slh_dsa_c/` are byte for
++byte these, except `slh_dsa.c`, `slh_dsa.h` and `slh_sha2.c`, to which liboqs
++applies its own `internal_api.patch`; none of liboqs's changes is taken here.
++
++slhdsa-c is licensed Apache-2.0 OR ISC OR MIT (`LICENSE`, unmodified). It is used
++here under the **MIT** license.
++
++The upstream README says the library is work in progress and not yet
++recommended for production. It is checked here by `src/test/slhdsa128s_tests.cpp`
++against the NIST ACVP sigVer vectors for the external, pure SLH-DSA-SHA2-128s
++interface, against signatures made by an independent implementation, and by
++the fuzz target `slhdsa128s_verify`.
++
++## What was taken
++
++Unmodified, from the repository root at that commit:
++
++| File | SHA-256 |
++|---|---|
++| `LICENSE` | `f5f353e7c2308465c5e82021a06acfba74d3d5e70d13e4af8226e9051a25ce2c` |
++| `cbmc.h` | `91058b937e92736535be4c8372a6eae7cafd5ac00abc891476c7c23231c4cf80` |
++| `plat_local.h` | `960145bea8fec1d21b00ffeaf5bb9de2aab8cb15b3ae22e8f847f5f44dfc594b` |
++| `sha2_256.c` | `b1b74abe3d4b6b925ca4ce3ded43a5f2188f0f16a41f8ae91c93de95fc0fa07b` |
++| `sha2_512.c` | `84b914b342a16d07716b1830668e3728892b422fc322f05fadec3993f60f2832` |
++| `sha2_api.h` | `4315f4891acfdcadfdc220770fd3a8a080aec94f6346eec9d8badbea1bb3a6ba` |
++| `slh_adrs.h` | `6a734cb673b12299165908f53fdade618d9005287b1a902de8ac90c211710d4c` |
++| `slh_dsa.c` | `fbbf5c4ed4ea70bf9d90c1de4ddb168d5671e94621a708f110f57a81de0a5613` |
++| `slh_dsa.h` | `aa5eb9234f9dc342d5a41af02a572fd68c4a832b05561cd4c95447a2be5cfe2e` |
++| `slh_param.h` | `d848f41c5f5ac2b911d077209da0f9fb313ffcc8865c55b43dd09cdfce009ac7` |
++| `slh_sha2.c` | `075066c5af445933868eeb42120451662aefd696cf5a4c71ce464fe758f07604` |
++| `slh_sys.h` | `7280d918931f9302c7bd47043f477796102e777fa1d30ff667b479eb0fe9ae94` |
++| `slh_var.h` | `0c87ae009a76c07f3c0c066b2d255e5f6cb18e6f38f7df3d805e395d37ef96b0` |
++
++These are the files the six SHA2 parameter sets need. `slh_sha2.c` defines all
++six, and the 192- and 256-bit ones use SHA-512, so `sha2_512.c` is compiled
++too; only `slh_dsa_sha2_128s` is used. The library's own portable C SHA-256
++(`sha2_256.c`) is used on every platform: it uses no SHA extensions, so every
++machine runs the same verification code.
++
++## What was left out
++
++The SHAKE parameter sets and Keccak (`slh_shake.c`, `sha3_api.c`, `sha3_api.h`,
++`sha3_f1600.c`), HashSLH-DSA (`slh_prehash.c`, `slh_prehash.h`), and everything
++outside the repository root's C files (tests, proofs, build files).
++
++## What was added
++
++This file. Nothing in the files above was changed. `src/crypto/CMakeLists.txt`
++compiles the four `.c` files as the static library `bitcoin_slhdsa128s`, with
++hidden symbol visibility; Core's hardening probed again with the C compiler
++(the pair `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3` as one unit with Core's
++optimization check, `-Wstack-protector`, `-fstack-protector-all`,
++`-fcf-protection=full`, `-fstack-clash-protection`, `-mbranch-protection` on
++aarch64; a rejected unit is skipped, as Core does); the `-fsanitize` flags of
++`sanitize_interface`, required when `SANITIZERS` is set; a warning set of its
++own instead of Core's (`-Wall -Wextra -Wformat -Wformat-security -Wvla
++-Wundef -Wimplicit-fallthrough -Wbidi-chars=any`), as these files keep
++upstream's style; `APPEND_CPPFLAGS` and `APPEND_CFLAGS` last; nothing else of
++`core_interface`; and none of the library's optional macros (`SLH_EXPERIMENTAL`,
++`XDEBUG`) defined.
++
++The node only verifies. `src/crypto/slhdsa128s.h` exposes one function,
++`SLHDSA128SVerify`, the external interface of pure SLH-DSA with a context
++string (FIPS 205 Algorithm 24) over a 32-byte message, and checks every length
++before it calls the library: the upstream `slh_verify` reads the first 16 bytes
++of the signature before it checks the signature's length. Key generation and signing are
++compiled in with the rest of `slh_dsa.c`, which this code does not modify, but
++only the unit tests and benchmarks call them.
+diff --git a/src/crypto/slhdsa128s/cbmc.h b/src/crypto/slhdsa128s/cbmc.h
+new file mode 100644
+index 0000000..452390f
+--- /dev/null
++++ b/src/crypto/slhdsa128s/cbmc.h
+@@ -0,0 +1,143 @@
++/*
++ * Copyright (c) The mlkem-native project authors
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++#ifndef SLH_CBMC_H
++#define SLH_CBMC_H
++/***************************************************
++ * Basic replacements for __CPROVER_XXX contracts
++ ***************************************************/
++
++#ifndef CBMC
++
++#define __contract__(x)
++#define __loop__(x)
++
++#else /* !CBMC */
++
++#define __contract__(x) x
++#define __loop__(x) x
++
++/* https://diffblue.github.io/cbmc/contracts-assigns.html */
++#define assigns(...) __CPROVER_assigns(__VA_ARGS__)
++
++/* https://diffblue.github.io/cbmc/contracts-requires-ensures.html */
++#define requires(...) __CPROVER_requires(__VA_ARGS__)
++#define ensures(...) __CPROVER_ensures(__VA_ARGS__)
++/* https://diffblue.github.io/cbmc/contracts-loops.html */
++#define invariant(...) __CPROVER_loop_invariant(__VA_ARGS__)
++#define decreases(...) __CPROVER_decreases(__VA_ARGS__)
++/* cassert to avoid confusion with in-built assert */
++#define cassert(x) __CPROVER_assert(x, "cbmc assertion failed")
++#define assume(...) __CPROVER_assume(__VA_ARGS__)
++
++/***************************************************
++ * Macros for "expression" forms that may appear
++ * _inside_ top-level contracts.
++ ***************************************************/
++
++/*
++ * function return value - useful inside ensures
++ * https://diffblue.github.io/cbmc/contracts-functions.html
++ */
++#define return_value (__CPROVER_return_value)
++
++/*
++ * assigns l-value targets
++ * https://diffblue.github.io/cbmc/contracts-assigns.html
++ */
++#define object_whole(...) __CPROVER_object_whole(__VA_ARGS__)
++#define memory_slice(...) __CPROVER_object_upto(__VA_ARGS__)
++#define same_object(...) __CPROVER_same_object(__VA_ARGS__)
++
++/*
++ * Pointer-related predicates
++ * https://diffblue.github.io/cbmc/contracts-memory-predicates.html
++ */
++#define memory_no_alias(...) __CPROVER_is_fresh(__VA_ARGS__)
++#define readable(...) __CPROVER_r_ok(__VA_ARGS__)
++#define writeable(...) __CPROVER_w_ok(__VA_ARGS__)
++
++/*
++ * History variables
++ * https://diffblue.github.io/cbmc/contracts-history-variables.html
++ */
++#define old(...) __CPROVER_old(__VA_ARGS__)
++#define loop_entry(...) __CPROVER_loop_entry(__VA_ARGS__)
++
++/*
++ * Quantifiers
++ * Note that the range on qvar is _exclusive_ between qvar_lb .. qvar_ub
++ * https://diffblue.github.io/cbmc/contracts-quantifiers.html
++ */
++
++/*
++ * Prevent clang-format from corrupting CBMC's special ==> operator
++ */
++/* clang-format off */
++#define forall(qvar, qvar_lb, qvar_ub, predicate)                 \
++  __CPROVER_forall                                                \
++  {                                                               \
++    unsigned qvar;                                                \
++    ((qvar_lb) <= (qvar) && (qvar) < (qvar_ub)) ==> (predicate)   \
++  }
++
++#define EXISTS(qvar, qvar_lb, qvar_ub, predicate)         \
++  __CPROVER_exists                                              \
++  {                                                             \
++    unsigned qvar;                                              \
++    ((qvar_lb) <= (qvar) && (qvar) < (qvar_ub)) && (predicate)  \
++  }
++/* clang-format on */
++
++/***************************************************
++ * Convenience macros for common contract patterns
++ ***************************************************/
++
++/*
++ * Boolean-value predidate that asserts that "all values of array_var are in
++ * range value_lb (inclusive) .. value_ub (exclusive)"
++ * Example:
++ *  array_bound(a->coeffs, 0, SLHEM_N, 0, SLHEM_Q)
++ * expands to
++ *  __CPROVER_forall { int k; (0 <= k && k <= SLHEM_N-1) ==> (
++ *  0 <= a->coeffs[k]) && a->coeffs[k] < SLHEM_Q)) }
++ */
++
++/*
++ * Prevent clang-format from corrupting CBMC's special ==> operator
++ */
++/* clang-format off */
++#define CBMC_CONCAT_(left, right) left##right
++#define CBMC_CONCAT(left, right) CBMC_CONCAT_(left, right)
++
++#define array_bound_core(qvar, qvar_lb, qvar_ub, array_var,            \
++                         value_lb, value_ub)                           \
++  __CPROVER_forall                                                     \
++  {                                                                    \
++    unsigned qvar;                                                     \
++    ((qvar_lb) <= (qvar) && (qvar) < (qvar_ub)) ==>                    \
++        (((int)(value_lb) <= ((array_var)[(qvar)])) &&		       \
++         (((array_var)[(qvar)]) < (int)(value_ub)))		       \
++  }
++
++#define array_bound(array_var, qvar_lb, qvar_ub, value_lb, value_ub) \
++  array_bound_core(CBMC_CONCAT(_cbmc_idx, __LINE__), (qvar_lb),      \
++      (qvar_ub), (array_var), (value_lb), (value_ub))
++/* clang-format on */
++
++/* Wrapper around array_bound operating on absolute values.
++ *
++ * The absolute value bound `k` is exclusive.
++ *
++ * Note that since the lower bound in array_bound is inclusive, we have to
++ * raise it by 1 here.
++ */
++#define array_abs_bound(arr, lb, ub, k) \
++  array_bound((arr), (lb), (ub), -((int)(k)) + 1, (k))
++
++#endif /* CBMC */
++
++#endif /* !SLH_CBMC_H */
+diff --git a/src/crypto/slhdsa128s/plat_local.h b/src/crypto/slhdsa128s/plat_local.h
+new file mode 100644
+index 0000000..f1bf1e3
+--- /dev/null
++++ b/src/crypto/slhdsa128s/plat_local.h
+@@ -0,0 +1,266 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === Localization affecting all implementations can be inserted here. */
++
++#ifndef _PLAT_LOCAL_H_
++#define _PLAT_LOCAL_H_
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++#include <stddef.h>
++#include <stdint.h>
++#include "slh_sys.h"
++
++#ifndef PLAT_VERS_STR
++#define PLAT_VERS_STR "dev version"
++#define PLAT_VERS_MAJ 0
++#define PLAT_VERS_MIN 0
++#endif
++
++  /* === platform detection logic */
++
++#ifndef PLAT_XLEN
++
++#if defined(__riscv)
++
++#define PLAT_XLEN __riscv_xlen
++#if defined(__riscv_vector)
++#define PLAT_ARCH_RVV
++#define PLAT_ARCH_STR "PLAT_ARCH_RVV"
++#elif (__riscv_xlen == 32)
++#define PLAT_ARCH_RV32
++#define PLAT_ARCH_STR "PLAT_ARCH_RV32"
++#else
++#define PLAT_ARCH_RV64
++#define PLAT_ARCH_STR "PLAT_ARCH_RV64"
++#endif
++
++#elif defined(__arm__)
++#define PLAT_XLEN 32
++#define PLAT_ARCH_STR "PLAT_ARCH_ARM32"
++#define PLAT_ARCH_ARM32
++
++#elif defined(__aarch64__)
++#define PLAT_XLEN 64
++#define PLAT_ARCH_STR "PLAT_ARCH_ARM64"
++#define PLAT_ARCH_ARM64
++
++#elif defined(__i386__)
++#define PLAT_XLEN 32
++#define PLAT_ARCH_STR "PLAT_ARCH_IA32"
++#define PLAT_ARCH_IA32
++
++#elif defined(__x86_64__)
++#define PLAT_XLEN 64
++#define PLAT_ARCH_STR "PLAT_ARCH_X64"
++#define PLAT_ARCH_X64
++
++#elif (__WORDSIZE == 32)
++#define PLAT_XLEN 32
++#define PLAT_ARCH_STR "PLAT_ARCH_GEN32"
++#define PLAT_ARCH_GEN32
++
++#else
++/* fallback for everything */
++#define PLAT_XLEN 64
++#define PLAT_ARCH_STR "PLAT_ARCH_GEN64"
++#define PLAT_ARCH_GEN64
++#endif
++
++/* PLAT_XLEN signals that the rest of the macros are defined too */
++#endif
++
++/* === Assume-Assert checks */
++
++/* No-op for production */
++#ifndef __CPROVER__
++
++#ifndef XDEBUG
++#define XASSERT(x)
++#define XASSUME(x)
++#define XTMPVAR(x)
++
++/* Runtime checks in debug build */
++#else
++#include <assert.h>
++#define XASSERT(x) assert(x)
++#define XASSUME(x) assert(x)
++#define XTMPVAR(x) x
++/* XDEBUG */
++#endif
++
++/* For CBMC (formal checks) */
++#else
++#include <assert.h>
++#include <stdio.h>
++#define XASSERT(x) assert(x)
++#define XASSUME(x) __CPROVER_assume(x)
++#define XTMPVAR(x) x
++#define XPROOFS
++#endif /* __CPROVER__ */
++
++  /* revert if not big endian */
++
++#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++/* nop */
++#define rev8_be32(x) (x)
++#else
++/* RISC-V: grev(x, 0x18) or rev8 */
++
++static SLH_INLINE uint32_t rev8_be32(uint32_t x)
++{
++  return ((x & 0xFF000000) >> 24) | ((x & 0x00FF0000) >> 8) |
++         ((x & 0x0000FF00) << 8) | ((x & 0x000000FF) << 24);
++}
++#endif
++
++#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
++#define rev8_be64(x) (x)
++#else
++/* RISC-V: grev(x, 0x38) or rev8(x) */
++static SLH_INLINE uint64_t rev8_be64(uint64_t x)
++{
++  return (x << 56) | ((x & 0x000000000000FF00LL) << 40) |
++         ((x & 0x0000000000FF0000LL) << 24) |
++         ((x & 0x00000000FF000000LL) << 8) | ((x & 0x000000FF00000000LL) >> 8) |
++         ((x & 0x0000FF0000000000LL) >> 24) |
++         ((x & 0x00FF000000000000LL) >> 40) | (x >> 56);
++}
++#endif
++
++  /* rotate left */
++
++  static SLH_INLINE uint32_t rol32(uint32_t x, uint32_t n)
++  {
++    return (x << n) | (x >> (32 - n));
++  }
++
++  static SLH_INLINE uint64_t rol64(uint64_t x, uint64_t n)
++  {
++    return (x << n) | (x >> (64 - n));
++  }
++
++  /* rotate right (RISC-V ROR or RORI) */
++
++  static SLH_INLINE uint32_t ror32(uint32_t x, uint32_t n)
++  {
++    return (x >> n) | (x << (32 - n));
++  }
++
++  static SLH_INLINE uint64_t ror64(uint64_t x, uint64_t n)
++  {
++    return (x >> n) | (x << (64 - n));
++  }
++
++  /* and with negate (RISC-V ANDN) */
++
++  static SLH_INLINE uint32_t andn32(uint32_t x, uint32_t y) { return x & ~y; }
++
++  static SLH_INLINE uint64_t andn64(uint64_t x, uint64_t y) { return x & ~y; }
++
++  /* little-endian loads and stores (unaligned) */
++
++  static SLH_INLINE uint16_t get16u_le(const uint8_t *v)
++  {
++    return (((uint16_t)v[1]) << 8) | ((uint16_t)v[0]);
++  }
++
++  static SLH_INLINE void put16u_le(uint8_t *v, uint16_t x)
++  {
++    v[0] = x;
++    v[1] = x >> 8;
++  }
++
++  static SLH_INLINE uint32_t get32u_le(const uint8_t *v)
++  {
++    return ((uint32_t)v[0]) | (((uint32_t)v[1]) << 8) |
++           (((uint32_t)v[2]) << 16) | (((uint32_t)v[3]) << 24);
++  }
++
++  static SLH_INLINE void put32u_le(uint8_t *v, uint32_t x)
++  {
++    v[0] = x;
++    v[1] = x >> 8;
++    v[2] = x >> 16;
++    v[3] = x >> 24;
++  }
++
++  static SLH_INLINE uint64_t get64u_le(const uint8_t *v)
++  {
++    return ((uint64_t)v[0]) | (((uint64_t)v[1]) << 8) |
++           (((uint64_t)v[2]) << 16) | (((uint64_t)v[3]) << 24) |
++           (((uint64_t)v[4]) << 32) | (((uint64_t)v[5]) << 40) |
++           (((uint64_t)v[6]) << 48) | (((uint64_t)v[7]) << 56);
++  }
++
++  static SLH_INLINE void put64u_le(uint8_t *v, uint64_t x)
++  {
++    v[0] = x;
++    v[1] = x >> 8;
++    v[2] = x >> 16;
++    v[3] = x >> 24;
++    v[4] = x >> 32;
++    v[5] = x >> 40;
++    v[6] = x >> 48;
++    v[7] = x >> 56;
++  }
++
++  /* big-endian loads and stores (unaligned) */
++
++  static SLH_INLINE uint16_t get16u_be(const uint8_t *v)
++  {
++    return (((uint16_t)v[0]) << 8) | ((uint16_t)v[1]);
++  }
++
++  static SLH_INLINE void put16u_be(uint8_t *v, uint16_t x)
++  {
++    v[0] = x >> 8;
++    v[1] = x;
++  }
++
++  static SLH_INLINE uint32_t get32u_be(const uint8_t *v)
++  {
++    return (((uint32_t)v[0]) << 24) | (((uint32_t)v[1]) << 16) |
++           (((uint32_t)v[2]) << 8) | ((uint32_t)v[3]);
++  }
++
++  static SLH_INLINE void put32u_be(uint8_t *v, uint32_t x)
++  {
++    v[0] = x >> 24;
++    v[1] = x >> 16;
++    v[2] = x >> 8;
++    v[3] = x;
++  }
++
++  static SLH_INLINE uint64_t get64u_be(const uint8_t *v)
++  {
++    return (((uint64_t)v[0]) << 56) | (((uint64_t)v[1]) << 48) |
++           (((uint64_t)v[2]) << 40) | (((uint64_t)v[3]) << 32) |
++           (((uint64_t)v[4]) << 24) | (((uint64_t)v[5]) << 16) |
++           (((uint64_t)v[6]) << 8) | ((uint64_t)v[7]);
++  }
++
++  static SLH_INLINE void put64u_be(uint8_t *v, uint64_t x)
++  {
++    v[0] = x >> 56;
++    v[1] = x >> 48;
++    v[2] = x >> 40;
++    v[3] = x >> 32;
++    v[4] = x >> 24;
++    v[5] = x >> 16;
++    v[6] = x >> 8;
++    v[7] = x;
++  }
++
++#ifdef __cplusplus
++}
++#endif
++
++/* _PLAT_LOCAL_H_ */
++#endif
+diff --git a/src/crypto/slhdsa128s/sha2_256.c b/src/crypto/slhdsa128s/sha2_256.c
+new file mode 100644
+index 0000000..1102f0e
+--- /dev/null
++++ b/src/crypto/slhdsa128s/sha2_256.c
+@@ -0,0 +1,271 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === FIPS 180-4 SHA2-256 / Portable C Implementation */
++
++#include <string.h>
++#include "plat_local.h"
++#include "sha2_api.h"
++
++#ifdef SLH_EXPERIMENTAL
++uint64_t sha2_256_compress_count = 0; /* instrumentation */
++#endif
++
++/* processing step, sets "d" and "h" as a function of all 8 inputs */
++/* and message schedule "mi", round constant "ki" */
++#define STEP_SHA256_R(a, b, c, d, e, f, g, h, mi, ki) \
++  {                                                   \
++    h += (g ^ (e & (f ^ g))) + mi + ki +              \
++         (ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25)); \
++    d += h;                                           \
++    h += (((a | c) & b) | (c & a)) +                  \
++         (ror32(a, 2) ^ ror32(a, 13) ^ ror32(a, 22)); \
++  }
++
++/* keying step, sets x0 as a function of 4 inputs */
++#define STEP_SHA256_K(x0, x1, x9, xe)                       \
++  {                                                         \
++    x0 += x9 + (ror32(x1, 7) ^ ror32(x1, 18) ^ (x1 >> 3)) + \
++          (ror32(xe, 17) ^ ror32(xe, 19) ^ (xe >> 10));     \
++  }
++
++void sha2_256_compress(void *v)
++{
++  /* 4.2.2 SHA-224 and SHA-256 Constants */
++
++  const uint32_t ck[64] = {
++      0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1,
++      0x923F82A4, 0xAB1C5ED5, 0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
++      0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174, 0xE49B69C1, 0xEFBE4786,
++      0x0FC19DC6, 0x240CA1CC, 0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
++      0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7, 0xC6E00BF3, 0xD5A79147,
++      0x06CA6351, 0x14292967, 0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
++      0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85, 0xA2BFE8A1, 0xA81A664B,
++      0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
++      0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A,
++      0x5B9CCA4F, 0x682E6FF3, 0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
++      0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2};
++
++  uint32_t a, b, c, d, e, f, g, h;
++  uint32_t m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, ma, mb, mc, md, me, mf;
++
++  uint32_t *sp = (uint32_t *)v;
++  const uint32_t *mp = sp + 8;
++  const uint32_t *kp = ck;
++
++#ifdef SLH_EXPERIMENTAL
++  sha2_256_compress_count++; /* instrumentation */
++#endif
++
++  a = sp[0] = rev8_be32(sp[0]);
++  b = sp[1] = rev8_be32(sp[1]);
++  c = sp[2] = rev8_be32(sp[2]);
++  d = sp[3] = rev8_be32(sp[3]);
++  e = sp[4] = rev8_be32(sp[4]);
++  f = sp[5] = rev8_be32(sp[5]);
++  g = sp[6] = rev8_be32(sp[6]);
++  h = sp[7] = rev8_be32(sp[7]);
++
++  /* load and reverse bytes (if needed) */
++
++  m0 = rev8_be32(mp[0]);
++  m1 = rev8_be32(mp[1]);
++  m2 = rev8_be32(mp[2]);
++  m3 = rev8_be32(mp[3]);
++  m4 = rev8_be32(mp[4]);
++  m5 = rev8_be32(mp[5]);
++  m6 = rev8_be32(mp[6]);
++  m7 = rev8_be32(mp[7]);
++  m8 = rev8_be32(mp[8]);
++  m9 = rev8_be32(mp[9]);
++  ma = rev8_be32(mp[10]);
++  mb = rev8_be32(mp[11]);
++  mc = rev8_be32(mp[12]);
++  md = rev8_be32(mp[13]);
++  me = rev8_be32(mp[14]);
++  mf = rev8_be32(mp[15]);
++
++  while (1)
++  {
++    STEP_SHA256_R(a, b, c, d, e, f, g, h, m0, kp[0]); /* rounds */
++    STEP_SHA256_R(h, a, b, c, d, e, f, g, m1, kp[1]);
++    STEP_SHA256_R(g, h, a, b, c, d, e, f, m2, kp[2]);
++    STEP_SHA256_R(f, g, h, a, b, c, d, e, m3, kp[3]);
++    STEP_SHA256_R(e, f, g, h, a, b, c, d, m4, kp[4]);
++    STEP_SHA256_R(d, e, f, g, h, a, b, c, m5, kp[5]);
++    STEP_SHA256_R(c, d, e, f, g, h, a, b, m6, kp[6]);
++    STEP_SHA256_R(b, c, d, e, f, g, h, a, m7, kp[7]);
++    STEP_SHA256_R(a, b, c, d, e, f, g, h, m8, kp[8]);
++    STEP_SHA256_R(h, a, b, c, d, e, f, g, m9, kp[9]);
++    STEP_SHA256_R(g, h, a, b, c, d, e, f, ma, kp[10]);
++    STEP_SHA256_R(f, g, h, a, b, c, d, e, mb, kp[11]);
++    STEP_SHA256_R(e, f, g, h, a, b, c, d, mc, kp[12]);
++    STEP_SHA256_R(d, e, f, g, h, a, b, c, md, kp[13]);
++    STEP_SHA256_R(c, d, e, f, g, h, a, b, me, kp[14]);
++    STEP_SHA256_R(b, c, d, e, f, g, h, a, mf, kp[15]);
++
++    if (kp == &ck[64 - 16])
++    {
++      break;
++    }
++    kp += 16;
++
++    STEP_SHA256_K(m0, m1, m9, me); /* message schedule */
++    STEP_SHA256_K(m1, m2, ma, mf);
++    STEP_SHA256_K(m2, m3, mb, m0);
++    STEP_SHA256_K(m3, m4, mc, m1);
++    STEP_SHA256_K(m4, m5, md, m2);
++    STEP_SHA256_K(m5, m6, me, m3);
++    STEP_SHA256_K(m6, m7, mf, m4);
++    STEP_SHA256_K(m7, m8, m0, m5);
++    STEP_SHA256_K(m8, m9, m1, m6);
++    STEP_SHA256_K(m9, ma, m2, m7);
++    STEP_SHA256_K(ma, mb, m3, m8);
++    STEP_SHA256_K(mb, mc, m4, m9);
++    STEP_SHA256_K(mc, md, m5, ma);
++    STEP_SHA256_K(md, me, m6, mb);
++    STEP_SHA256_K(me, mf, m7, mc);
++    STEP_SHA256_K(mf, m0, m8, md);
++  }
++
++  sp[0] = rev8_be32(sp[0] + a);
++  sp[1] = rev8_be32(sp[1] + b);
++  sp[2] = rev8_be32(sp[2] + c);
++  sp[3] = rev8_be32(sp[3] + d);
++  sp[4] = rev8_be32(sp[4] + e);
++  sp[5] = rev8_be32(sp[5] + f);
++  sp[6] = rev8_be32(sp[6] + g);
++  sp[7] = rev8_be32(sp[7] + h);
++}
++
++/* initialize */
++
++static void sha2_256_init_h0(sha2_256_t *sha, const uint8_t *h0)
++{
++  memcpy(sha->s, h0, 32);
++  sha->i = 0;
++  sha->len = 0;
++}
++
++void sha2_256_init(sha2_256_t *sha)
++{
++  /* SHA-256 initial values H0, Sect 5.3.3. */
++  const uint8_t sha2_256_h0[32] = {
++      0x6A, 0x09, 0xE6, 0x67, 0xBB, 0x67, 0xAE, 0x85, 0x3C, 0x6E, 0xF3,
++      0x72, 0xA5, 0x4F, 0xF5, 0x3A, 0x51, 0x0E, 0x52, 0x7F, 0x9B, 0x05,
++      0x68, 0x8C, 0x1F, 0x83, 0xD9, 0xAB, 0x5B, 0xE0, 0xCD, 0x19};
++
++  sha2_256_init_h0(sha, sha2_256_h0);
++}
++
++void sha2_224_init(sha2_256_t *sha)
++{
++  /* SHA-224 initial values H0, Sect 5.3.2. */
++  const uint8_t sha2_224_h0[32] = {
++      0xC1, 0x05, 0x9E, 0xD8, 0x36, 0x7C, 0xD5, 0x07, 0x30, 0x70, 0xDD,
++      0x17, 0xF7, 0x0E, 0x59, 0x39, 0xFF, 0xC0, 0x0B, 0x31, 0x68, 0x58,
++      0x15, 0x11, 0x64, 0xF9, 0x8F, 0xA7, 0xBE, 0xFA, 0x4F, 0xA4};
++
++  sha2_256_init_h0(sha, sha2_224_h0);
++}
++
++void sha2_256_copy(sha2_256_t *dst, const sha2_256_t *src)
++{
++  dst->i = src->i;
++  dst->len = src->len;
++  memcpy(dst->s, src->s, 32 + src->i);
++}
++
++/* SHA2-256 process input */
++
++void sha2_256_update(sha2_256_t *sha, const uint8_t *m, size_t m_sz)
++{
++  size_t l;
++  uint8_t *mp = (uint8_t *)&sha->s[8];
++
++  sha->len += m_sz;
++  l = 64 - sha->i;
++
++  if (m_sz < l)
++  {
++    memcpy(mp + sha->i, m, m_sz);
++    sha->i += m_sz;
++    return;
++  }
++  if (sha->i > 0)
++  {
++    memcpy(mp + sha->i, m, l);
++    sha2_256_compress(sha->s);
++    m_sz -= l;
++    m += l;
++    sha->i = 0;
++  }
++  while (m_sz >= 64)
++  {
++    memcpy(mp, m, 64);
++    sha2_256_compress(sha->s);
++    m_sz -= 64;
++    m += 64;
++  }
++  memcpy(mp, m, m_sz);
++  sha->i = m_sz;
++}
++
++/* perform final padding */
++
++void sha2_256_final_pad(sha2_256_t *sha)
++{
++  uint8_t *mp = (uint8_t *)&sha->s[8];
++  uint64_t x;
++  size_t i;
++
++  i = sha->i; /* last data block */
++  mp[i++] = 0x80;
++  if (i > 56)
++  {
++    memset(mp + i, 0x00, 64 - i);
++    sha2_256_compress(sha->s);
++    i = 0;
++  }
++  memset(mp + i, 0x00, 64 - i); /* clear rest */
++
++  x = ((uint64_t)sha->len) << 3; /* process length */
++  i = 64;
++  while (x > 0)
++  {
++    mp[--i] = x & 0xFF;
++    x >>= 8;
++  }
++}
++
++/* produce h_sz byte hash */
++
++void sha2_256_final_len(sha2_256_t *sha, uint8_t *h, size_t h_sz)
++{
++  sha2_256_final_pad(sha);
++  sha2_256_compress(sha->s);
++
++  memcpy(h, sha->s, h_sz);
++}
++
++/* SHA-224/256 public single-call interfaces */
++
++void sha2_256(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_256_t sha;
++
++  sha2_256_init(&sha);
++  sha2_256_update(&sha, m, m_sz);
++  sha2_256_final(&sha, h);
++}
++
++void sha2_224(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_256_t sha;
++
++  sha2_224_init(&sha);
++  sha2_224_update(&sha, m, m_sz);
++  sha2_224_final(&sha, h);
++}
+diff --git a/src/crypto/slhdsa128s/sha2_512.c b/src/crypto/slhdsa128s/sha2_512.c
+new file mode 100644
+index 0000000..12a6464
+--- /dev/null
++++ b/src/crypto/slhdsa128s/sha2_512.c
+@@ -0,0 +1,355 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === FIPS 180-4 SHA2-512 / Portable C Implementation */
++
++#include <string.h>
++#include "plat_local.h"
++#include "sha2_api.h"
++
++#ifdef SLH_EXPERIMENTAL
++uint64_t sha2_512_compress_count = 0; /* instrumentation */
++#endif
++
++/* processing step, sets "d" and "h" as a function of all 8 inputs */
++/* and message schedule "mi", round constant "ki" */
++#define STEP_SHA512_R(a, b, c, d, e, f, g, h, mi, ki)  \
++  {                                                    \
++    h += (g ^ (e & (f ^ g))) + mi + ki +               \
++         (ror64(e, 14) ^ ror64(e, 18) ^ ror64(e, 41)); \
++    d += h;                                            \
++    h += (((a | c) & b) | (c & a)) +                   \
++         (ror64(a, 28) ^ ror64(a, 34) ^ ror64(a, 39)); \
++  }
++
++/* keying step, sets x0 as a function of 4 inputs */
++#define STEP_SHA512_K(x0, x1, x9, xe)                      \
++  {                                                        \
++    x0 += x9 + (ror64(x1, 1) ^ ror64(x1, 8) ^ (x1 >> 7)) + \
++          (ror64(xe, 19) ^ ror64(xe, 61) ^ (xe >> 6));     \
++  }
++
++/* compression function (this one does *not* modify m[16]) */
++
++void sha2_512_compress(void *v)
++{
++  /* 4.2.3 SHA-384, SHA-512, SHA-512/224 and SHA-512/256 Constants */
++
++  const uint64_t ck[80] = {
++      UINT64_C(0x428A2F98D728AE22), UINT64_C(0x7137449123EF65CD),
++      UINT64_C(0xB5C0FBCFEC4D3B2F), UINT64_C(0xE9B5DBA58189DBBC),
++      UINT64_C(0x3956C25BF348B538), UINT64_C(0x59F111F1B605D019),
++      UINT64_C(0x923F82A4AF194F9B), UINT64_C(0xAB1C5ED5DA6D8118),
++      UINT64_C(0xD807AA98A3030242), UINT64_C(0x12835B0145706FBE),
++      UINT64_C(0x243185BE4EE4B28C), UINT64_C(0x550C7DC3D5FFB4E2),
++      UINT64_C(0x72BE5D74F27B896F), UINT64_C(0x80DEB1FE3B1696B1),
++      UINT64_C(0x9BDC06A725C71235), UINT64_C(0xC19BF174CF692694),
++      UINT64_C(0xE49B69C19EF14AD2), UINT64_C(0xEFBE4786384F25E3),
++      UINT64_C(0x0FC19DC68B8CD5B5), UINT64_C(0x240CA1CC77AC9C65),
++      UINT64_C(0x2DE92C6F592B0275), UINT64_C(0x4A7484AA6EA6E483),
++      UINT64_C(0x5CB0A9DCBD41FBD4), UINT64_C(0x76F988DA831153B5),
++      UINT64_C(0x983E5152EE66DFAB), UINT64_C(0xA831C66D2DB43210),
++      UINT64_C(0xB00327C898FB213F), UINT64_C(0xBF597FC7BEEF0EE4),
++      UINT64_C(0xC6E00BF33DA88FC2), UINT64_C(0xD5A79147930AA725),
++      UINT64_C(0x06CA6351E003826F), UINT64_C(0x142929670A0E6E70),
++      UINT64_C(0x27B70A8546D22FFC), UINT64_C(0x2E1B21385C26C926),
++      UINT64_C(0x4D2C6DFC5AC42AED), UINT64_C(0x53380D139D95B3DF),
++      UINT64_C(0x650A73548BAF63DE), UINT64_C(0x766A0ABB3C77B2A8),
++      UINT64_C(0x81C2C92E47EDAEE6), UINT64_C(0x92722C851482353B),
++      UINT64_C(0xA2BFE8A14CF10364), UINT64_C(0xA81A664BBC423001),
++      UINT64_C(0xC24B8B70D0F89791), UINT64_C(0xC76C51A30654BE30),
++      UINT64_C(0xD192E819D6EF5218), UINT64_C(0xD69906245565A910),
++      UINT64_C(0xF40E35855771202A), UINT64_C(0x106AA07032BBD1B8),
++      UINT64_C(0x19A4C116B8D2D0C8), UINT64_C(0x1E376C085141AB53),
++      UINT64_C(0x2748774CDF8EEB99), UINT64_C(0x34B0BCB5E19B48A8),
++      UINT64_C(0x391C0CB3C5C95A63), UINT64_C(0x4ED8AA4AE3418ACB),
++      UINT64_C(0x5B9CCA4F7763E373), UINT64_C(0x682E6FF3D6B2B8A3),
++      UINT64_C(0x748F82EE5DEFB2FC), UINT64_C(0x78A5636F43172F60),
++      UINT64_C(0x84C87814A1F0AB72), UINT64_C(0x8CC702081A6439EC),
++      UINT64_C(0x90BEFFFA23631E28), UINT64_C(0xA4506CEBDE82BDE9),
++      UINT64_C(0xBEF9A3F7B2C67915), UINT64_C(0xC67178F2E372532B),
++      UINT64_C(0xCA273ECEEA26619C), UINT64_C(0xD186B8C721C0C207),
++      UINT64_C(0xEADA7DD6CDE0EB1E), UINT64_C(0xF57D4F7FEE6ED178),
++      UINT64_C(0x06F067AA72176FBA), UINT64_C(0x0A637DC5A2C898A6),
++      UINT64_C(0x113F9804BEF90DAE), UINT64_C(0x1B710B35131C471B),
++      UINT64_C(0x28DB77F523047D84), UINT64_C(0x32CAAB7B40C72493),
++      UINT64_C(0x3C9EBE0A15C9BEBC), UINT64_C(0x431D67C49C100D4C),
++      UINT64_C(0x4CC5D4BECB3E42B6), UINT64_C(0x597F299CFC657E2A),
++      UINT64_C(0x5FCB6FAB3AD6FAEC), UINT64_C(0x6C44198C4A475817)};
++
++  uint64_t a, b, c, d, e, f, g, h;
++  uint64_t m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, ma, mb, mc, md, me, mf;
++
++  uint64_t *sp = (uint64_t *)v;
++  const uint64_t *mp = sp + 8;
++  const uint64_t *kp = ck;
++
++#ifdef SLH_EXPERIMENTAL
++  sha2_512_compress_count++; /* instrumentation */
++#endif
++
++  /* get state */
++  a = sp[0] = rev8_be64(sp[0]);
++  b = sp[1] = rev8_be64(sp[1]);
++  c = sp[2] = rev8_be64(sp[2]);
++  d = sp[3] = rev8_be64(sp[3]);
++  e = sp[4] = rev8_be64(sp[4]);
++  f = sp[5] = rev8_be64(sp[5]);
++  g = sp[6] = rev8_be64(sp[6]);
++  h = sp[7] = rev8_be64(sp[7]);
++
++  /* load and reverse bytes (if needed) */
++
++  m0 = rev8_be64(mp[0]);
++  m1 = rev8_be64(mp[1]);
++  m2 = rev8_be64(mp[2]);
++  m3 = rev8_be64(mp[3]);
++  m4 = rev8_be64(mp[4]);
++  m5 = rev8_be64(mp[5]);
++  m6 = rev8_be64(mp[6]);
++  m7 = rev8_be64(mp[7]);
++  m8 = rev8_be64(mp[8]);
++  m9 = rev8_be64(mp[9]);
++  ma = rev8_be64(mp[10]);
++  mb = rev8_be64(mp[11]);
++  mc = rev8_be64(mp[12]);
++  md = rev8_be64(mp[13]);
++  me = rev8_be64(mp[14]);
++  mf = rev8_be64(mp[15]);
++
++  while (1)
++  {
++    /* main rounds */
++    STEP_SHA512_R(a, b, c, d, e, f, g, h, m0, kp[0]);
++    STEP_SHA512_R(h, a, b, c, d, e, f, g, m1, kp[1]);
++    STEP_SHA512_R(g, h, a, b, c, d, e, f, m2, kp[2]);
++    STEP_SHA512_R(f, g, h, a, b, c, d, e, m3, kp[3]);
++    STEP_SHA512_R(e, f, g, h, a, b, c, d, m4, kp[4]);
++    STEP_SHA512_R(d, e, f, g, h, a, b, c, m5, kp[5]);
++    STEP_SHA512_R(c, d, e, f, g, h, a, b, m6, kp[6]);
++    STEP_SHA512_R(b, c, d, e, f, g, h, a, m7, kp[7]);
++    STEP_SHA512_R(a, b, c, d, e, f, g, h, m8, kp[8]);
++    STEP_SHA512_R(h, a, b, c, d, e, f, g, m9, kp[9]);
++    STEP_SHA512_R(g, h, a, b, c, d, e, f, ma, kp[10]);
++    STEP_SHA512_R(f, g, h, a, b, c, d, e, mb, kp[11]);
++    STEP_SHA512_R(e, f, g, h, a, b, c, d, mc, kp[12]);
++    STEP_SHA512_R(d, e, f, g, h, a, b, c, md, kp[13]);
++    STEP_SHA512_R(c, d, e, f, g, h, a, b, me, kp[14]);
++    STEP_SHA512_R(b, c, d, e, f, g, h, a, mf, kp[15]);
++
++    if (kp == &ck[80 - 16])
++    {
++      break;
++    }
++    kp += 16;
++
++    STEP_SHA512_K(m0, m1, m9, me); /* key schedule */
++    STEP_SHA512_K(m1, m2, ma, mf);
++    STEP_SHA512_K(m2, m3, mb, m0);
++    STEP_SHA512_K(m3, m4, mc, m1);
++    STEP_SHA512_K(m4, m5, md, m2);
++    STEP_SHA512_K(m5, m6, me, m3);
++    STEP_SHA512_K(m6, m7, mf, m4);
++    STEP_SHA512_K(m7, m8, m0, m5);
++    STEP_SHA512_K(m8, m9, m1, m6);
++    STEP_SHA512_K(m9, ma, m2, m7);
++    STEP_SHA512_K(ma, mb, m3, m8);
++    STEP_SHA512_K(mb, mc, m4, m9);
++    STEP_SHA512_K(mc, md, m5, ma);
++    STEP_SHA512_K(md, me, m6, mb);
++    STEP_SHA512_K(me, mf, m7, mc);
++    STEP_SHA512_K(mf, m0, m8, md);
++  }
++
++  sp[0] = rev8_be64(sp[0] + a);
++  sp[1] = rev8_be64(sp[1] + b);
++  sp[2] = rev8_be64(sp[2] + c);
++  sp[3] = rev8_be64(sp[3] + d);
++  sp[4] = rev8_be64(sp[4] + e);
++  sp[5] = rev8_be64(sp[5] + f);
++  sp[6] = rev8_be64(sp[6] + g);
++  sp[7] = rev8_be64(sp[7] + h);
++}
++
++/* initialize */
++
++static void sha2_512_init_h0(sha2_512_t *sha, const uint8_t *h0)
++{
++  memcpy(sha->s, h0, 64);
++  sha->i = 0;
++  sha->len = 0;
++}
++
++void sha2_512_init(sha2_512_t *sha)
++{
++  /* SHA-512 initial values H0, Sect 5.3.5. */
++  const uint8_t sha2_512_h0[64] = {
++      0x6A, 0x09, 0xE6, 0x67, 0xF3, 0xBC, 0xC9, 0x08, 0xBB, 0x67, 0xAE,
++      0x85, 0x84, 0xCA, 0xA7, 0x3B, 0x3C, 0x6E, 0xF3, 0x72, 0xFE, 0x94,
++      0xF8, 0x2B, 0xA5, 0x4F, 0xF5, 0x3A, 0x5F, 0x1D, 0x36, 0xF1, 0x51,
++      0x0E, 0x52, 0x7F, 0xAD, 0xE6, 0x82, 0xD1, 0x9B, 0x05, 0x68, 0x8C,
++      0x2B, 0x3E, 0x6C, 0x1F, 0x1F, 0x83, 0xD9, 0xAB, 0xFB, 0x41, 0xBD,
++      0x6B, 0x5B, 0xE0, 0xCD, 0x19, 0x13, 0x7E, 0x21, 0x79};
++
++  sha2_512_init_h0(sha, sha2_512_h0);
++}
++
++void sha2_384_init(sha2_512_t *sha)
++{
++  /* SHA-384 initial values H0, Sect 5.3.4. */
++  const uint8_t sha2_384_h0[64] = {
++      0xCB, 0xBB, 0x9D, 0x5D, 0xC1, 0x05, 0x9E, 0xD8, 0x62, 0x9A, 0x29,
++      0x2A, 0x36, 0x7C, 0xD5, 0x07, 0x91, 0x59, 0x01, 0x5A, 0x30, 0x70,
++      0xDD, 0x17, 0x15, 0x2F, 0xEC, 0xD8, 0xF7, 0x0E, 0x59, 0x39, 0x67,
++      0x33, 0x26, 0x67, 0xFF, 0xC0, 0x0B, 0x31, 0x8E, 0xB4, 0x4A, 0x87,
++      0x68, 0x58, 0x15, 0x11, 0xDB, 0x0C, 0x2E, 0x0D, 0x64, 0xF9, 0x8F,
++      0xA7, 0x47, 0xB5, 0x48, 0x1D, 0xBE, 0xFA, 0x4F, 0xA4};
++
++  sha2_512_init_h0(sha, sha2_384_h0);
++}
++
++void sha2_512_224_init(sha2_512_t *sha)
++{
++  /* SHA-512/224 initial values H0, Sect 5.3.6.1. */
++  const uint8_t sha2_512_224_h0[64] = {
++      0x8C, 0x3D, 0x37, 0xC8, 0x19, 0x54, 0x4D, 0xA2, 0x73, 0xE1, 0x99,
++      0x66, 0x89, 0xDC, 0xD4, 0xD6, 0x1D, 0xFA, 0xB7, 0xAE, 0x32, 0xFF,
++      0x9C, 0x82, 0x67, 0x9D, 0xD5, 0x14, 0x58, 0x2F, 0x9F, 0xCF, 0x0F,
++      0x6D, 0x2B, 0x69, 0x7B, 0xD4, 0x4D, 0xA8, 0x77, 0xE3, 0x6F, 0x73,
++      0x04, 0xC4, 0x89, 0x42, 0x3F, 0x9D, 0x85, 0xA8, 0x6A, 0x1D, 0x36,
++      0xC8, 0x11, 0x12, 0xE6, 0xAD, 0x91, 0xD6, 0x92, 0xA1};
++
++  sha2_512_init_h0(sha, sha2_512_224_h0);
++}
++
++void sha2_512_256_init(sha2_512_t *sha)
++{
++  /* SHA-512/256 initial values H0, Sect 5.3.6.2. */
++  const uint8_t sha2_512_256_h0[64] = {
++      0x22, 0x31, 0x21, 0x94, 0xFC, 0x2B, 0xF7, 0x2C, 0x9F, 0x55, 0x5F,
++      0xA3, 0xC8, 0x4C, 0x64, 0xC2, 0x23, 0x93, 0xB8, 0x6B, 0x6F, 0x53,
++      0xB1, 0x51, 0x96, 0x38, 0x77, 0x19, 0x59, 0x40, 0xEA, 0xBD, 0x96,
++      0x28, 0x3E, 0xE2, 0xA8, 0x8E, 0xFF, 0xE3, 0xBE, 0x5E, 0x1E, 0x25,
++      0x53, 0x86, 0x39, 0x92, 0x2B, 0x01, 0x99, 0xFC, 0x2C, 0x85, 0xB8,
++      0xAA, 0x0E, 0xB7, 0x2D, 0xDC, 0x81, 0xC5, 0x2C, 0xA2};
++
++  sha2_512_init_h0(sha, sha2_512_256_h0);
++}
++
++void sha2_512_copy(sha2_512_t *dst, const sha2_512_t *src)
++{
++  dst->i = src->i;
++  dst->len = src->len;
++  memcpy(dst->s, src->s, 64 + src->i);
++}
++
++/* take message input */
++
++void sha2_512_update(sha2_512_t *sha, const uint8_t *m, size_t m_sz)
++{
++  size_t l;
++  uint8_t *mp = (uint8_t *)&sha->s[8];
++
++  sha->len += m_sz;
++  l = 128 - sha->i;
++
++  if (m_sz < l)
++  {
++    memcpy(mp + sha->i, m, m_sz);
++    sha->i += m_sz;
++    return;
++  }
++  if (sha->i > 0)
++  {
++    memcpy(mp + sha->i, m, l);
++    sha2_512_compress(sha->s);
++    m_sz -= l;
++    m += l;
++    sha->i = 0;
++  }
++  while (m_sz >= 128)
++  {
++    memcpy(mp, m, 128);
++    sha2_512_compress(sha->s);
++    m_sz -= 128;
++    m += 128;
++  }
++  memcpy(mp, m, m_sz);
++  sha->i = m_sz;
++}
++
++/* perform final padding */
++
++void sha2_512_final_pad(sha2_512_t *sha)
++{
++  uint8_t *mp = (uint8_t *)&sha->s[8];
++  uint64_t x;
++  size_t i;
++
++  i = sha->i; /* last data block */
++  mp[i++] = 0x80;
++  if (i > 112)
++  {
++    memset(mp + i, 0x00, 128 - i);
++    sha2_512_compress(sha->s);
++    i = 0;
++  }
++  memset(mp + i, 0x00, 128 - i); /* clear rest */
++
++  x = ((uint64_t)sha->len) << 3; /* process length */
++  i = 128;
++  while (x > 0)
++  {
++    mp[--i] = x & 0xFF;
++    x >>= 8;
++  }
++}
++
++/* produce h_sz byte hash */
++
++void sha2_512_final_len(sha2_512_t *sha, uint8_t *h, size_t h_sz)
++{
++  sha2_512_final_pad(sha);
++  sha2_512_compress(sha->s);
++  memcpy(h, sha->s, h_sz);
++}
++
++/* public single-call interfaces */
++
++void sha2_512(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_512_t sha;
++
++  sha2_512_init(&sha);
++  sha2_512_update(&sha, m, m_sz);
++  sha2_512_final(&sha, h);
++}
++
++void sha2_384(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_384_t sha;
++
++  sha2_384_init(&sha);
++  sha2_512_update(&sha, m, m_sz);
++  sha2_512_final_len(&sha, h, 48);
++}
++
++void sha2_512_224(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_512_t sha;
++
++  sha2_512_224_init(&sha);
++  sha2_512_update(&sha, m, m_sz);
++  sha2_512_final_len(&sha, h, 28);
++}
++
++void sha2_512_256(uint8_t *h, const void *m, size_t m_sz)
++{
++  sha2_512_t sha;
++
++  sha2_512_256_init(&sha);
++  sha2_512_update(&sha, m, m_sz);
++  sha2_512_final_len(&sha, h, 32);
++}
+diff --git a/src/crypto/slhdsa128s/sha2_api.h b/src/crypto/slhdsa128s/sha2_api.h
+new file mode 100644
+index 0000000..1128e59
+--- /dev/null
++++ b/src/crypto/slhdsa128s/sha2_api.h
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === FIPS 180-4 (SHA-2) -- traditional "MD" type hash API interface. */
++
++#ifndef _SHA2_API_H_
++#define _SHA2_API_H_
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++#include <stddef.h>
++#include <stdint.h>
++#include "cbmc.h"
++
++  /* === Single-call hash wrappers === */
++
++  /* SHA2-224: Compute 28-byte hash to "md" from "m" which has "m_sz" bytes. */
++  void sha2_224(uint8_t *md, const void *m, size_t m_sz);
++
++  /* SHA2-256: Compute 32-byte hash to "md" from "m" which has "m_sz" bytes. */
++  void sha2_256(uint8_t *md, const void *m, size_t m_sz);
++
++  /* SHA2-384: Compute 48-byte hash to "md" from "m" which has "m_sz" bytes. */
++  void sha2_384(uint8_t *md, const void *m, size_t m_sz);
++
++  /* SHA2-512: Compute 64-byte hash to "md" from "m" which has "m_sz" bytes. */
++  void sha2_512(uint8_t *md, const void *m, size_t m_sz);
++
++  /* SHA2-512/224: Compute 64-byte hash to "md" from "m" which has "m_sz" */
++  /* bytes. */
++  void sha2_512_224(uint8_t *md, const void *m, size_t m_sz);
++
++  /* SHA2-512/256: Compute 64-byte hash to "md" from "m" which has "m_sz" */
++  /* bytes. */
++  void sha2_512_256(uint8_t *md, const void *m, size_t m_sz);
++
++  /* === incremental interface === */
++
++  typedef struct
++  {
++    uint32_t s[8 + 24];
++    size_t i, len;
++  } sha2_256_t;
++
++  typedef sha2_256_t sha2_224_t;
++
++  typedef struct
++  {
++    uint64_t s[8 + 24];
++    size_t i, len;
++  } sha2_512_t;
++
++  typedef sha2_512_t sha2_384_t;
++
++  /* shaNNN_init(var): Initialize context for hashing. */
++  void sha2_256_init(sha2_256_t *sha)
++  __contract__(
++    requires(memory_no_alias(sha, sizeof(sha2_256_t)))
++    assigns(object_whole(sha))
++  );
++  void sha2_224_init(sha2_256_t *sha);
++  void sha2_512_init(sha2_512_t *sha);
++  void sha2_384_init(sha2_512_t *sha);
++  void sha2_512_224_init(sha2_512_t *sha);
++  void sha2_512_256_init(sha2_512_t *sha);
++
++  /* shaNNN_update(var, m, m_sz): Include "m" of "m_sz" bytes in hash. */
++  void sha2_256_update(sha2_256_t *sha, const uint8_t *m, size_t m_sz);
++#define sha2_224_update(sha, m, m_sz) sha2_256_update(sha, m, m_sz)
++  void sha2_512_update(sha2_512_t *sha, const uint8_t *m, size_t m_sz);
++#define sha2_384_update(sha, m, m_sz) sha2_512_update(sha, m, m_sz)
++
++  /* shaNNN_final(var, h): Finalize hash to "h", and clear the state. */
++  void sha2_256_final_len(sha2_256_t *sha, uint8_t *h, size_t hlen);
++#define sha2_256_final(sha, h) sha2_256_final_len(sha, h, 32)
++#define sha2_224_final(sha, h) sha2_256_final_len(sha, h, 28)
++  void sha2_512_final_len(sha2_512_t *sha, uint8_t *h, size_t hlen);
++#define sha2_512_final(sha, h) sha2_512_final_len(sha, h, 64)
++#define sha2_384_final(sha, h) sha2_512_final_len(sha, h, 48)
++
++  /* final padding */
++  void sha2_256_final_pad(sha2_256_t *sha);
++  void sha2_512_final_pad(sha2_512_t *sha);
++
++  /* copy state */
++  void sha2_256_copy(sha2_256_t *dst, const sha2_256_t *src);
++  void sha2_512_copy(sha2_512_t *dst, const sha2_512_t *src);
++
++  /* compression functions */
++  void sha2_256_compress(void *v);
++  void sha2_512_compress(void *v);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _SHA2_API_H_ */
+diff --git a/src/crypto/slhdsa128s/slh_adrs.h b/src/crypto/slhdsa128s/slh_adrs.h
+new file mode 100644
+index 0000000..8bd0ac8
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_adrs.h
+@@ -0,0 +1,176 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === Internal ADRS manipulation functions (FIPS 205 Section 4.3) */
++
++#ifndef _SLH_ADRS_H_
++#define _SLH_ADRS_H_
++
++#include <string.h>
++#include "slh_param.h"
++#include "slh_var.h"
++#include "slh_sys.h"
++
++/* ADRS type constants */
++
++#define ADRS_WOTS_HASH 0
++#define ADRS_WOTS_PK 1
++#define ADRS_TREE 2
++#define ADRS_FORS_TREE 3
++#define ADRS_FORS_ROOTS 4
++#define ADRS_WOTS_PRF 5
++#define ADRS_FORS_PRF 6
++
++/* Algorithm 1: toInt(x, n) */
++
++static SLH_INLINE uint64_t slh_toint(const uint8_t *x, unsigned n)
++{
++  unsigned i;
++  uint64_t t;
++
++  if (n == 0)
++  {
++    return 0;
++  }
++  t = (uint64_t)x[0];
++  for (i = 1; i < n; i++)
++  {
++    t <<= 8;
++    t += (uint64_t)x[i];
++  }
++  return t;
++}
++
++/* Algorithm 2: toByte(x, n) */
++
++static SLH_INLINE void slh_tobyte(uint8_t *x, uint64_t t, unsigned n)
++{
++  unsigned i;
++
++  if (n == 0)
++  {
++    return;
++  }
++  for (i = n - 1; i > 0; i--)
++  {
++    x[i] = (uint8_t)(t & 0xFF);
++    t >>= 8;
++  }
++  x[0] = (uint8_t)t;
++}
++
++/* === Clear / initialize */
++static SLH_INLINE void adrs_zero(slh_var_t *var)
++{
++  var->adrs->u32[0] = 0;
++  var->adrs->u32[1] = 0;
++  var->adrs->u32[2] = 0;
++  var->adrs->u32[3] = 0;
++  var->adrs->u32[4] = 0;
++  var->adrs->u32[5] = 0;
++  var->adrs->u32[6] = 0;
++  var->adrs->u32[7] = 0;
++}
++
++/* === Set layer address. */
++static SLH_INLINE void adrs_set_layer_address(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[0] = rev8_be32(x);
++}
++
++/* === Set tree addresss. */
++static SLH_INLINE void adrs_set_tree_address(slh_var_t *var, uint64_t x)
++{
++  /* bytes a[4:8] of tree address are always zero */
++  var->adrs->u32[2] = rev8_be32(x >> 32);
++  var->adrs->u32[3] = rev8_be32(x & 0xFFFFFFFF);
++}
++
++/* === Set key pair Address. */
++static SLH_INLINE void adrs_set_key_pair_address(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[5] = rev8_be32(x);
++}
++
++/* === Get key pair Address. */
++static SLH_INLINE uint32_t adrs_get_key_pair_address(const slh_var_t *var)
++{
++  return rev8_be32(var->adrs->u32[5]);
++}
++
++/* === Set FORS tree height. */
++static SLH_INLINE void adrs_set_tree_height(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[6] = rev8_be32(x);
++}
++
++/* === Set WOTS+ chain address. */
++static SLH_INLINE void adrs_set_chain_address(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[6] = rev8_be32(x);
++}
++
++/* === Set FORS tree index. */
++static SLH_INLINE void adrs_set_tree_index(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[7] = rev8_be32(x);
++}
++
++/* === Get FORS tree index. */
++static SLH_INLINE uint32_t adrs_get_tree_index(const slh_var_t *var)
++{
++  return rev8_be32(var->adrs->u32[7]);
++}
++
++/* === Set WOTS+ hash address. */
++static SLH_INLINE void adrs_set_hash_address(slh_var_t *var, uint32_t x)
++{
++  var->adrs->u32[7] = rev8_be32(x);
++}
++
++static SLH_INLINE void adrs_set_type(slh_var_t *var, uint32_t y)
++{
++  var->adrs->u32[4] = rev8_be32(y);
++}
++
++static SLH_INLINE uint32_t adrs_get_type(slh_var_t *var)
++{
++  return rev8_be32(var->adrs->u32[4]);
++}
++
++/* === "Function ADRS.setTypeAndClear(Y) for addresses sets the type */
++/* of the ADRS to Y and sets the final 12 bytes of the ADRS to zero." */
++static SLH_INLINE void adrs_set_type_and_clear(slh_var_t *var, uint32_t y)
++{
++  var->adrs->u32[4] = rev8_be32(y);
++  var->adrs->u32[5] = 0;
++  var->adrs->u32[6] = 0;
++  var->adrs->u32[7] = 0;
++}
++
++static SLH_INLINE void adrs_set_type_and_clear_not_kp(slh_var_t *var, uint32_t y)
++{
++  var->adrs->u32[4] = rev8_be32(y);
++  var->adrs->u32[6] = 0;
++  var->adrs->u32[7] = 0;
++}
++
++/* === Compressed 22-byte address ADRSc used with SHA-2. */
++static SLH_INLINE void adrsc_22(const slh_var_t *var, uint8_t *ac)
++{
++  int i;
++  ac[0] = var->adrs->u8[3];
++  for (i = 0; i < 8; i++)
++  {
++    ac[i + 1] = var->adrs->u8[i + 8];
++  }
++  for (i = 0; i < 13; i++)
++  {
++    ac[i + 9] = var->adrs->u8[i + 19];
++  }
++}
++
++/* _SLH_ADRS_H_ */
++#endif
+diff --git a/src/crypto/slhdsa128s/slh_dsa.c b/src/crypto/slhdsa128s/slh_dsa.c
+new file mode 100644
+index 0000000..4fb3dad
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_dsa.c
+@@ -0,0 +1,718 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === FIPS 205 Stateless Hash-Based Digital Signature Standard */
++
++#include "slh_dsa.h"
++#include "slh_adrs.h"
++#include "slh_var.h"
++#include "slh_sys.h"
++
++/* === Internal */
++
++/* helper functions to compute "len = len1 + len2" */
++
++static SLH_INLINE uint32_t get_len1(const slh_param_t *prm)
++{
++  return ((8 * prm->n + (prm->lg_w - 1)) / prm->lg_w);
++}
++
++/* === Computes len2 (Equation 5.3). */
++/* Algorithm 1: gen_len2(n, lg_w) */
++
++static SLH_INLINE uint32_t gen_len2(const slh_param_t *prm)
++{
++  uint32_t len2, cap, maxs;
++
++  /* "When lg_w = 4 and 9 <= n <= 136, the value of len2 will be 3." */
++  if (prm->lg_w == 4 && prm->n >= 9 && prm->n <= 136)
++  {
++    return 3;
++  }
++
++  maxs = get_len1(prm) * ((1 << prm->lg_w) - 1);
++  len2 = 1;
++  cap = 1 << prm->lg_w;
++  while (cap < maxs)
++  {
++    len2++;
++    cap <<= prm->lg_w;
++  }
++  return len2;
++}
++
++static SLH_INLINE uint32_t get_len(const slh_param_t *prm)
++{
++  return get_len1(prm) + gen_len2(prm);
++}
++
++/* Return signature size in bytes for parameter set *prm. */
++size_t slh_sig_sz(const slh_param_t *prm)
++{
++  return (1 + prm->k * (1 + prm->a) + prm->h + prm->d * get_len(prm)) * prm->n;
++}
++
++/* === Compute the base 2**b representation of X. */
++/* Algorithm 4: base_2b(X, b, out_len) */
++
++static SLH_INLINE size_t base_2b(uint32_t *v, const uint8_t *x, uint32_t b,
++                             size_t v_len)
++{
++  size_t i, j;
++  uint32_t l, t, m;
++
++  j = 0;
++  l = 0;
++  t = 0;
++  m = (1 << b) - 1;
++  for (i = 0; i < v_len; i++)
++  {
++    while (l < b)
++    {
++      t = (t << 8) + ((uint32_t) x[j++]);
++      l += 8;
++    }
++    l -= b;
++    v[i] = (t >> l) & m;
++  }
++  return j;
++}
++
++/* === Chaining function used in WOTS+ */
++/* Algorithm 5: chain(X, i, s, PK.seed, ADRS) */
++/* (see prm->chain) */
++
++/* === Generate a WOTS+ public key. */
++/* Algorithm 6: wots_PKgen(SK.seed, PK.seed, ADRS) */
++/* (see xmms_node) */
++
++/* === Generate a WOTS+ signature on an n-byte message. */
++/* Algorithm 7: wots_sign(M, SK.seed, PK.seed, ADRS) */
++
++/* (wots_csum is a shared helper function for algorithms 7 and 8) */
++static void wots_csum(uint32_t *vm, const uint8_t *m, const slh_param_t *prm)
++{
++  uint32_t csum, i, t;
++  uint32_t len1, len2;
++  uint8_t buf[4];
++
++  len1 = get_len1(prm);
++  len2 = gen_len2(prm);
++
++  base_2b(vm, m, prm->lg_w, len1);
++  
++  csum = 0;
++  t = (1 << prm->lg_w) - 1;
++  for (i = 0; i < len1; i++)
++  {
++    csum += t - vm[i];
++  }
++  csum <<= (8 - ((len2 * prm->lg_w) & 7)) & 7;
++
++  t = (len2 * prm->lg_w + 7) / 8;
++  memset(buf, 0, sizeof(buf));
++  slh_tobyte(buf, csum, t);
++
++  base_2b(&vm[len1], buf, prm->lg_w, len2);
++}
++
++static size_t wots_sign(slh_var_t *var, uint8_t *sig, const uint8_t *m)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t i, len;
++  uint32_t vm[SLH_MAX_LEN];
++  size_t n = prm->n;
++
++  len = get_len(prm);
++  wots_csum(vm, m, prm);
++
++  for (i = 0; i < len; i++)
++  {
++    adrs_set_chain_address(var, i);
++    prm->wots_chain(var, sig, vm[i]);
++    sig += n;
++  }
++  return n * len;
++}
++
++/* === Compute a WOTS+ public key from a message and its signature. */
++/* Algorithm 8: wots_PKFromSig(sig, M, PK.seed, ADRS) */
++
++static void wots_pk_from_sig(slh_var_t *var, uint8_t *pk, const uint8_t *sig,
++                             const uint8_t *m)
++{
++  const slh_param_t *prm = var->prm;
++  size_t n = prm->n;
++  uint32_t i, t, len;
++  uint32_t vm[SLH_MAX_LEN];
++  uint8_t tmp[SLH_MAX_LEN * SLH_MAX_N];
++  size_t tmp_sz;
++
++  wots_csum(vm, m, prm);
++
++  len = get_len(prm);
++  t = (1 << prm->lg_w) - 1;
++  tmp_sz = 0;
++  for (i = 0; i < len; i++)
++  {
++    adrs_set_chain_address(var, i);
++    prm->chain(var, tmp + tmp_sz, sig + tmp_sz, vm[i], t - vm[i]);
++    tmp_sz += n;
++  }
++
++  adrs_set_type_and_clear_not_kp(var, ADRS_WOTS_PK);
++  prm->h_t(var, pk, tmp, tmp_sz);
++}
++
++/* === Compute the root of a Merkle subtree of WOTS+ public keys. */
++/* Algorithm 9: xmss_node(SK.seed, i, z, PK.seed, ADRS) */
++
++static void xmss_node(slh_var_t *var, uint8_t *node, uint32_t i, uint32_t z)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t j, k, w1;
++  int p;
++  uint8_t *h0, h[SLH_MAX_HP][SLH_MAX_N];
++  uint8_t tmp[SLH_MAX_LEN * SLH_MAX_N];
++  uint8_t *sk;
++  size_t n = prm->n;
++  size_t len = get_len(prm);
++
++  p = -1;
++  i <<= z;
++  w1 = (1 << prm->lg_w) - 1;
++  for (j = 0; j < (1u << z); j++)
++  {
++    adrs_set_key_pair_address(var, i);
++
++    /* === Generate a WOTS+ public key. */
++    /* Algorithm 6: wots_PKgen(SK.seed, PK.seed, ADRS) */
++    sk = tmp;
++    for (k = 0; k < len; k++)
++    {
++      adrs_set_chain_address(var, k);
++      prm->wots_chain(var, sk, w1);
++      sk += n;
++    }
++    adrs_set_type_and_clear_not_kp(var, ADRS_WOTS_PK);
++    h0 = p >= 0 ? h[p] : node;
++    p++;
++    prm->h_t(var, h0, tmp, len * n);
++
++    /* this xmss_node() implementation is non-recursive */
++    for (k = 0; (j >> k) & 1; k++)
++    {
++      adrs_set_type_and_clear(var, ADRS_TREE);
++      adrs_set_tree_height(var, k + 1);
++      adrs_set_tree_index(var, i >> (k + 1));
++      p--;
++      h0 = p >= 1 ? h[p - 1] : node;
++      prm->h_h(var, h0, h0, h[p]);
++    }
++    i++; /* advance index */
++  }
++}
++
++/* === Generate an XMSS signature. */
++/* Algorithm 10: xmss_sign(M, SK.seed, idx, PK.seed, ADRS) */
++
++static size_t xmss_sign(slh_var_t *var, uint8_t *sx, const uint8_t *m,
++                        uint32_t idx)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t j, k;
++  uint8_t *auth;
++  size_t sx_sz = 0;
++  size_t n = prm->n;
++
++  sx_sz = get_len(prm) * n;
++  auth = sx + sx_sz;
++
++  for (j = 0; j < prm->hp; j++)
++  {
++    k = (idx >> j) ^ 1;
++    xmss_node(var, auth, k, j);
++    auth += n;
++  }
++  sx_sz += prm->hp * n;
++
++  adrs_set_type_and_clear_not_kp(var, ADRS_WOTS_HASH);
++  adrs_set_key_pair_address(var, idx);
++  wots_sign(var, sx, m);
++
++  return sx_sz;
++}
++
++/* === Compute an XMSS public key from an XMSS signature. */
++/* Algorithm 11: xmss_PKFromSig(idx, SIGXMSS, M, PK.seed, ADRS) */
++
++static void xmss_pk_from_sig(slh_var_t *var, uint8_t *root, uint32_t idx,
++                             const uint8_t *sig, const uint8_t *m)
++{
++  const slh_param_t *prm = var->prm;
++  size_t n = prm->n;
++  uint32_t k;
++  const uint8_t *auth;
++
++  adrs_set_type_and_clear_not_kp(var, ADRS_WOTS_HASH);
++  adrs_set_key_pair_address(var, idx);
++
++  wots_pk_from_sig(var, root, sig, m);
++  adrs_set_type_and_clear(var, ADRS_TREE);
++
++  auth = sig + (get_len(prm) * n);
++
++  for (k = 0; k < prm->hp; k++)
++  {
++    adrs_set_tree_height(var, k + 1);
++    adrs_set_tree_index(var, idx >> (k + 1));
++
++    if (((idx >> k) & 1) == 0)
++    {
++      prm->h_h(var, root, root, auth);
++    }
++    else
++    {
++      prm->h_h(var, root, auth, root);
++    }
++    auth += n;
++  }
++}
++
++/* === Generate a hypertree signature. */
++/* Algorithm 12: ht_sign(M, SK.seed, PK.seed, idx_tree, idx_leaf ) */
++
++static size_t ht_sign(slh_var_t *var, uint8_t *sh, uint8_t *m, uint64_t i_tree,
++                      uint32_t i_leaf)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t j;
++  size_t sx_sz;
++
++  adrs_zero(var);
++  adrs_set_tree_address(var, i_tree);
++  sx_sz = xmss_sign(var, sh, m, i_leaf);
++
++  for (j = 1; j < prm->d; j++)
++  {
++    xmss_pk_from_sig(var, m, i_leaf, sh, m);
++    sh += sx_sz;
++
++    i_leaf = i_tree & ((1 << prm->hp) - 1);
++    i_tree >>= prm->hp;
++    adrs_set_layer_address(var, j);
++    adrs_set_tree_address(var, i_tree);
++    xmss_sign(var, sh, m, i_leaf);
++  }
++
++  return sx_sz * prm->d;
++}
++
++/* === Verify a hypertree signature. */
++/* Algorithm 13: ht_verify(M, SIG_HT, PK.seed, idx_tree, idx_leaf, PK.root) */
++
++static int ht_verify(slh_var_t *var, const uint8_t *m, const uint8_t *sig_ht,
++                     uint64_t i_tree, uint32_t i_leaf)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t j;
++  uint8_t node[SLH_MAX_N] = {0};
++  size_t st_sz;
++
++  adrs_zero(var);
++  adrs_set_tree_address(var, i_tree);
++
++  xmss_pk_from_sig(var, node, i_leaf, sig_ht, m);
++
++  st_sz = (prm->hp + get_len(prm)) * prm->n;
++
++  for (j = 1; j < prm->d; j++)
++  {
++    i_leaf = i_tree & ((1 << prm->hp) - 1);
++    i_tree >>= prm->hp;
++    adrs_set_layer_address(var, j);
++    adrs_set_tree_address(var, i_tree);
++    sig_ht += st_sz;
++    xmss_pk_from_sig(var, node, i_leaf, sig_ht, node);
++  }
++
++  return memcmp(node, var->pk_root, prm->n) == 0;
++}
++
++/* === Generate a FORS private-key value. */
++/* Algorithm 14: fors_SKgen(SK.seed, PK.seed, ADRS, idx) */
++
++/* ( see prm->fors_hash() ) */
++
++/* === Computes the root of a Merkle subtree of FORS public values. */
++/* Algorithm 15: fors_node(SK.seed, i, z, PK.seed, ADRS) */
++
++static void fors_node(slh_var_t *var, uint8_t *node, uint32_t i, uint32_t z)
++{
++  const slh_param_t *prm = var->prm;
++  uint8_t h[SLH_MAX_A][SLH_MAX_N], *h0;
++  uint32_t j, k;
++  int p;
++
++  p = -1;
++  i <<= z;
++  for (j = 0; j < (1u << z); j++)
++  {
++    /* fors_SKgen() + hash */
++    adrs_set_tree_index(var, i);
++    h0 = p >= 0 ? h[p] : node;
++    p++;
++    prm->fors_hash(var, h0, 1);
++
++    /* this fors_node() implementation is non-recursive */
++    for (k = 0; (j >> k) & 1; k++)
++    {
++      adrs_set_tree_height(var, k + 1);
++      adrs_set_tree_index(var, i >> (k + 1));
++      p--;
++      h0 = p > 0 ? h[p - 1] : node;
++      prm->h_h(var, h0, h0, h[p]);
++    }
++    i++; /* advance index */
++  }
++}
++
++/* === Generates a FORS signature. */
++/* Algorithm 16: fors_sign(md, SK.seed, PK.seed, ADRS) */
++
++static size_t fors_sign(slh_var_t *var, uint8_t *sf, const uint8_t *md)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t i, j, s;
++  uint32_t vi[SLH_MAX_K];
++  size_t n = prm->n;
++
++  base_2b(vi, md, prm->a, prm->k);
++
++  for (i = 0; i < prm->k; i++)
++  {
++    /* fors_SKgen() */
++    adrs_set_tree_index(var, (i << prm->a) + vi[i]);
++    prm->fors_hash(var, sf, 0);
++    sf += n;
++
++    for (j = 0; j < prm->a; j++)
++    {
++      s = (vi[i] >> j) ^ 1;
++      fors_node(var, sf, (i << (prm->a - j)) + s, j);
++      sf += n;
++    }
++  }
++  return n * prm->k * (1 + prm->a);
++}
++
++/* === Compute a FORS public key from a FORS signature. */
++/* Algorithm 17: fors_pkFromSig(SIGFORS , md, PK.seed, ADRS) */
++
++static void fors_pk_from_sig(slh_var_t *var, uint8_t *pk, const uint8_t *sf,
++                             const uint8_t *md)
++{
++  const slh_param_t *prm = var->prm;
++  uint32_t i, j, idx;
++  uint32_t vi[SLH_MAX_K];
++  uint8_t root[SLH_MAX_K * SLH_MAX_N];
++  uint8_t *node;
++  size_t n = prm->n;
++
++  base_2b(vi, md, prm->a, prm->k);
++
++  node = root;
++  for (i = 0; i < prm->k; i++)
++  {
++    adrs_set_tree_height(var, 0);
++
++    idx = (i << prm->a) + vi[i];
++    adrs_set_tree_index(var, idx);
++
++    prm->h_f(var, node, sf);
++    sf += n;
++
++    for (j = 0; j < prm->a; j++)
++    {
++      adrs_set_tree_height(var, j + 1);
++      adrs_set_tree_index(var, idx >> (j + 1));
++
++      if (((vi[i] >> j) & 1) == 0)
++      {
++        prm->h_h(var, node, node, sf);
++      }
++      else
++      {
++        prm->h_h(var, node, sf, node);
++      }
++      sf += n;
++    }
++    node += n;
++  }
++
++  adrs_set_type_and_clear_not_kp(var, ADRS_FORS_ROOTS);
++  prm->h_t(var, pk, root, prm->k * n);
++}
++
++/* === Public API */
++
++/* Return standard identifier string for parameter set *prm, or NULL. */
++const char *slh_alg_id(const slh_param_t *prm) { return prm->alg_id; }
++
++/* Return public (verification) key size in bytes for parameter set *prm. */
++size_t slh_pk_sz(const slh_param_t *prm) { return 2 * prm->n; }
++
++/* Return private (signing) key size in bytes for parameter set *prm. */
++size_t slh_sk_sz(const slh_param_t *prm) { return 4 * prm->n; }
++
++/* === Generates an SLH-DSA key pair. */
++/* Algorithm 18: slh_keygen_internal(SK.seed, SK.prf, PK.seed) */
++
++int slh_keygen_internal(uint8_t *sk, uint8_t *pk, const uint8_t *sk_seed,
++                        const uint8_t *sk_prf, const uint8_t *pk_seed,
++                        const slh_param_t *prm)
++{
++  slh_var_t var;
++  size_t n = prm->n;
++
++  memcpy(sk, sk_seed, n);           /* SK_seed */
++  memcpy(sk + n, sk_prf, n);        /* SK.prf */
++  memcpy(sk + 2 * n, pk_seed, n);   /* PK.seed */
++  memset(sk + 3 * n, 0x00, n);      /* PK.root not generated yet */
++  prm->mk_var(&var, NULL, sk, prm); /* fill in partial */
++
++  adrs_zero(&var);
++  adrs_set_layer_address(&var, prm->d - 1);
++  memcpy(pk, pk_seed, n);              /* PK.seed in pk */
++  xmss_node(&var, pk + n, 0, prm->hp); /* PK.root in pk (compute) */
++  memcpy(sk + 3 * n, pk + n, n);       /* PK.root in sk */
++
++  return 0;
++}
++
++/* === Generates an SLH-DSA key pair. */
++/* Algorithm 21: slh_keygen() */
++
++int slh_keygen(uint8_t *sk, uint8_t *pk, int (*rbg)(uint8_t *x, size_t xlen),
++               const slh_param_t *prm)
++{
++  slh_var_t var;
++  uint8_t pk_root[SLH_MAX_N];
++  size_t n = prm->n;
++
++  rbg(sk, 3 * n);                   /* SK.seed || SK.prf || PK.seed */
++  memcpy(pk, sk + 2 * n, n);        /* PK.seed */
++  memset(sk + 3 * n, 0x00, n);      /* PK.root not generated yet */
++  prm->mk_var(&var, NULL, sk, prm); /* fill in partial */
++
++  adrs_zero(&var);
++  adrs_set_layer_address(&var, prm->d - 1);
++  xmss_node(&var, pk_root, 0, prm->hp);
++
++  /* fill pk_root */
++  memcpy(sk + 3 * n, pk_root, n);
++  memcpy(pk + n, pk_root, n);
++  return 0;
++}
++
++/* === sigGen === */
++
++/* (Shared helper function for algorithms 18 and 19.) */
++
++static void split_digest(uint64_t *i_tree, uint32_t *i_leaf,
++                         const uint8_t *digest, const slh_param_t *prm)
++{
++  size_t md_sz = (prm->k * prm->a + 7) / 8;
++  const uint8_t *pi_tree = digest + md_sz;
++  size_t i_tree_sz = (prm->h - prm->hp + 7) / 8;
++  size_t i_leaf_sz = (prm->hp + 7) / 8;
++  const uint8_t *pi_leaf = pi_tree + i_tree_sz;
++
++  *i_tree = slh_toint(pi_tree, i_tree_sz);
++  *i_leaf = slh_toint(pi_leaf, i_leaf_sz);
++  if ((prm->h - prm->hp) != 64)
++  {
++    *i_tree &= (UINT64_C(1) << (prm->h - prm->hp)) - UINT64_C(1);
++  }
++  *i_leaf &= (1 << prm->hp) - 1;
++}
++
++/* Core signing function that just takes in "digest" and an already */
++/* initialized secret key context. *sig points to signature after */
++/* randomizer.  Returns the length of |SIG_FORS + SIG_HT| written at *sig. */
++
++static size_t slh_sign_digest(slh_var_t *var, uint8_t *sig,
++                              const uint8_t *digest)
++{
++  const uint8_t *md = digest;
++  uint64_t i_tree = 0;
++  uint32_t i_leaf = 0;
++  uint8_t pk_fors[SLH_MAX_N] = {0};
++  size_t sig_sz;
++
++  split_digest(&i_tree, &i_leaf, digest, var->prm);
++
++  adrs_zero(var);
++  adrs_set_tree_address(var, i_tree);
++  adrs_set_type_and_clear_not_kp(var, ADRS_FORS_TREE);
++  adrs_set_key_pair_address(var, i_leaf);
++
++  /* SIG_FORS */
++  sig_sz = fors_sign(var, sig, md);
++  fors_pk_from_sig(var, pk_fors, sig, md);
++
++  /* SIG_HT */
++  sig += sig_sz;
++  sig_sz += ht_sign(var, sig, pk_fors, i_tree, i_leaf);
++
++  return sig_sz;
++}
++
++/* Algorithm 19: slh_sign_internal(M, SK, addrnd) */
++
++size_t slh_sign_internal(uint8_t *sig, const uint8_t *m, size_t m_sz,
++                         const uint8_t *sk, const uint8_t *addrnd,
++                         const slh_param_t *prm)
++{
++  slh_var_t var;
++  const uint8_t *opt_rand;
++  uint8_t digest[SLH_MAX_M];
++  size_t sig_sz;
++
++  /* set up secret key etc */
++  prm->mk_var(&var, NULL, sk, prm);
++
++  if (addrnd != NULL)
++  {
++    opt_rand = addrnd; /* randomnesss; non-determinsitic */
++  }
++  else
++  {
++    opt_rand = var.pk_seed; /* deterministic variant */
++  }
++
++  /* randomized hashing; R (first part of signarure) */
++  sig_sz = prm->n;
++  prm->prf_msg(&var, sig, opt_rand, m, m_sz, NULL, SLH_CTX_SZ_NO_CONTEXT);
++  prm->h_msg(&var, digest, sig, m, m_sz, NULL, SLH_CTX_SZ_NO_CONTEXT);
++
++  /* create FORS and HT signature parts */
++  sig_sz += slh_sign_digest(&var, sig + sig_sz, digest);
++
++  return sig_sz;
++}
++
++/* Algorithm 22: slh_sign(M, ctx, SK) */
++
++size_t slh_sign(uint8_t *sig, const uint8_t *m, size_t m_sz, const uint8_t *ctx,
++                size_t ctx_sz, const uint8_t *sk, const uint8_t *addrnd,
++                const slh_param_t *prm)
++{
++  slh_var_t var;
++  const uint8_t *opt_rand;
++  uint8_t digest[SLH_MAX_M] = {0};
++  size_t sig_sz;
++
++  if (ctx_sz > 255)
++  {
++    return 0;
++  }
++
++  /* set up secret key etc */
++  prm->mk_var(&var, NULL, sk, prm);
++
++  if (addrnd != NULL)
++  {
++    opt_rand = addrnd; /* randomnesss; non-determinsitic */
++  }
++  else
++  {
++    opt_rand = var.pk_seed; /* deterministic variant */
++  }
++
++  /* randomized hashing; R (first part of signarure) */
++  sig_sz = prm->n;
++  prm->prf_msg(&var, sig, opt_rand, m, m_sz, ctx, ctx_sz);
++  prm->h_msg(&var, digest, sig, m, m_sz, ctx, ctx_sz);
++
++  /* create FORS and HT signature parts */
++  sig_sz += slh_sign_digest(&var, sig + sig_sz, digest);
++
++  return sig_sz;
++}
++
++/* === sigVer === */
++
++/* most of Algorithm 20: slh_verify_internal(M, SIG, PK) */
++
++static int slh_verify_digest(slh_var_t *var, const uint8_t *digest,
++                             const uint8_t *sig, size_t sig_sz,
++                             const slh_param_t *prm)
++{
++  uint8_t pk_fors[SLH_MAX_N] = { 0 };
++  const uint8_t *sig_fors;
++  const uint8_t *sig_ht;
++  const uint8_t *md = digest;
++  uint64_t i_tree = 0;
++  uint32_t i_leaf = 0;
++
++  sig_fors = sig + prm->n;
++  sig_ht = sig + ((1 + prm->k * (1 + prm->a)) * prm->n);
++
++  /* check signature length */
++  if (sig_sz != slh_sig_sz(prm))
++  {
++    return 0; /* false */
++  }
++
++  split_digest(&i_tree, &i_leaf, digest, prm);
++
++  adrs_zero(var);
++  adrs_set_tree_address(var, i_tree);
++  adrs_set_type_and_clear_not_kp(var, ADRS_FORS_TREE);
++  adrs_set_key_pair_address(var, i_leaf);
++
++  fors_pk_from_sig(var, pk_fors, sig_fors, md);
++
++  return ht_verify(var, pk_fors, sig_ht, i_tree, i_leaf);
++}
++
++/* Algorithm 20: slh_verify_internal(M, SIG, PK) */
++
++int slh_verify_internal(const uint8_t *m, size_t m_sz, const uint8_t *sig,
++                        size_t sig_sz, const uint8_t *pk,
++                        const slh_param_t *prm)
++{
++  slh_var_t var;
++  uint8_t digest[SLH_MAX_M];
++
++  /* use Hmsg directly */
++  prm->mk_var(&var, pk, NULL, prm);
++  prm->h_msg(&var, digest, sig, m, m_sz, NULL, SLH_CTX_SZ_NO_CONTEXT);
++
++  return slh_verify_digest(&var, digest, sig, sig_sz, prm);
++}
++
++/* === Verifies a pure SLH-DSA signature. */
++/* Algorithm 24: slh_verify(M, SIG, ctx, PK) */
++
++int slh_verify(const uint8_t *m, size_t m_sz, const uint8_t *sig, size_t sig_sz,
++               const uint8_t *ctx, size_t ctx_sz, const uint8_t *pk,
++               const slh_param_t *prm)
++{
++  slh_var_t var;
++  uint8_t digest[SLH_MAX_M];
++
++  if (ctx_sz > 255)
++  {
++    return 0; /* false */
++  }
++
++  /* create the "pure" hash (with context) */
++  prm->mk_var(&var, pk, NULL, prm);
++  prm->h_msg(&var, digest, sig, m, m_sz, ctx, ctx_sz);
++
++  return slh_verify_digest(&var, digest, sig, sig_sz, prm);
++}
+diff --git a/src/crypto/slhdsa128s/slh_dsa.h b/src/crypto/slhdsa128s/slh_dsa.h
+new file mode 100644
+index 0000000..61b5bb0
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_dsa.h
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === FIPS 205 Stateless Hash-Based Digital Signature Standard. */
++/* API fo internal and "pure" variants. */
++
++#ifndef _SLH_DSA_H_
++#define _SLH_DSA_H_
++
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifndef _SLH_PARAM_H_
++  typedef struct slh_param_s slh_param_t;
++#endif
++
++  /* === SLH-DSA parameter sets */
++  extern const slh_param_t slh_dsa_sha2_128s;
++  extern const slh_param_t slh_dsa_shake_128s;
++  extern const slh_param_t slh_dsa_sha2_128f;
++  extern const slh_param_t slh_dsa_shake_128f;
++  extern const slh_param_t slh_dsa_sha2_192s;
++  extern const slh_param_t slh_dsa_shake_192s;
++  extern const slh_param_t slh_dsa_sha2_192f;
++  extern const slh_param_t slh_dsa_shake_192f;
++  extern const slh_param_t slh_dsa_sha2_256s;
++  extern const slh_param_t slh_dsa_shake_256s;
++  extern const slh_param_t slh_dsa_sha2_256f;
++  extern const slh_param_t slh_dsa_shake_256f;
++
++  /* === SLH_DSA API (_internal and _pure functions.) */
++  /* see slh_prehash.h for HashSLH functions */
++
++  /* Return standard identifier string for parameter set *prm, or NULL. */
++  const char *slh_alg_id(const slh_param_t *prm);
++
++  /* Return public (verification) key size in bytes for parameter set *prm. */
++  size_t slh_pk_sz(const slh_param_t *prm);
++
++  /* Return private (signing) key size in bytes for parameter set *prm. */
++  size_t slh_sk_sz(const slh_param_t *prm);
++
++  /* Return signature size in bytes for parameter set *prm. */
++  size_t slh_sig_sz(const slh_param_t *prm);
++
++  /* Generate an SLH-DSA key pair; needs an RBG (a "randombytes()" function) */
++  int slh_keygen(uint8_t *sk, uint8_t *pk, int (*rbg)(uint8_t *x, size_t xlen),
++                 const slh_param_t *prm);
++
++  int slh_keygen_internal(uint8_t *sk, uint8_t *pk, const uint8_t *sk_seed,
++                          const uint8_t *sk_prf, const uint8_t *pk_seed,
++                          const slh_param_t *prm);
++
++  /* Generate an SLH-DSA signature. */
++  size_t slh_sign_internal(uint8_t *sig, const uint8_t *m, size_t m_sz,
++                           const uint8_t *sk, const uint8_t *addrnd,
++                           const slh_param_t *prm);
++
++  size_t slh_sign(uint8_t *sig, const uint8_t *m, size_t m_sz,
++                  const uint8_t *ctx, size_t ctx_sz, const uint8_t *sk,
++                  const uint8_t *addrnd, const slh_param_t *prm);
++
++  /* Verify an SLH-DSA signature. */
++  /* return 0 on verification failure, 1 on success */
++  int slh_verify_internal(const uint8_t *m, size_t m_sz, const uint8_t *sig,
++                          size_t sig_sz, const uint8_t *pk,
++                          const slh_param_t *prm);
++
++  int slh_verify(const uint8_t *m, size_t m_sz, const uint8_t *sig,
++                 size_t sig_sz, const uint8_t *ctx, size_t ctx_sz,
++                 const uint8_t *pk, const slh_param_t *prm);
++
++#ifdef __cplusplus
++}
++#endif
++
++/* _SLH_DSA_H_ */
++#endif
+diff --git a/src/crypto/slhdsa128s/slh_param.h b/src/crypto/slhdsa128s/slh_param.h
+new file mode 100644
+index 0000000..5380977
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_param.h
+@@ -0,0 +1,63 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === Internal parameter definition structure. */
++
++#ifndef _SLH_PARAM_H_
++#define _SLH_PARAM_H_
++
++#include "plat_local.h"
++
++/* address */
++typedef union
++{
++  uint8_t u8[32];
++  uint32_t u32[8];
++} adrs_t;
++
++/* Parameter sets */
++
++#ifndef _SLH_DSA_H_
++typedef struct slh_param_s slh_param_t;
++#endif
++typedef struct slh_var_s slh_var_t;
++
++/* used to indicate _internal mode */
++#define SLH_CTX_SZ_NO_CONTEXT 0x100
++
++struct slh_param_s
++{
++  const char *alg_id; /* Algorithm name */
++
++  /* core parameters */
++  uint32_t n;    /* Security level / hash size { 16,24,32 }. */
++  uint32_t h;    /* Bits h used to select FORS key. */
++  uint32_t d;    /* Number of hypertree layers d. */
++  uint32_t hp;   /* Merkle tree height h' (XMSS). */
++  uint32_t a;    /* String length t = 2**a (FORS). */
++  uint32_t k;    /* Number of indices (FORS). */
++  uint32_t lg_w; /* Number of bits in chain index (WOTS+) */
++  uint32_t m;    /* Length in bytes of message digest. */
++
++  /* hash function instantation */
++  void (*mk_var)(slh_var_t *var, const uint8_t *pk, const uint8_t *sk,
++                 const slh_param_t *prm);
++  void (*chain)(slh_var_t *var, uint8_t *tmp, const uint8_t *x, uint32_t i,
++                uint32_t s);
++  void (*wots_chain)(slh_var_t *var, uint8_t *tmp, uint32_t s);
++  void (*fors_hash)(slh_var_t *var, uint8_t *tmp, uint32_t s);
++  void (*h_msg)(slh_var_t *var, uint8_t *h, const uint8_t *r, const uint8_t *m,
++                size_t m_sz, const uint8_t *ctx, size_t ctx_sz);
++  void (*prf)(slh_var_t *var, uint8_t *h);
++  void (*prf_msg)(slh_var_t *var, uint8_t *h, const uint8_t *opt_rand,
++                  const uint8_t *m, size_t m_sz, const uint8_t *ctx,
++                  size_t ctx_sz);
++  void (*h_f)(slh_var_t *var, uint8_t *h, const uint8_t *m1);
++  void (*h_h)(slh_var_t *var, uint8_t *h, const uint8_t *m1, const uint8_t *m2);
++  void (*h_t)(slh_var_t *var, uint8_t *h, const uint8_t *m, size_t m_sz);
++};
++
++/* _SLH_PARAM_H_ */
++#endif
+diff --git a/src/crypto/slhdsa128s/slh_sha2.c b/src/crypto/slhdsa128s/slh_sha2.c
+new file mode 100644
+index 0000000..8e1ab01
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_sha2.c
+@@ -0,0 +1,581 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === Portable C code: Functions for instantiation of SLH-DSA with SHA2 */
++
++#include <string.h>
++#include "plat_local.h"
++#include "sha2_api.h"
++#include "slh_adrs.h"
++#include "slh_var.h"
++
++/* Cat 1: Hmsg(R, PK.seed, PK.root, M) = */
++/* MGF1-SHA-256(R || PK.seed || SHA-256(R ||PK.seed || PK.root || */
++/* M), m) */
++
++static void sha2_256_h_msg(slh_var_t *var, uint8_t *h, const uint8_t *r,
++                           const uint8_t *m, size_t m_sz, const uint8_t *ctx,
++                           size_t ctx_sz)
++{
++  sha2_256_t sha2;
++  size_t i;
++  size_t n = var->prm->n;
++  uint8_t buf[16 + 16 + 32 + 4];
++  size_t mgf_sz;
++  uint8_t *ctr;
++
++  /* SHA-256(R || PK.seed || PK.root || M) */
++  sha2_256_init(&sha2);
++  sha2_256_update(&sha2, r, n);
++  sha2_256_update(&sha2, var->pk_seed, n);
++  sha2_256_update(&sha2, var->pk_root, n);
++
++  /* add "pure" domain separator and context, if supplied */
++  if (ctx_sz != SLH_CTX_SZ_NO_CONTEXT)
++  {
++    buf[0] = 0;
++    buf[1] = ctx_sz & 0xFF;
++    sha2_256_update(&sha2, buf, 2);
++    sha2_256_update(&sha2, ctx, ctx_sz);
++  }
++  /* message */
++  sha2_256_update(&sha2, m, m_sz);
++  sha2_256_final(&sha2, buf + 2 * n);
++
++  /* MGF1-SHA-256(R || PK.seed || .. */
++  memcpy(buf, r, n);
++  memcpy(buf + n, var->pk_seed, n);
++
++  mgf_sz = 2 * n + 32 + 4;
++  ctr = buf + mgf_sz - 4;
++
++  /* MGF1 counter mode */
++  for (i = 0; i < var->prm->m; i += 32)
++  {
++    uint32_t c = i / 32;
++    ctr[0] = c >> 24;
++    ctr[1] = (c >> 16) & 0xFF;
++    ctr[2] = (c >> 8) & 0xFF;
++    ctr[3] = c & 0xFF;
++
++    sha2_256_init(&sha2);
++    sha2_256_update(&sha2, buf, mgf_sz);
++    if ((var->prm->m - i) >= 32)
++    {
++      sha2_256_final(&sha2, h + i);
++    }
++    else
++    {
++      sha2_256_final(&sha2, buf);
++      memcpy(h + i, buf, var->prm->m - i);
++    }
++  }
++}
++
++/* Cat 3, 5: Hmsg(R, PK.seed, PK.root, M) = */
++/* MGF1-SHA-512(R || PK.seed || SHA-512(R || PK.seed || PK.root || */
++/* M), m) */
++
++static void sha2_512_h_msg(slh_var_t *var, uint8_t *h, const uint8_t *r,
++                           const uint8_t *m, size_t m_sz, const uint8_t *ctx,
++                           size_t ctx_sz)
++{
++  size_t i;
++  sha2_512_t sha2;
++  uint8_t buf[32 + 32 + 64 + 4];
++  size_t mgf_sz;
++  uint8_t *ctr;
++  size_t n = var->prm->n;
++
++  /* SHA-512(R || PK.seed || PK.root || M) */
++  sha2_512_init(&sha2);
++  sha2_512_update(&sha2, r, n);
++  sha2_512_update(&sha2, var->pk_seed, n);
++  sha2_512_update(&sha2, var->pk_root, n);
++
++  /* add "pure" domain separator and context, if supplied */
++  if (ctx_sz != SLH_CTX_SZ_NO_CONTEXT)
++  {
++    buf[0] = 0;
++    buf[1] = ctx_sz & 0xFF;
++    sha2_512_update(&sha2, buf, 2);
++    sha2_512_update(&sha2, ctx, ctx_sz);
++  }
++  sha2_512_update(&sha2, m, m_sz);
++  sha2_512_final(&sha2, buf + 2 * n);
++
++  /* MGF1-SHA-512(R || PK.seed || .. */
++  memcpy(buf, r, n);
++  memcpy(buf + n, var->pk_seed, n);
++
++  mgf_sz = 2 * n + 64 + 4;
++  ctr = buf + mgf_sz - 4;
++
++  /* MGF1 counter mode */
++  for (i = 0; i < var->prm->m; i += 64)
++  {
++    uint32_t c = i / 64;
++    ctr[0] = c >> 24;
++    ctr[1] = (c >> 16) & 0xFF;
++    ctr[2] = (c >> 8) & 0xFF;
++    ctr[3] = c & 0xFF;
++
++    sha2_512_init(&sha2);
++    sha2_512_update(&sha2, buf, mgf_sz);
++    if ((var->prm->m - i) >= 64)
++    {
++      sha2_512_final(&sha2, h + i);
++    }
++    else
++    {
++      sha2_512_final(&sha2, buf);
++      memcpy(h + i, buf, var->prm->m - i);
++    }
++  }
++}
++
++/* insert ARDSc. */
++
++static void sha2_256_adrsc(sha2_256_t *sha2, const slh_var_t *var)
++{
++  uint8_t buf[22];
++  adrsc_22(var, buf);
++  sha2_256_update(sha2, buf, 22);
++}
++
++static void sha2_512_adrsc(sha2_512_t *sha2, const slh_var_t *var)
++{
++  uint8_t buf[22];
++  adrsc_22(var, buf);
++  sha2_512_update(sha2, buf, 22);
++}
++
++/* Cat 1, 3, 5: PRF(PK.seed, SK.seed, ADRS) = */
++/* Trunc_n(SHA-256(PK.seed || toByte(0, 64 − n) || ADRSc || */
++/* SK.seed)) */
++
++static void sha2_256_prf(slh_var_t *var, uint8_t *h)
++{
++  sha2_256_t sha2;
++  size_t n = var->prm->n;
++
++  sha2_256_copy(&sha2, &var->sha2_256_pk_seed);
++  sha2_256_adrsc(&sha2, var);
++  sha2_256_update(&sha2, var->sk_seed, n);
++  sha2_256_final_pad(&sha2);
++  sha2_256_compress(sha2.s);
++  memcpy(h, sha2.s, n);
++}
++
++/* Cat 1: PRFmsg(SK.prf, opt_rand, M) = */
++/* Trunc_n(HMAC-SHA-256(SK.prf, opt_rand || M)) */
++
++static void sha2_256_prf_msg(slh_var_t *var, uint8_t *h,
++                             const uint8_t *opt_rand, const uint8_t *m,
++                             size_t m_sz, const uint8_t *ctx, size_t ctx_sz)
++{
++  unsigned i;
++  sha2_256_t sha2;
++  uint8_t pad[64], buf[32];
++  size_t n = var->prm->n;
++
++  /* ipad */
++  memcpy(pad, var->sk_prf, n);
++  for (i = 0; i < n; i++)
++  {
++    pad[i] ^= 0x36;
++  }
++  memset(pad + n, 0x36, 64 - n);
++
++  sha2_256_init(&sha2);
++  sha2_256_update(&sha2, pad, 64);
++  sha2_256_update(&sha2, opt_rand, n);
++
++  /* add "pure" domain separator and context, if supplied */
++  if (ctx_sz != SLH_CTX_SZ_NO_CONTEXT)
++  {
++    buf[0] = 0;
++    buf[1] = ctx_sz & 0xFF;
++    sha2_256_update(&sha2, buf, 2);
++    sha2_256_update(&sha2, ctx, ctx_sz);
++  }
++  sha2_256_update(&sha2, m, m_sz);
++  sha2_256_final(&sha2, buf);
++
++  /* opad */
++  for (i = 0; i < 64; i++)
++  {
++    pad[i] ^= 0x36 ^ 0x5C;
++  }
++
++  sha2_256_init(&sha2);
++  sha2_256_update(&sha2, pad, 64);
++  sha2_256_update(&sha2, buf, 32);
++  sha2_256_final_len(&sha2, h, n);
++}
++
++/* Cat 3, 5: PRFmsg(SK.prf, opt_rand, M) = */
++/* Trunc_n(HMAC-SHA-512(SK.prf, opt_rand || M)) */
++
++static void sha2_512_prf_msg(slh_var_t *var, uint8_t *h,
++                             const uint8_t *opt_rand, const uint8_t *m,
++                             size_t m_sz, const uint8_t *ctx, size_t ctx_sz)
++{
++  unsigned i;
++  sha2_512_t sha2;
++  uint8_t pad[128], buf[64];
++  size_t n = var->prm->n;
++
++  /* ipad */
++  memcpy(pad, var->sk_prf, n);
++  for (i = 0; i < n; i++)
++  {
++    pad[i] ^= 0x36;
++  }
++  memset(pad + n, 0x36, 128 - n);
++
++  sha2_512_init(&sha2);
++  sha2_512_update(&sha2, pad, 128);
++  sha2_512_update(&sha2, opt_rand, n);
++
++  /* add "pure" domain separator and context, if supplied */
++  if (ctx_sz != SLH_CTX_SZ_NO_CONTEXT)
++  {
++    buf[0] = 0;
++    buf[1] = ctx_sz & 0xFF;
++    sha2_512_update(&sha2, buf, 2);
++    sha2_512_update(&sha2, ctx, ctx_sz);
++  }
++  sha2_512_update(&sha2, m, m_sz);
++  sha2_512_final(&sha2, buf);
++
++  /* opad */
++  for (i = 0; i < 128; i++)
++  {
++    pad[i] ^= 0x36 ^ 0x5C;
++  }
++
++  sha2_512_init(&sha2);
++  sha2_512_update(&sha2, pad, 128);
++  sha2_512_update(&sha2, buf, 64);
++  sha2_512_final_len(&sha2, h, n);
++}
++
++/* Cat 1: T_l(PK.seed, ADRS, M1 ) = */
++/* Trunc_n(SHA-256(PK.seed || toByte(0, 64 − n) || ADRSc || Ml )) */
++
++static void sha2_256_tl(slh_var_t *var, uint8_t *h, const uint8_t *m,
++                        size_t m_sz)
++{
++  sha2_256_t sha2;
++  size_t n = var->prm->n;
++
++  sha2_256_copy(&sha2, &var->sha2_256_pk_seed);
++  sha2_256_adrsc(&sha2, var);
++  sha2_256_update(&sha2, m, m_sz);
++  sha2_256_final_len(&sha2, h, n);
++}
++
++/* Cat 1: F(PK.seed, ADRS, M1 ) = */
++/* Trunc_n(SHA-256(PK.seed || toByte(0, 64 − n) || ADRSc || M1 )) */
++
++static void sha2_256_f(slh_var_t *var, uint8_t *h, const uint8_t *m1)
++{
++  sha2_256_tl(var, h, m1, var->prm->n);
++}
++
++/* Cat 1: H(PK.seed, ADRS, M2 ) = */
++/* Trunc_n(SHA-256(PK.seed || toByte(0, 64 − n) || ADRSc || M2 )) */
++
++static void sha2_256_h(slh_var_t *var, uint8_t *h, const uint8_t *m1,
++                       const uint8_t *m2)
++{
++  sha2_256_t sha2;
++  size_t n = var->prm->n;
++
++  sha2_256_copy(&sha2, &var->sha2_256_pk_seed);
++  sha2_256_adrsc(&sha2, var);
++  sha2_256_update(&sha2, m1, n);
++  sha2_256_update(&sha2, m2, n);
++  sha2_256_final_len(&sha2, h, n);
++}
++
++/* Cat 3, 5: Tl(PK.seed, ADRS, Ml ) = */
++/* Trunc_n(SHA-512(PK.seed || toByte(0, 128 − n) || ADRSc || Ml )) */
++
++static void sha2_512_tl(slh_var_t *var, uint8_t *h, const uint8_t *m,
++                        size_t m_sz)
++{
++  sha2_512_t sha2;
++  size_t n = var->prm->n;
++
++  sha2_512_copy(&sha2, &var->sha2_512_pk_seed);
++  sha2_512_adrsc(&sha2, var);
++  sha2_512_update(&sha2, m, m_sz);
++  sha2_512_final_len(&sha2, h, n);
++}
++
++/* Cat 3, 5: H(PK.seed, ADRS, M2 ) = */
++/* Trunc_n(SHA-512(PK.seed || toByte(0, 128 − n) || ADRSc || M2 )) */
++
++static void sha2_512_h(slh_var_t *var, uint8_t *h, const uint8_t *m1,
++                       const uint8_t *m2)
++{
++  sha2_512_t sha2;
++  size_t n = var->prm->n;
++
++  sha2_512_copy(&sha2, &var->sha2_512_pk_seed);
++  sha2_512_adrsc(&sha2, var);
++  sha2_512_update(&sha2, m1, n);
++  sha2_512_update(&sha2, m2, n);
++  sha2_512_final_len(&sha2, h, n);
++}
++
++/* create a context */
++
++static void sha2_mk_var(slh_var_t *var, const uint8_t *pk, const uint8_t *sk,
++                        const slh_param_t *prm)
++{
++  uint8_t buf[128 - 24];
++  size_t n = prm->n;
++  var->prm = prm;
++
++  var->prm = prm; /* store fixed parameters */
++  if (sk != NULL)
++  {
++    memcpy(var->sk_seed, sk, n);
++    memcpy(var->sk_prf, sk + n, n);
++    memcpy(var->pk_seed, sk + 2 * n, n);
++    memcpy(var->pk_root, sk + 3 * n, n);
++  }
++  else if (pk != NULL)
++  {
++    memcpy(var->pk_seed, pk, n);
++    memcpy(var->pk_root, pk + n, n);
++  }
++
++  /* eliminate the first compression function */
++  memset(buf, 0x00, sizeof(buf));
++  sha2_256_init(&var->sha2_256_pk_seed);
++  sha2_256_update(&var->sha2_256_pk_seed, var->pk_seed, n);
++  sha2_256_update(&var->sha2_256_pk_seed, buf, 64 - n);
++
++  if (n > 16)
++  {
++    sha2_512_init(&var->sha2_512_pk_seed);
++    sha2_512_update(&var->sha2_512_pk_seed, var->pk_seed, n);
++    sha2_512_update(&var->sha2_512_pk_seed, buf, 128 - n);
++  }
++
++  /* local ADRS buffer */
++  var->adrs = &var->t_adrs;
++}
++
++/* === Chaining function used in WOTS+ */
++/* Algorithm 5: chain(X, i, s, PK.seed, ADRS) */
++
++static void sha2_256_chain(slh_var_t *var, uint8_t *tmp, const uint8_t *x,
++                           uint32_t i, uint32_t s)
++{
++  uint32_t j;
++  size_t n = var->prm->n;
++  sha2_256_t sha2;
++  uint32_t sp[8 + 24];
++  uint8_t *mp = (uint8_t *)&sp[8];
++  uint8_t *op = (uint8_t *)&sha2.s[8];
++
++  /* these cases exist */
++  if (s == 0)
++  {
++    memcpy(tmp, x, n);
++    return;
++  }
++
++  /* set initial address */
++  adrs_set_hash_address(var, i);
++
++  /* initial set-up */
++  sha2_256_copy(&sha2, &var->sha2_256_pk_seed);
++  sha2_256_adrsc(&sha2, var);
++  sha2_256_update(&sha2, x, n);
++  if (s == 1)
++  {
++    /* just one hash */
++    sha2_256_final_len(&sha2, tmp, n);
++    return;
++  }
++  sha2_256_final_pad(&sha2);
++  memcpy(sp, sha2.s, sizeof(sp));
++  sha2_256_compress(sp);
++
++  /* iteration */
++  for (j = 1; j < s; j++)
++  {
++    memcpy(mp + 22, sp, n);        /* copy result back to input */
++    slh_tobyte(mp + 18, i + j, 4); /* hash address, last part of ADSc */
++    memcpy(sp, sha2.s, 32 + 18);   /* PK.seed compressed, start of ADRSc */
++    memcpy(mp + 22 + n, op + 22 + n, 64 - 22 - n); /* padding */
++    sha2_256_compress(sp);
++  }
++
++  /* final output */
++  memcpy(tmp, sp, n);
++}
++
++/* Combination WOTS PRF + Chain */
++
++static void sha2_256_wots_chain(slh_var_t *var, uint8_t *tmp, uint32_t s)
++{
++  /* PRF secret key */
++  adrs_set_type(var, ADRS_WOTS_PRF);
++  adrs_set_tree_index(var, 0);
++  sha2_256_prf(var, tmp);
++
++  /* chain */
++  adrs_set_type(var, ADRS_WOTS_HASH);
++  adrs_set_tree_index(var, 0);
++  sha2_256_chain(var, tmp, tmp, 0, s);
++}
++
++/* Combination FORS PRF + F (if s == 1) */
++
++static void sha2_256_fors_hash(slh_var_t *var, uint8_t *tmp, uint32_t s)
++{
++  /* PRF secret key */
++  adrs_set_type(var, ADRS_FORS_PRF);
++  adrs_set_tree_height(var, 0);
++  sha2_256_prf(var, tmp);
++
++  /* hash it again */
++  if (s == 1)
++  {
++    adrs_set_type(var, ADRS_FORS_TREE);
++    sha2_256_f(var, tmp, tmp);
++  }
++}
++
++/* 10.2.   SLH-DSA Using SHA2 for Security Category 1 */
++
++const slh_param_t slh_dsa_sha2_128s = {/* .alg_id = */ "SLH-DSA-SHA2-128s",
++                                       /* .n = */ 16,
++                                       /* .h = */ 63,
++                                       /* .d = */ 7,
++                                       /* .hp = */ 9,
++                                       /* .a = */ 12,
++                                       /* .k = */ 14,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 30,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_256_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_256_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_256_h,
++                                       /* .h_t = */ sha2_256_tl};
++
++const slh_param_t slh_dsa_sha2_128f = {/* .alg_id = */ "SLH-DSA-SHA2-128f",
++                                       /* .n = */ 16,
++                                       /* .h = */ 66,
++                                       /* .d = */ 22,
++                                       /* .hp = */ 3,
++                                       /* .a = */ 6,
++                                       /* .k = */ 33,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 34,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_256_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_256_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_256_h,
++                                       /* .h_t = */ sha2_256_tl};
++
++/* 10.3.   SLH-DSA Using SHA2 for Security Categories 3 and 5 */
++
++const slh_param_t slh_dsa_sha2_192s = {/* .alg_id = */ "SLH-DSA-SHA2-192s",
++                                       /* .n = */ 24,
++                                       /* .h = */ 63,
++                                       /* .d = */ 7,
++                                       /* .hp = */ 9,
++                                       /* .a = */ 14,
++                                       /* .k = */ 17,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 39,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_512_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_512_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_512_h,
++                                       /* .h_t = */ sha2_512_tl};
++
++const slh_param_t slh_dsa_sha2_192f = {/* .alg_id = */ "SLH-DSA-SHA2-192f",
++                                       /* .n = */ 24,
++                                       /* .h = */ 66,
++                                       /* .d = */ 22,
++                                       /* .hp = */ 3,
++                                       /* .a = */ 8,
++                                       /* .k = */ 33,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 42,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_512_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_512_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_512_h,
++                                       /* .h_t = */ sha2_512_tl};
++
++const slh_param_t slh_dsa_sha2_256s = {/* .alg_id = */ "SLH-DSA-SHA2-256s",
++                                       /* .n = */ 32,
++                                       /* .h = */ 64,
++                                       /* .d = */ 8,
++                                       /* .hp = */ 8,
++                                       /* .a = */ 14,
++                                       /* .k = */ 22,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 47,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_512_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_512_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_512_h,
++                                       /* .h_t = */ sha2_512_tl};
++
++const slh_param_t slh_dsa_sha2_256f = {/* .alg_id = */ "SLH-DSA-SHA2-256f",
++                                       /* .n = */ 32,
++                                       /* .h = */ 68,
++                                       /* .d = */ 17,
++                                       /* .hp = */ 4,
++                                       /* .a = */ 9,
++                                       /* .k = */ 35,
++                                       /* .lg_w = */ 4,
++                                       /* .m = */ 49,
++                                       /* .mk_var = */ sha2_mk_var,
++                                       /* .chain = */ sha2_256_chain,
++                                       /* .wots_chain = */ sha2_256_wots_chain,
++                                       /* .fors_hash = */ sha2_256_fors_hash,
++                                       /* .h_msg = */ sha2_512_h_msg,
++                                       /* .prf = */ sha2_256_prf,
++                                       /* .prf_msg = */ sha2_512_prf_msg,
++                                       /* .h_f = */ sha2_256_f,
++                                       /* .h_h = */ sha2_512_h,
++                                       /* .h_t = */ sha2_512_tl};
+diff --git a/src/crypto/slhdsa128s/slh_sys.h b/src/crypto/slhdsa128s/slh_sys.h
+new file mode 100644
+index 0000000..48eabf2
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_sys.h
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (c) The mlkem-native project authors
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++#ifndef SLH_SYS_H
++#define SLH_SYS_H
++
++/*
++ * C90 does not have the inline compiler directive yet.
++ * We don't use it in C90 builds.
++ * However, in that case the compiler warns about some inline functions in
++ * header files not being used in every compilation unit that includes that
++ * header. To work around it we silence that warning in that case using
++ * __attribute__((unused)).
++ */
++
++/* Do not use inline for C90 builds*/
++#if !defined(SLH_INLINE)
++#if !defined(inline)
++#if defined(_MSC_VER)
++#define SLH_INLINE __inline
++/* Don't combine __inline and __forceinline */
++#define SLH_ALWAYS_INLINE __forceinline
++#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
++#define SLH_INLINE inline
++#define SLH_ALWAYS_INLINE SLH_INLINE __attribute__((always_inline))
++#else
++#define SLH_INLINE __attribute__((unused))
++#define SLH_ALWAYS_INLINE SLH_INLINE
++#endif
++
++#else /* !inline */
++#define SLH_INLINE inline
++#define SLH_ALWAYS_INLINE SLH_INLINE __attribute__((always_inline))
++#endif /* inline */
++#endif /* !SLH_INLINE */
++
++#endif /* SLH_SYS_H */
+diff --git a/src/crypto/slhdsa128s/slh_var.h b/src/crypto/slhdsa128s/slh_var.h
+new file mode 100644
+index 0000000..3be27a4
+--- /dev/null
++++ b/src/crypto/slhdsa128s/slh_var.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright (c) The slhdsa-c project authors
++ * SPDX-License-Identifier: Apache-2.0 OR ISC OR MIT
++ */
++
++/* === Internal parameter definition structure. */
++
++#ifndef _SLH_VAR_H_
++#define _SLH_VAR_H_
++
++#include "sha2_api.h"
++#include "slh_param.h"
++
++/* some structural sizes */
++
++#ifdef SLH_EXPERIMENTAL
++
++/* a and hp adjusted to facilitate experimental parameter sets */
++#define SLH_MAX_N 32
++#define SLH_MAX_LEN (2 * SLH_MAX_N + 3)
++#define SLH_MAX_K 35
++#define SLH_MAX_HP 20
++#define SLH_MAX_A 24
++#define SLH_MAX_M 49
++
++#else /* !SLH_EXPERIMENTAL */
++
++/* maximum parameter sizes for FIPS 205 parameters */
++#define SLH_MAX_N 32
++#define SLH_MAX_LEN (2 * SLH_MAX_N + 3)
++#define SLH_MAX_K 35
++#define SLH_MAX_HP 9
++#define SLH_MAX_A 14
++#define SLH_MAX_M 49
++
++#endif
++
++/* context */
++struct slh_var_s
++{
++  const slh_param_t *prm;
++  uint8_t sk_seed[SLH_MAX_N];
++  uint8_t sk_prf[SLH_MAX_N];
++  uint8_t pk_seed[SLH_MAX_N];
++  uint8_t pk_root[SLH_MAX_N];
++
++  adrs_t *adrs;  /* regular pointer */
++  adrs_t t_adrs; /* local ADRS buffer */
++
++  /* precomputed values */
++  sha2_256_t sha2_256_pk_seed;
++  sha2_512_t sha2_512_pk_seed;
++};
++
++/* === Lower-level functions */
++
++/* Core signing function (of a randomized digest) with initialized context. */
++size_t slh_do_sign(slh_var_t *var, uint8_t *sig, const uint8_t *digest);
++
++/* _SLH_VAR_H_ */
++#endif
+-- 
+2.43.0
+

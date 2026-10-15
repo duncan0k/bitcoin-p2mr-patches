@@ -1,0 +1,555 @@
+From 06e0ee6e7e060475d1cdbee9b26384b717fb4d9c Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 73/77] test: add feature_p2mr_slhdsa128s.py
+
+On regtest, with the rules from height 200, a node with the default
+policy and one with -acceptnonstdtxn=1, and a missing P2MR tripwire
+output that disables elliptic curve checks in leaf version 0xe0 from
+height 150:
+
+- the startup log, getdeploymentinfo, and -signetslhdsa128s refused on
+  regtest;
+- the mempool refuses a valid SLH1 spend while the next block is below
+  the height, on both nodes, and takes it from the block before; a block
+  below the height takes invalid signatures in leaf versions 0xc0 and
+  0xe0; the first block at the height, built on the block below it, is
+  rejected for an invalid signature in either leaf version with the tip
+  unchanged, and then a valid block at the height confirms valid spends
+  in both; a later block rejects an invalid signature too;
+- a reorganization below the height removes the SLH-DSA spends of both
+  mempools, the template one and a non-template one, with their
+  children;
+- after activation, SLH1 with hash type 0x83 and in leaf version 0xe0,
+  whose elliptic curve checks are disabled, relays and confirms; each of
+  the four new script errors is refused in the mempool and in a block;
+- checks whose budget is used up exactly pass in a block, one unit short
+  fail; their number and the padding follow from the validation weight;
+- policy: non-template leaves, a leaf at depth zero, an extra stack
+  element;
+- a leaf with an ML-DSA-44 and an SLH-DSA check, and a transaction with
+  P2MR SLH-DSA, ML-DSA-44 and Schnorr inputs and a P2TR input.
+
+It makes ten SLH-DSA signatures in Python and derives the invalid
+witnesses from them.
+---
+ test/functional/feature_p2mr_slhdsa128s.py | 494 +++++++++++++++++++++
+ test/functional/test_runner.py             |   1 +
+ 2 files changed, 495 insertions(+)
+ create mode 100644 test/functional/feature_p2mr_slhdsa128s.py
+
+diff --git a/test/functional/feature_p2mr_slhdsa128s.py b/test/functional/feature_p2mr_slhdsa128s.py
+new file mode 100644
+index 0000000..d10ab63
+--- /dev/null
++++ b/test/functional/feature_p2mr_slhdsa128s.py
+@@ -0,0 +1,494 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 CipherScope
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) around its activation.
++
++On regtest with -testactivationheight=p2mr_slhdsa128s@N (P2MR, OP_CHECKMLDSA44 and leaf version
++0xe0 are active earlier), node 0 with the default policy and node 1 with -acceptnonstdtxn=1. Both
++nodes also have a P2MR tripwire output that does not exist (-signettripwire), so that elliptic
++curve checks in leaf version 0xe0 fail before N:
++
++  * while the next block is below N the mempool treats byte 0xf1 as the OP_SUCCESSx it still is
++    there, and refuses even a validly signed spend; once the next block is N it checks the
++    signature and takes the spend;
++  * a block below N takes a spend with an invalid SLH-DSA-SHA2-128s signature, a block from N on
++    rejects it;
++  * a reorganization that puts the next block back below N removes the SLH-DSA spends both mempools
++    took, the template one and the non-template one node 1 took, together with their children;
++  * after activation, SLH1 relays and confirms in leaf versions 0xc0 and 0xe0 (whose elliptic curve
++    checks are disabled, which does not concern SLH-DSA), and each of the four new script errors
++    is refused by the mempool and in a block;
++  * the validation weight of each check: a leaf whose budget is used up exactly by its checks
++    passes, one unit less fails;
++  * only SLH1, in a leaf at depth one or more, may carry signature chunks over the 80-byte stack
++    item limit of policy; other leaves with the opcode are not standard;
++  * one leaf with an ML-DSA-44 and an SLH-DSA check, and one transaction spending P2MR SLH-DSA,
++    P2MR ML-DSA-44, P2MR Schnorr and P2TR inputs;
++  * the startup log and getdeploymentinfo.
++
++Each SLH-DSA signature takes a few seconds to make in Python, so the test makes few of them and
++derives the invalid witnesses from valid ones.
++"""
++
++import hashlib
++
++from test_framework.blocktools import (
++    add_witness_commitment,
++    create_block,
++    create_coinbase,
++)
++from test_framework.key import compute_xonly_pubkey, sign_schnorr, tweak_add_privkey
++from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, ser_compact_size, tx_from_hex
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_mldsa44 import (
++    OP_CHECKMLDSA44,
++    mldsa44_keygen,
++    mldsa44_leaf,
++    mldsa44_sig_chunks,
++    mldsa44_sign_input,
++    mldsa44_tree,
++)
++from test_framework.p2mr_slhdsa128s import (
++    NO_CODESEPARATOR,
++    OP_CHECKSLHDSA128S,
++    SLHDSA128S_SIGNATURE_SIZE,
++    VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
++    slhdsa128s_keygen,
++    slhdsa128s_leaf,
++    slhdsa128s_sig_chunks,
++    slhdsa128s_sign_input,
++    slhdsa128s_tree,
++)
++from test_framework.p2mr_tripwire import LEAF_VERSION_TRIPWIRED
++from test_framework.script import (
++    CScript,
++    LEAF_VERSION_TAPSCRIPT,
++    OP_1,
++    OP_15,
++    OP_CHECKSIG,
++    OP_DROP,
++    OP_NOT,
++    OP_PICK,
++    OP_RETURN,
++    OP_VERIFY,
++    SIGHASH_ANYONECANPAY,
++    SIGHASH_DEFAULT,
++    SIGHASH_SINGLE,
++    TaprootSignatureHash,
++    taproot_construct,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++ACTIVATION_HEIGHT = 200
++TRIPWIRE_HEIGHT = 150
++# A tripwire output that never exists, so that elliptic curve checks in leaf version 0xe0 fail from
++# TRIPWIRE_HEIGHT on (doc/p2mr-tripwire.md).
++MISSING_TRIPWIRE = "ab" * 32 + ":0"
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++
++SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha512(b"feature_p2mr_slhdsa128s key").digest()[:48])
++PQ_PUB, PQ_SEC = mldsa44_keygen(hashlib.sha256(b"feature_p2mr_slhdsa128s ml-dsa key").digest())
++SEC_A = bytes(range(1, 33))
++PUB_A = compute_xonly_pubkey(SEC_A)[0]
++
++LEAF_SLH1 = slhdsa128s_leaf(SLH_PUB)
++TREE_SLH1 = slhdsa128s_tree(LEAF_SLH1)
++TREE_SLH1_E0 = slhdsa128s_tree(LEAF_SLH1, leaf_ver=LEAF_VERSION_TRIPWIRED)
++# Uses the opcode but is not the template.
++LEAF_OTHER = CScript([OP_1, OP_DROP, SLH_PUB, OP_CHECKSLHDSA128S])
++TREE_OTHER = slhdsa128s_tree(LEAF_OTHER)
++# Needs no signature at all: sixteen empty chunks push false, and OP_NOT turns it into true.
++LEAF_NOT = CScript([SLH_PUB, OP_CHECKSLHDSA128S, OP_NOT])
++TREE_NOT = slhdsa128s_tree(LEAF_NOT)
++# Public keys one byte short and one byte long.
++TREE_KEY31 = slhdsa128s_tree(CScript([SLH_PUB[:31], OP_CHECKSLHDSA128S]))
++TREE_KEY33 = slhdsa128s_tree(CScript([SLH_PUB + b"\x00", OP_CHECKSLHDSA128S]))
++# A single leaf tree has m = 0: the leaf is not executed at all.
++TREE_LONE = p2mr_construct([("slh", LEAF_SLH1)])
++# An ML-DSA-44 check and an SLH-DSA check in one leaf (not a template).
++LEAF_AND = CScript(list(mldsa44_leaf(PQ_PUB))[:-1] + [OP_CHECKMLDSA44, OP_VERIFY, SLH_PUB, OP_CHECKSLHDSA128S])
++TREE_AND = slhdsa128s_tree(LEAF_AND)
++LEAF_S1 = mldsa44_leaf(PQ_PUB)
++TREE_S1 = mldsa44_tree(LEAF_S1)
++LEAF_CSIG = CScript([PUB_A, OP_CHECKSIG])
++TREE_CSIG = p2mr_construct([("csig", LEAF_CSIG), ("ret", CScript([OP_RETURN]))])
++TAP = taproot_construct(PUB_A, [])
++
++MEMPOOL_OP_SUCCESS = "mempool-script-verify-flag-failed (OP_SUCCESSx reserved for soft-fork upgrades)"
++NONSTANDARD_WITNESS = "bad-witness-nonstandard"
++ERR_SIG = "Invalid SLH-DSA-SHA2-128s signature"
++ERR_SIG_SIZE = "Invalid SLH-DSA-SHA2-128s signature chunk size"
++ERR_HASHTYPE = "Invalid SLH-DSA-SHA2-128s signature hash type"
++ERR_PUBKEY_SIZE = "Invalid SLH-DSA-SHA2-128s public key size"
++ERR_WEIGHT = "Too much signature validation relative to witness weight"
++
++
++def slh_witness(tree, leaf_name="slh", *, hash_type=SIGHASH_DEFAULT):
++    """A witness function for an input spending an SLH-DSA leaf: sixteen chunks, leaf, control block."""
++    leaf = tree.leaves[leaf_name]
++
++    def make(tx, spent, index):
++        sig = slhdsa128s_sign_input(SLH_SEC, tx, spent, index, leaf.script, hash_type=hash_type, leaf_ver=leaf.leaf_ver)
++        return slhdsa128s_sig_chunks(sig) + [bytes(leaf.script), leaf.control_block]
++    return make
++
++
++def unsigned_witness(tree, chunks, leaf_name="slh"):
++    """A witness function that gives the leaf `chunks` as its initial stack, whatever the transaction."""
++    leaf = tree.leaves[leaf_name]
++    return lambda tx, spent, index: list(chunks) + [bytes(leaf.script), leaf.control_block]
++
++
++JUNK_CHUNKS = slhdsa128s_sig_chunks(bytes([0x5a]) * SLHDSA128S_SIGNATURE_SIZE)
++
++
++def csig_witness(tx, spent, index):
++    leaf = TREE_CSIG.leaves["csig"]
++    msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index, scriptpath=True, leaf_script=leaf.script,
++                               leaf_ver=LEAF_VERSION_TAPSCRIPT, codeseparator_pos=NO_CODESEPARATOR)
++    return [sign_schnorr(SEC_A, msg), bytes(leaf.script), leaf.control_block]
++
++
++def keypath_witness(tx, spent, index):
++    msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, index)
++    return [sign_schnorr(tweak_add_privkey(SEC_A, TAP.tweak), msg)]
++
++
++def mldsa44_witness(tx, spent, index):
++    leaf = TREE_S1.leaves["pq"]
++    return mldsa44_sig_chunks(mldsa44_sign_input(PQ_SEC, tx, spent, index, leaf.script)) + [bytes(leaf.script), leaf.control_block]
++
++
++def and_witness(tx, spent, index):
++    leaf = TREE_AND.leaves["slh"]
++    slh = slhdsa128s_sign_input(SLH_SEC, tx, spent, index, leaf.script)
++    pq = mldsa44_sign_input(PQ_SEC, tx, spent, index, leaf.script)
++    return slhdsa128s_sig_chunks(slh) + mldsa44_sig_chunks(pq) + [bytes(leaf.script), leaf.control_block]
++
++
++def weight_leaf(checks, padding):
++    """A leaf that checks the same SLH-DSA signature `checks` times, all but the last on copies of its
++    sixteen chunks, after `padding` bytes of pushes it drops."""
++    ops = []
++    while padding > 0:
++        size = min(padding, 400)
++        ops += [bytes(size), OP_DROP]
++        padding -= size
++    for _ in range(checks - 1):
++        ops += [OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]
++    return CScript(ops + [SLH_PUB, OP_CHECKSLHDSA128S])
++
++
++def witness_size(stack):
++    return len(ser_compact_size(len(stack))) + sum(len(ser_compact_size(len(e))) + len(e) for e in stack)
++
++
++def weight_trees():
++    """For the fewest checks whose weight the unpadded leaf's witness does not already cover, the
++    trees whose single-input witnesses leave a budget of exactly what the checks use (offset 0) and
++    one unit less (offset -1). Everything follows from VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK."""
++    def size(checks, padding):
++        leaf = slhdsa128s_tree(weight_leaf(checks, padding)).leaves["slh"]
++        return witness_size(JUNK_CHUNKS + [bytes(leaf.script), leaf.control_block])
++    for checks in range(2, 65):
++        target = checks * VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK - 50
++        unpadded = size(checks, 0)
++        if unpadded > target - 1:
++            continue
++        found = {}
++        for padding in range(target - unpadded + 1):
++            offset = size(checks, padding) - target
++            if offset in (0, -1):
++                found.setdefault(offset, padding)
++            if len(found) == 2:
++                return checks, {o: slhdsa128s_tree(weight_leaf(checks, p)) for o, p in found.items()}
++    raise AssertionError("no count of checks and padding uses up the budget exactly")
++
++
++def with_stack(tx, index, stack):
++    """A copy of tx whose input `index` has another witness stack; the txid does not change."""
++    copy = tx_from_hex(tx.serialize().hex())
++    copy.wit.vtxinwit[index].scriptWitness.stack = list(stack)
++    return copy
++
++
++class P2MRSLHDSA128STest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        args = [f"-testactivationheight=p2mr_slhdsa128s@{ACTIVATION_HEIGHT}", f"-signettripwire={TRIPWIRE_HEIGHT}@{MISSING_TRIPWIRE}"]
++        self.extra_args = [args, args + ["-acceptnonstdtxn=1"]]
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def fund(self, script_pubkeys):
++        """Create one confirmed output for each scriptPubKey."""
++        sent = [self.wallet.send_to(from_node=self.nodes[0], scriptPubKey=spk, amount=FUND_SATS)
++                for spk in script_pubkeys]
++        self.generate(self.wallet, 1)
++        return [{"txid": int(s["txid"], 16), "vout": s["sent_vout"], "value": FUND_SATS, "script_pubkey": spk}
++                for s, spk in zip(sent, script_pubkeys)]
++
++    def spend(self, inputs, *, outputs=None):
++        """Build a transaction from (utxo, witness function) pairs; one output to the wallet by default."""
++        tx = CTransaction()
++        tx.version = 2
++        tx.nLockTime = 0
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]), b"", 0xfffffffd) for u, _ in inputs]
++        total = sum(u["value"] for u, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(u["value"], u["script_pubkey"]) for u, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for index, (_, make) in enumerate(inputs):
++            tx.wit.vtxinwit[index].scriptWitness.stack = make(tx, spent, index)
++        return tx
++
++    def child_of(self, parent):
++        """Spend output 0 of a transaction that pays the wallet."""
++        child = CTransaction()
++        child.version = 2
++        child.vin = [CTxIn(COutPoint(parent.txid_int, 0), b"", 0xfffffffd)]
++        child.vout = [CTxOut(parent.vout[0].nValue - FEE_SATS, self.wallet.get_output_script())]
++        self.wallet.sign_tx(child)
++        return child
++
++    def build_block(self, txs):
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        block = create_block(int(tip, 16), create_coinbase(node.getblockcount() + 1),
++                             node.getblock(tip)["mediantime"] + 1, txlist=txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def assert_block_accepts(self, tx, note):
++        block = self.build_block(tx if isinstance(tx, list) else [tx])
++        result = self.nodes[0].submitblock(block.serialize().hex())
++        assert result is None, f"{note}: block rejected with {result}"
++        self.sync_blocks()
++        self.log.info(f"  block accepts: {note}")
++        return block
++
++    def assert_block_rejects(self, tx, error, note):
++        tip = self.nodes[0].getbestblockhash()
++        result = self.nodes[0].submitblock(self.build_block([tx]).serialize().hex())
++        assert_equal(result, f"block-script-verify-flag-failed ({error})")
++        assert_equal(self.nodes[0].getbestblockhash(), tip)
++        self.log.info(f"  block rejects: {note}")
++
++    def assert_mempool_rejects(self, tx, reason, note, node=0):
++        assert_raises_rpc_error(-26, reason, self.nodes[node].sendrawtransaction, tx.serialize().hex(), 0)
++        self.log.info(f"  mempool rejects: {note}")
++
++    def assert_mempool_accepts(self, tx, note, node=0):
++        self.nodes[node].sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in self.nodes[node].getrawmempool(), note
++        self.log.info(f"  mempool accepts: {note}")
++
++    def assert_active_next(self, expected):
++        for node in self.nodes:
++            assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_slhdsa128s"]["active"], expected)
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        self.wallet = MiniWallet(self.nodes[0])
++        self.test_startup()
++        self.generate(self.wallet, 120)
++
++        self.log.info("Fund the outputs every part spends")
++        slh = self.fund([TREE_SLH1.scriptPubKey] * 8)
++        (slh_e0, early_e0, act_e0, other, not_leaf, not_single, key31, key33, lone_signed, lone_unsigned, and_leaf, s1, csig, tap) = self.fund(
++            [TREE_SLH1_E0.scriptPubKey, TREE_SLH1_E0.scriptPubKey, TREE_SLH1_E0.scriptPubKey, TREE_OTHER.scriptPubKey, TREE_NOT.scriptPubKey, TREE_NOT.scriptPubKey, TREE_KEY31.scriptPubKey,
++             TREE_KEY33.scriptPubKey, TREE_LONE.scriptPubKey, TREE_LONE.scriptPubKey, TREE_AND.scriptPubKey,
++             TREE_S1.scriptPubKey, TREE_CSIG.scriptPubKey, TAP.scriptPubKey])
++        self.weight_checks, self.weight_trees = weight_trees()
++        weight = {offset: self.fund([tree.scriptPubKey])[0] for offset, tree in self.weight_trees.items()}
++
++        self.test_activation(slh, early_e0, act_e0, other)
++        self.test_after_activation(slh, slh_e0, key31, key33, not_single)
++        self.test_validation_weight(weight)
++        self.test_policy(slh, not_leaf, lone_signed, lone_unsigned)
++        self.test_mixed(slh[7], and_leaf, s1, csig, tap)
++
++    def test_startup(self):
++        self.log.info("Startup log and getdeploymentinfo")
++        with self.nodes[0].assert_debug_log([f"P2MR SLH-DSA-SHA2-128s rules active from height {ACTIVATION_HEIGHT} (leaf versions 0xc0, 0xe0)"]):
++            self.restart_node(0)
++        info = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr_slhdsa128s"]
++        assert_equal(info, {"type": "buried", "active": False, "height": ACTIVATION_HEIGHT})
++        self.log.info("-signetslhdsa128s is refused on regtest")
++        self.stop_node(1)
++        self.nodes[1].assert_start_raises_init_error(["-signetslhdsa128s=10"], "Error: -signetslhdsa128s can only be used with signet.")
++        self.start_node(1, self.extra_args[1])
++        self.connect_nodes(0, 1)
++
++    def test_activation(self, slh, early_e0, act_e0, other):
++        # getdeploymentinfo, the mempool and GetBlockScriptFlags all look at the next block.
++        self.generate(self.wallet, ACTIVATION_HEIGHT - 2 - self.nodes[0].getblockcount())
++        self.assert_active_next(False)
++        spend_slh = self.spend([(slh[0], slh_witness(TREE_SLH1))])
++        self.log.info("Before activation the mempool refuses even a valid SLH-DSA spend, -acceptnonstdtxn or not")
++        self.assert_mempool_rejects(spend_slh, MEMPOOL_OP_SUCCESS, "valid SLH1 spend, next block N-1")
++        self.assert_mempool_rejects(spend_slh, MEMPOOL_OP_SUCCESS, "valid SLH1 spend, next block N-1, -acceptnonstdtxn=1", node=1)
++
++        self.log.info("A block below the activation height takes invalid signatures, in leaf versions 0xc0 and 0xe0")
++        invalid_early = self.spend([(slh[1], unsigned_witness(TREE_SLH1, JUNK_CHUNKS))])
++        invalid_early_e0 = self.spend([(early_e0, unsigned_witness(TREE_SLH1_E0, JUNK_CHUNKS))])
++        early_block = self.assert_block_accepts([invalid_early, invalid_early_e0], "invalid SLH1 signatures at height N-1")
++        self.assert_active_next(True)
++
++        self.log.info("From the block before activation on, the mempool checks the signature")
++        self.assert_mempool_accepts(spend_slh, "valid SLH1 spend, next block N")
++        child = self.child_of(spend_slh)
++        self.assert_mempool_accepts(child, "child of the SLH1 spend")
++        spend_other = self.spend([(other, slh_witness(TREE_OTHER))])
++        self.assert_mempool_rejects(spend_other, NONSTANDARD_WITNESS, "a leaf that is not the template")
++        self.assert_mempool_accepts(spend_other, "a leaf that is not the template, -acceptnonstdtxn=1", node=1)
++        other_child = self.child_of(spend_other)
++        self.assert_mempool_accepts(other_child, "child of the non-template spend", node=1)
++
++        self.log.info("A reorganization that puts the next block below N empties both mempools of these spends")
++        for node in self.nodes:
++            node.invalidateblock(early_block.hash_hex)
++        self.assert_active_next(False)
++        for node, txs in ((self.nodes[0], (spend_slh, child)), (self.nodes[1], (spend_other, other_child))):
++            mempool = node.getrawmempool()
++            for tx in txs:
++                assert tx.txid_hex not in mempool, f"{tx.txid_hex} survived the reorganization"
++        assert invalid_early.txid_hex not in self.nodes[0].getrawmempool()
++        for node in self.nodes:
++            node.reconsiderblock(early_block.hash_hex)
++        assert_equal(self.nodes[0].getbestblockhash(), early_block.hash_hex)
++        self.assert_active_next(True)
++
++        self.log.info("The first active block, at height N, rejects invalid signatures in leaf versions 0xc0 and 0xe0")
++        assert_equal(self.nodes[0].getblockcount(), ACTIVATION_HEIGHT - 1)
++        invalid_at_n = self.spend([(slh[2], unsigned_witness(TREE_SLH1, JUNK_CHUNKS))])
++        self.assert_block_rejects(invalid_at_n, ERR_SIG, "invalid SLH1 signature, leaf version 0xc0, at height N")
++        invalid_at_n_e0 = self.spend([(act_e0, unsigned_witness(TREE_SLH1_E0, JUNK_CHUNKS))])
++        self.assert_block_rejects(invalid_at_n_e0, ERR_SIG, "invalid SLH1 signature, leaf version 0xe0, at height N")
++        assert_equal(self.nodes[0].getblockcount(), ACTIVATION_HEIGHT - 1)
++
++        self.log.info("A valid block at height N confirms valid spends in leaf versions 0xc0 and 0xe0")
++        self.assert_mempool_accepts(spend_slh, "valid SLH1 spend again")
++        valid_at_n_e0 = self.spend([(act_e0, slh_witness(TREE_SLH1_E0))])
++        block_n = self.assert_block_accepts([spend_slh, valid_at_n_e0], "valid SLH1 spends, leaf versions 0xc0 and 0xe0, at height N")
++        assert_equal(self.nodes[0].getblock(block_n.hash_hex)["height"], ACTIVATION_HEIGHT)
++        assert_equal(self.nodes[0].getbestblockhash(), block_n.hash_hex)
++        assert spend_slh.txid_hex not in self.nodes[0].getrawmempool()
++        late = self.spend([(slh[2], unsigned_witness(TREE_SLH1, JUNK_CHUNKS))])
++        self.assert_mempool_rejects(late, f"mempool-script-verify-flag-failed ({ERR_SIG})", "invalid SLH1 signature at height N+1")
++        self.assert_block_rejects(late, ERR_SIG, "invalid SLH1 signature at height N+1")
++
++    def test_after_activation(self, slh, slh_e0, key31, key33, not_single):
++        self.log.info("After activation: SLH1 with an explicit hash type, and in leaf version 0xe0, relay and confirm")
++        # Elliptic curve checks in leaf version 0xe0 are disabled: the tripwire output is missing.
++        assert self.nodes[0].gettripwireinfo()["ec_disabled_next_block"]
++        valid_83 = self.spend([(slh[3], slh_witness(TREE_SLH1, hash_type=SIGHASH_SINGLE | SIGHASH_ANYONECANPAY))])
++        assert_equal(len(valid_83.wit.vtxinwit[0].scriptWitness.stack[15]), 57)
++        valid_e0 = self.spend([(slh_e0, slh_witness(TREE_SLH1_E0))])
++        for tx, note in ((valid_83, "SLH1, hash type 0x83"), (valid_e0, "SLH1 in leaf version 0xe0, elliptic curve checks disabled")):
++            self.assert_mempool_accepts(tx, note)
++        blockhash = self.generate(self.wallet, 1)[0]
++        for tx in (valid_83, valid_e0):
++            assert tx.txid_hex in self.nodes[0].getblock(blockhash)["tx"]
++
++        self.log.info("After activation: every new script error, in the mempool and in a block")
++        good = self.spend([(slh[4], slh_witness(TREE_SLH1))])
++        stack = good.wit.vtxinwit[0].scriptWitness.stack
++        chunks, rest = stack[:16], stack[16:]
++        flipped = list(chunks)
++        flipped[7] = bytes([flipped[7][0] ^ 1]) + flipped[7][1:]
++        cases = [
++            (with_stack(good, 0, flipped + rest), ERR_SIG, "one bit of the signature flipped"),
++            (with_stack(good, 0, chunks[:15] + [chunks[15] + b"\x00"] + rest), ERR_HASHTYPE, "an explicit 0x00 hash type"),
++            (with_stack(good, 0, chunks[:15] + [chunks[15] + b"\x04"] + rest), ERR_HASHTYPE, "hash type 0x04"),
++        ]
++        for tx, error, note in cases:
++            self.assert_mempool_rejects(tx, f"mempool-script-verify-flag-failed ({error})", note)
++            self.assert_block_rejects(tx, error, note)
++
++        # SIGHASH_SINGLE without an output of the same index has no signature message; the hash type is
++        # refused before the signature is looked at. Input 0 needs no signature (sixteen empty chunks
++        # and OP_NOT), so only input 1 fails; it is not standard, so node 1 shows the script error.
++        no_output = self.spend([(not_single, unsigned_witness(TREE_NOT, [b""] * 16)),
++                                (slh[6], unsigned_witness(TREE_SLH1, JUNK_CHUNKS[:15] + [JUNK_CHUNKS[15] + bytes([SIGHASH_SINGLE])]))],
++                               outputs=[CTxOut(2 * FUND_SATS - FEE_SATS, self.wallet.get_output_script())])
++        note = "SIGHASH_SINGLE on the second input of a one output transaction"
++        self.assert_mempool_rejects(no_output, f"mempool-script-verify-flag-failed ({ERR_HASHTYPE})", note, node=1)
++        self.assert_block_rejects(no_output, ERR_HASHTYPE, note)
++
++        # Chunk sizes: the ones below are within the 80-byte limit or exempt at their place, so the
++        # mempool runs the script and reports the error; a 519-byte chunk is neither, and only a
++        # block runs it.
++        short_chunk = with_stack(good, 0, chunks[:15] + [chunks[15][:55]] + rest)
++        partly_empty = with_stack(good, 0, [b""] + chunks[1:] + rest)
++        for tx, note in ((short_chunk, "a 55-byte last signature chunk"), (partly_empty, "the first chunk empty, the others not")):
++            self.assert_mempool_rejects(tx, f"mempool-script-verify-flag-failed ({ERR_SIG_SIZE})", note)
++            self.assert_block_rejects(tx, ERR_SIG_SIZE, note)
++        short_519 = with_stack(good, 0, [chunks[0][:519]] + chunks[1:] + rest)
++        self.assert_mempool_rejects(short_519, NONSTANDARD_WITNESS, "a 519-byte first signature chunk")
++        self.assert_block_rejects(short_519, ERR_SIG_SIZE, "a 519-byte first signature chunk")
++        for utxo, tree, note in ((key31, TREE_KEY31, "a 31-byte public key"), (key33, TREE_KEY33, "a 33-byte public key")):
++            tx = self.spend([(utxo, unsigned_witness(tree, JUNK_CHUNKS))])
++            self.assert_mempool_rejects(tx, NONSTANDARD_WITNESS, note)
++            self.assert_block_rejects(tx, ERR_PUBKEY_SIZE, note)
++        # The valid spend these were made from is still good.
++        self.assert_mempool_accepts(good, "the unmodified spend")
++        self.generate(self.wallet, 1)
++
++    def test_validation_weight(self, weight):
++        n = self.weight_checks
++        self.log.info(f"Each check with a signature uses its validation weight: {n} checks and a budget of exactly that pass")
++        exact = self.spend([(weight[0], slh_witness(self.weight_trees[0]))])
++        assert_equal(witness_size(exact.wit.vtxinwit[0].scriptWitness.stack) + 50, n * VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK)
++        # Not a template: the mempool refuses it, a block takes it.
++        self.assert_mempool_rejects(exact, NONSTANDARD_WITNESS, f"{n} checks of one signature")
++        self.assert_block_accepts(exact, f"{n} checks, budget left exactly 0")
++        short = self.spend([(weight[-1], slh_witness(self.weight_trees[-1]))])
++        assert_equal(witness_size(short.wit.vtxinwit[0].scriptWitness.stack) + 50, n * VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK - 1)
++        self.assert_block_rejects(short, ERR_WEIGHT, f"{n} checks, budget one unit short")
++
++    def test_policy(self, slh, not_leaf, lone_signed, lone_unsigned):
++        self.log.info("Policy: only SLH1 may use the opcode in an executed leaf")
++        # Valid by consensus without any signature, and not standard even though no element is large.
++        no_signature = self.spend([(not_leaf, unsigned_witness(TREE_NOT, [b""] * 16))])
++        self.assert_mempool_rejects(no_signature, NONSTANDARD_WITNESS, "a non-template leaf spent with sixteen empty chunks")
++        self.assert_block_accepts(no_signature, "a non-template leaf spent with sixteen empty chunks")
++
++        self.log.info("Policy: the 80-byte limit is lifted only for SLH1's signature chunks at m >= 1")
++        lone = TREE_LONE.leaves["slh"]
++        signed = self.spend([(lone_signed, unsigned_witness(TREE_LONE, JUNK_CHUNKS))])
++        self.assert_mempool_rejects(signed, NONSTANDARD_WITNESS, "signature chunks under an m=0 leaf")
++        # ...and it is spent without any signature, which is why wallets never make such a tree.
++        unsigned = self.spend([(lone_unsigned, lambda tx, spent, index: [bytes(lone.script), lone.control_block])])
++        self.assert_mempool_accepts(unsigned, "an m=0 SLH-DSA leaf spent without a signature")
++        # An extra element under the sixteen chunks is not a template stack.
++        extra = self.spend([(slh[5], unsigned_witness(TREE_SLH1, [b"\x01"] + JUNK_CHUNKS))])
++        self.assert_mempool_rejects(extra, NONSTANDARD_WITNESS, "SLH1 with an element below the signature chunks")
++        self.generate(self.wallet, 1)
++
++    def test_mixed(self, slh, and_leaf, s1, csig, tap):
++        self.log.info("One leaf with an ML-DSA-44 check and an SLH-DSA check: both pass")
++        both = self.spend([(and_leaf, and_witness)])
++        self.assert_mempool_rejects(both, NONSTANDARD_WITNESS, "a leaf with both checks")
++        self.assert_block_accepts(both, "a leaf with both checks")
++
++        self.log.info("One transaction spending P2MR SLH-DSA, P2MR ML-DSA-44, P2MR Schnorr and P2TR inputs")
++        tx = self.spend([(slh, slh_witness(TREE_SLH1)), (s1, mldsa44_witness), (csig, csig_witness), (tap, keypath_witness)])
++        self.assert_mempool_accepts(tx, "four kinds of input")
++        blockhash = self.generate(self.wallet, 1)[0]
++        assert tx.txid_hex in self.nodes[0].getblock(blockhash)["tx"]
++
++
++if __name__ == '__main__':
++    P2MRSLHDSA128STest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index be81612..b6046ff 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -289,6 +289,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr.py',
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
++    'feature_p2mr_slhdsa128s.py',
+     'feature_p2mr_tripwire.py',
+     'feature_signet_pqblock.py',
+     'wallet_p2mr.py',
+-- 
+2.43.0
+

@@ -1,0 +1,575 @@
+From 170dc6cd183210b96fdb668bbfee34d2b910a5cd Mon Sep 17 00:00:00 2001
+From: CipherScope <dev@cipherscope.io>
+Date: Thu, 15 Oct 2026 12:14:46 +0000
+Subject: [PATCH 68/77] script: add OP_CHECKSLHDSA128S for SLH-DSA-SHA2-128s
+ checks in P2MR leaves
+
+Byte 0xf1, OP_SUCCESS241 in BIP 342, executes as OP_CHECKSLHDSA128S in a
+P2MR leaf that is executed as tapscript (leaf version 0xc0, or 0xe0 with
+SCRIPT_VERIFY_P2MR_TRIPWIRE, at depth one or more) when the new
+SCRIPT_VERIFY_P2MR_SLHDSA128S flag is set. Then the pre-scan no longer
+treats it as an OP_SUCCESSx; other OP_SUCCESSx bytes in the leaf still
+are. Everywhere else the byte keeps its meaning: a bad opcode in legacy
+and witness v0 scripts, and OP_SUCCESS241 in P2TR leaves and without the
+flag. No deployment sets the flag yet.
+
+The opcode takes the 32-byte public key (PK.seed || PK.root), pushed by
+the leaf, and the 7856-byte signature in sixteen chunks: fifteen of 520
+bytes, then 56, or 57 with an explicit hash type, so
+MAX_SCRIPT_ELEMENT_SIZE does not change and every signature has one
+encoding. The checks follow those of OP_CHECKMLDSA44, which follow
+EvalChecksigTapscript, in the same ten steps: at least seventeen stack
+elements; a signature with any non-empty chunk uses
+VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK units of validation weight; the
+public key size; sixteen empty chunks push false; the chunk sizes; the
+hash type, with the rules of BIP 341. The message is the BIP 341
+signature message of a tapscript spend with key_version 2, so it never
+equals that of a BIP 342 or an OP_CHECKMLDSA44 signature, and the check
+is slh_verify of FIPS 205 (pure SLH-DSA, external interface) with the
+context string "P2MR/SLHDSA128S/EXP0". An invalid signature fails the
+script; a valid one pushes 1. Disabled elliptic curve checks in leaf
+version 0xe0 do not touch it.
+
+VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK is 2000, a provisional value
+within the range the design estimates. It is to be fixed by measurement
+(the worst-case verification without SHA extensions against a Schnorr
+check, and a whole block of each) before any build carrying it leaves
+the network's own nodes, and it must stay below 8022, the budget of a
+single-signature spend.
+
+- The checkers gain CheckSLHDSA128SSignature: the hash type and the
+  message in GenericTransactionSignatureChecker, the verification in the
+  virtual VerifySLHDSA128SSignature, which the caching checker overrides
+  with cache entries under a fourth salted hasher, padded with 'H'.
+  DeferringSignatureChecker passes the new check through.
+- Four new script errors, SLHDSA128S_PUBKEY_SIZE, SLHDSA128S_SIG_SIZE,
+  SLHDSA128S_SIG_HASHTYPE and SLHDSA128S_SIG, also in the error names of
+  script_tests; OP_CHECKSLHDSA128S as an opcode name; the flag name
+  P2MR_SLHDSA128S.
+- The script_flags fuzz target leaves the new flag alone, as it does the
+  other flags that turn an OP_SUCCESSx into an opcode.
+
+See doc/p2mr-slhdsa128s.md, added later in this series.
+---
+ src/core_io.cpp                |   3 +
+ src/script/interpreter.cpp     | 116 ++++++++++++++++++++++++++++++++-
+ src/script/interpreter.h       |  41 +++++++++++-
+ src/script/script.cpp          |   1 +
+ src/script/script.h            |  14 ++++
+ src/script/script_error.cpp    |   8 +++
+ src/script/script_error.h      |   6 ++
+ src/script/sigcache.cpp        |  22 ++++++-
+ src/script/sigcache.h          |   6 +-
+ src/test/fuzz/script_flags.cpp |   7 +-
+ src/test/script_tests.cpp      |   4 ++
+ 11 files changed, 218 insertions(+), 10 deletions(-)
+
+diff --git a/src/core_io.cpp b/src/core_io.cpp
+index 73c2486..87a181a 100644
+--- a/src/core_io.cpp
++++ b/src/core_io.cpp
+@@ -78,6 +78,9 @@ public:
+         // only changes how script strings are parsed, not which scripts are valid.
+         mapOpNames["OP_CHECKMLDSA44"] = OP_CHECKMLDSA44;
+         mapOpNames["CHECKMLDSA44"] = OP_CHECKMLDSA44;
++        // Likewise OP_CHECKSLHDSA128S (doc/p2mr-slhdsa128s.md).
++        mapOpNames["OP_CHECKSLHDSA128S"] = OP_CHECKSLHDSA128S;
++        mapOpNames["CHECKSLHDSA128S"] = OP_CHECKSLHDSA128S;
+     }
+     opcodetype Parse(const std::string& s) const
+     {
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 76afc86..153578c 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -9,6 +9,7 @@
+ #include <crypto/ripemd160.h>
+ #include <crypto/sha1.h>
+ #include <crypto/sha256.h>
++#include <crypto/slhdsa128s.h>
+ #include <pubkey.h>
+ #include <script/script.h>
+ #include <tinyformat.h>
+@@ -402,6 +403,64 @@ static bool CheckMLDSA44Enabled(SigVersion sigversion, const ScriptExecutionData
+     return sigversion == SigVersion::TAPSCRIPT && execdata.m_p2mr_leaf && (flags & SCRIPT_VERIFY_P2MR_MLDSA44);
+ }
+ 
++/** Whether byte 0xf1 executes as OP_CHECKSLHDSA128S: in a P2MR leaf that is executed as
++ *  tapscript, with SCRIPT_VERIFY_P2MR_SLHDSA128S. Everywhere else it keeps its old meaning:
++ *  a bad opcode in legacy and witness v0 scripts, OP_SUCCESS241 in tapscript. */
++static bool CheckSLHDSA128SEnabled(SigVersion sigversion, const ScriptExecutionData& execdata, script_verify_flags flags)
++{
++    return sigversion == SigVersion::TAPSCRIPT && execdata.m_p2mr_leaf && (flags & SCRIPT_VERIFY_P2MR_SLHDSA128S);
++}
++
++/** Helper for OP_CHECKSLHDSA128S (doc/p2mr-slhdsa128s.md). items are the seventeen stack elements
++ *  it consumes from the bottom up: the signature chunks sig[0] .. sig[15], then the public key.
++ *
++ * A return value of false means the script fails entirely. When true is returned, the
++ * success variable indicates whether a signature was given and checked.
++ */
++static bool EvalCheckSLHDSA128S(std::span<const valtype> items, ScriptExecutionData& execdata, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
++{
++    assert(sigversion == SigVersion::TAPSCRIPT);
++    assert(items.size() == SLHDSA128S_SIG_CHUNK_COUNT + 1);
++    const auto sig_chunks{items.first(SLHDSA128S_SIG_CHUNK_COUNT)};
++    const valtype& pubkey{items.back()};
++
++    /*
++     *  The following validation sequence is consensus critical, and follows OP_CHECKMLDSA44, which
++     *  follows EvalChecksigTapscript:
++     *    a signature is charged validation weight before anything else is looked at;
++     *    the script execution fails on a public key of the wrong size, even with an empty signature;
++     *    sixteen empty signature chunks are an empty signature, which pushes false;
++     *    the script execution fails when using a non-empty invalid signature.
++     *  Elliptic curve checks failing in tripwired leaves (doc/p2mr-tripwire.md) does not apply here.
++     */
++    success = std::ranges::any_of(sig_chunks, [](const valtype& chunk) { return !chunk.empty(); });
++    if (success) {
++        assert(execdata.m_validation_weight_left_init);
++        execdata.m_validation_weight_left -= VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK;
++        if (execdata.m_validation_weight_left < 0) {
++            return set_error(serror, SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
++        }
++    }
++    if (pubkey.size() != SLHDSA128S_PUBKEY_SIZE) return set_error(serror, SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE);
++    if (!success) return true;
++    for (size_t i = 0; i < sig_chunks.size(); ++i) {
++        // The last chunk may end in an explicit hash type.
++        const bool last{i + 1 == sig_chunks.size()};
++        const size_t size{sig_chunks[i].size()};
++        if (size != SLHDSA128S_SIG_CHUNK_SIZES[i] && !(last && size == SLHDSA128S_SIG_CHUNK_SIZES[i] + 1)) {
++            return set_error(serror, SCRIPT_ERR_SLHDSA128S_SIG_SIZE);
++        }
++    }
++
++    std::vector<unsigned char> sig;
++    sig.reserve(SLHDSA128S_SIGNATURE_SIZE + 1);
++    for (const valtype& chunk : sig_chunks) sig.insert(sig.end(), chunk.begin(), chunk.end());
++    if (!checker.CheckSLHDSA128SSignature(sig, pubkey, sigversion, execdata, serror)) {
++        return false; // serror is set
++    }
++    return true;
++}
++
+ /** Helper for OP_CHECKMLDSA44 (doc/p2mr-mldsa44.md). items are the eight stack elements it
+  *  consumes from the bottom up: the signature chunks sig[0] .. sig[4], then the public key
+  *  chunks pk[0] .. pk[2].
+@@ -1191,6 +1250,23 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript&
+                 }
+                 break;
+ 
++                case OP_CHECKSLHDSA128S:
++                {
++                    // Only executed in P2MR leaves with SCRIPT_VERIFY_P2MR_SLHDSA128S. Elsewhere this byte is
++                    // a bad opcode (legacy, witness v0), or an OP_SUCCESSx ExecuteWitnessScript acts on first.
++                    if (!CheckSLHDSA128SEnabled(sigversion, execdata, flags)) return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
++
++                    // (sig[0] ... sig[15] pk -- bool)
++                    const size_t item_count{SLHDSA128S_SIG_CHUNK_COUNT + 1};
++                    if (stack.size() < item_count) return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
++
++                    bool success = true;
++                    if (!EvalCheckSLHDSA128S(std::span{stack}.last(item_count), execdata, checker, sigversion, serror, success)) return false;
++                    for (size_t i = 0; i < item_count; ++i) popstack(stack);
++                    stack.push_back(success ? vchTrue : vchFalse);
++                }
++                break;
++
+                 case OP_CHECKMULTISIG:
+                 case OP_CHECKMULTISIGVERIFY:
+                 {
+@@ -1583,8 +1659,9 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
+         ext_flag = 1;
+         // key_version is 0 for the 32-byte public keys of the tapscript
+         // signature opcodes. OP_CHECKMLDSA44 in P2MR leaves passes
+-        // MLDSA44_KEY_VERSION for its ML-DSA-44 public keys, so that its
+-        // signature message never equals that of a Schnorr signature.
++        // MLDSA44_KEY_VERSION for its ML-DSA-44 public keys, and
++        // OP_CHECKSLHDSA128S SLHDSA128S_KEY_VERSION for its SLH-DSA-SHA2-128s
++        // ones, so that no two of the three signature messages are equal.
+         break;
+     default:
+         assert(false);
+@@ -1784,6 +1861,12 @@ bool GenericTransactionSignatureChecker<T>::VerifyMLDSA44Signature(std::span<con
+     return MLDSA44Verify(pubkey, MakeUCharSpan(sighash), MakeUCharSpan(MLDSA44_CONTEXT), sig);
+ }
+ 
++template <class T>
++bool GenericTransactionSignatureChecker<T>::VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const
++{
++    return SLHDSA128SVerify(pubkey, MakeUCharSpan(sighash), MakeUCharSpan(SLHDSA128S_CONTEXT), sig);
++}
++
+ template <class T>
+ bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const
+ {
+@@ -1861,6 +1944,30 @@ bool GenericTransactionSignatureChecker<T>::CheckMLDSA44Signature(std::span<cons
+     return true;
+ }
+ 
++template <class T>
++bool GenericTransactionSignatureChecker<T>::CheckSLHDSA128SSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror) const
++{
++    assert(sigversion == SigVersion::TAPSCRIPT);
++    // EvalCheckSLHDSA128S joins the signature from its chunks and enforces these sizes.
++    assert(pubkey.size() == SLHDSA128S_PUBKEY_SIZE);
++    assert(sig.size() == SLHDSA128S_SIGNATURE_SIZE || sig.size() == SLHDSA128S_SIGNATURE_SIZE + 1);
++
++    uint8_t hashtype = SIGHASH_DEFAULT;
++    if (sig.size() == SLHDSA128S_SIGNATURE_SIZE + 1) {
++        hashtype = SpanPopBack(sig);
++        if (hashtype == SIGHASH_DEFAULT) return set_error(serror, SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE);
++    }
++    uint256 sighash;
++    if (!this->txdata) return HandleMissingData(m_mdb);
++    if (!SignatureHashSchnorr(sighash, execdata, *txTo, nIn, hashtype, sigversion, *this->txdata, m_mdb, SLHDSA128S_KEY_VERSION)) {
++        return set_error(serror, SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE);
++    }
++    if (!VerifySLHDSA128SSignature(sig.first<SLHDSA128S_SIGNATURE_SIZE>(), pubkey.first<SLHDSA128S_PUBKEY_SIZE>(), sighash)) {
++        return set_error(serror, SCRIPT_ERR_SLHDSA128S_SIG);
++    }
++    return true;
++}
++
+ template <class T>
+ bool GenericTransactionSignatureChecker<T>::CheckLockTime(const CScriptNum& nLockTime) const
+ {
+@@ -1964,6 +2071,7 @@ static bool ExecuteWitnessScript(const std::span<const valtype>& stack_span, con
+             }
+             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
+             if (opcode == OP_CHECKMLDSA44 && CheckMLDSA44Enabled(sigversion, execdata, flags)) continue;
++            if (opcode == OP_CHECKSLHDSA128S && CheckSLHDSA128SEnabled(sigversion, execdata, flags)) continue;
+             if (IsOpSuccess(opcode)) {
+                 if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
+                     return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
+@@ -2166,7 +2274,8 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion,
+             exec_script = CScript(script.begin(), script.end());
+             execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
+             execdata.m_validation_weight_left_init = true;
+-            // Where OP_CHECKMLDSA44 can execute (doc/p2mr-mldsa44.md).
++            // Where OP_CHECKMLDSA44 (doc/p2mr-mldsa44.md) and OP_CHECKSLHDSA128S (doc/p2mr-slhdsa128s.md)
++            // can execute.
+             execdata.m_p2mr_leaf = true;
+             // Where elliptic curve checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
+             execdata.m_tripwired_leaf = tripwired;
+@@ -2380,6 +2489,7 @@ const std::map<std::string, script_verify_flag_name>& ScriptFlagNamesToEnum()
+         FLAG_NAME(P2MR_MLDSA44),
+         FLAG_NAME(P2MR_TRIPWIRE),
+         FLAG_NAME(P2MR_EC_DISABLED),
++        FLAG_NAME(P2MR_SLHDSA128S),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_PUBKEYTYPE),
+         FLAG_NAME(DISCOURAGE_OP_SUCCESS),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_TAPROOT_VERSION),
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index b08e12f..7eb1d76 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -8,6 +8,7 @@
+ 
+ #include <consensus/amount.h>
+ #include <crypto/mldsa44.h>
++#include <crypto/slhdsa128s.h>
+ #include <hash.h>
+ #include <primitives/transaction.h>
+ #include <script/script_error.h> // IWYU pragma: export
+@@ -175,6 +176,13 @@ enum class script_verify_flag_name : uint8_t {
+     //
+     SCRIPT_VERIFY_P2MR_EC_DISABLED,
+ 
++    // Experimental SLH-DSA-SHA2-128s signature checks in P2MR tapscript leaves: byte
++    // 0xf1 (OP_SUCCESS241) executes as OP_CHECKSLHDSA128S in a leaf that executes as
++    // tapscript, of leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. See
++    // doc/p2mr-slhdsa128s.md.
++    //
++    SCRIPT_VERIFY_P2MR_SLHDSA128S,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+@@ -263,7 +271,8 @@ struct ScriptExecutionData
+     std::optional<uint256> m_output_hash;
+ 
+     //! Whether the script is a P2MR leaf that is executed: leaf version 0xc0 at depth one or more,
+-    //! or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE.
++    //! or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. Where OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S can
++    //! execute.
+     bool m_p2mr_leaf = false;
+ 
+     //! Whether the script is a P2MR leaf of leaf version 0xe0 that is executed, whose elliptic
+@@ -311,6 +320,21 @@ static constexpr uint8_t MLDSA44_KEY_VERSION{0x01};
+ /** The FIPS 204 context string every OP_CHECKMLDSA44 signature is made with. */
+ static constexpr std::string_view MLDSA44_CONTEXT{"P2MR/MLDSA44/EXP0"};
+ 
++/** OP_CHECKSLHDSA128S (doc/p2mr-slhdsa128s.md) takes the 32-byte SLH-DSA-SHA2-128s public
++ *  key (PK.seed || PK.root) as one stack element, and the 7856-byte signature as sixteen:
++ *  fifteen of 520 bytes, then 56, or 57 with an explicit hash type. Fixed sizes give every
++ *  signature one encoding without raising MAX_SCRIPT_ELEMENT_SIZE. */
++static constexpr size_t SLHDSA128S_SIG_CHUNK_COUNT{16};
++static constexpr std::array<size_t, SLHDSA128S_SIG_CHUNK_COUNT> SLHDSA128S_SIG_CHUNK_SIZES{
++    520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 520, 56};
++static_assert(520 * 15 + 56 == SLHDSA128S_SIGNATURE_SIZE);
++/** The key version an OP_CHECKSLHDSA128S signature message commits to (key_version of BIP 342:
++ *  0 for the 32-byte keys of its signature opcodes, MLDSA44_KEY_VERSION for OP_CHECKMLDSA44). */
++static constexpr uint8_t SLHDSA128S_KEY_VERSION{0x02};
++/** The FIPS 205 context string every OP_CHECKSLHDSA128S signature is made with. */
++static constexpr std::string_view SLHDSA128S_CONTEXT{"P2MR/SLHDSA128S/EXP0"};
++static_assert(SLHDSA128S_CONTEXT.size() == 20);
++
+ extern const HashWriter HASHER_TAPSIGHASH; //!< Hasher with tag "TapSighash" pre-fed to it.
+ extern const HashWriter HASHER_TAPLEAF;    //!< Hasher with tag "TapLeaf" pre-fed to it.
+ extern const HashWriter HASHER_TAPBRANCH;  //!< Hasher with tag "TapBranch" pre-fed to it.
+@@ -355,6 +379,11 @@ public:
+         return false;
+     }
+ 
++    virtual bool CheckSLHDSA128SSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const
++    {
++        return false;
++    }
++
+     virtual bool CheckLockTime(const CScriptNum& nLockTime) const
+     {
+          return false;
+@@ -378,7 +407,8 @@ enum class MissingDataBehavior
+ };
+ 
+ /** key_version is the BIP 342 key version, used with SigVersion::TAPSCRIPT only: 0 for the
+- *  32-byte keys of the BIP 342 signature opcodes, MLDSA44_KEY_VERSION for OP_CHECKMLDSA44. */
++ *  32-byte keys of the BIP 342 signature opcodes, MLDSA44_KEY_VERSION for OP_CHECKMLDSA44,
++ *  SLHDSA128S_KEY_VERSION for OP_CHECKSLHDSA128S. */
+ template<typename T>
+ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, const T& tx_to, uint32_t in_pos, uint8_t hash_type, SigVersion sigversion, const PrecomputedTransactionData& cache, MissingDataBehavior mdb, uint8_t key_version = 0);
+ 
+@@ -397,6 +427,7 @@ protected:
+     virtual bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
+     virtual bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const;
+     virtual bool VerifyMLDSA44Signature(std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE> sig, std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey, const uint256& sighash) const;
++    virtual bool VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const;
+ 
+ public:
+     GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(nullptr) {}
+@@ -404,6 +435,7 @@ public:
+     bool CheckECDSASignature(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override;
+     bool CheckSchnorrSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
+     bool CheckMLDSA44Signature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
++    bool CheckSLHDSA128SSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
+     bool CheckLockTime(const CScriptNum& nLockTime) const override;
+     bool CheckSequence(const CScriptNum& nSequence) const override;
+ };
+@@ -434,6 +466,11 @@ public:
+         return m_checker.CheckMLDSA44Signature(sig, pubkey, sigversion, execdata, serror);
+     }
+ 
++    bool CheckSLHDSA128SSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override
++    {
++        return m_checker.CheckSLHDSA128SSignature(sig, pubkey, sigversion, execdata, serror);
++    }
++
+     bool CheckLockTime(const CScriptNum& nLockTime) const override
+     {
+         return m_checker.CheckLockTime(nLockTime);
+diff --git a/src/script/script.cpp b/src/script/script.cpp
+index 1052a1e..5bc3945 100644
+--- a/src/script/script.cpp
++++ b/src/script/script.cpp
+@@ -151,6 +151,7 @@ std::string GetOpName(opcodetype opcode)
+ 
+     // Experimental opcode in P2MR tapscript leaves (doc/p2mr-mldsa44.md)
+     case OP_CHECKMLDSA44           : return "OP_CHECKMLDSA44";
++    case OP_CHECKSLHDSA128S        : return "OP_CHECKSLHDSA128S";
+ 
+     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
+ 
+diff --git a/src/script/script.h b/src/script/script.h
+index 5e56fad..bf9696c 100644
+--- a/src/script/script.h
++++ b/src/script/script.h
+@@ -64,6 +64,15 @@ static constexpr int64_t VALIDATION_WEIGHT_PER_SIGOP_PASSED{50};
+ // see doc/p2mr-mldsa44.md): an ML-DSA-44 verification against the 50 of BIP 342.
+ static constexpr int64_t VALIDATION_WEIGHT_PER_MLDSA44_CHECK{250};
+ 
++// Validation weight per OP_CHECKSLHDSA128S with a signature (P2MR tapscript leaves only,
++// see doc/p2mr-slhdsa128s.md): an SLH-DSA-SHA2-128s verification against the 50 of BIP 342.
++// PROVISIONAL: 2000 is a placeholder within the estimated range of the design (1,500 to
++// 2,500). It is fixed by measurement before any release (worst-case verification without
++// SHA extensions, C >= 1.25 * 50 * p99(SLH-DSA) / median(Schnorr), and the whole-block
++// test), and never changes once a build carrying it has left the network's own nodes. It
++// must stay below 8,022, the budget of a single-signature spend.
++static constexpr int64_t VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK{2000};
++
+ // How much weight budget is added to the witness size (Tapscript only, see BIP 342).
+ static constexpr int64_t VALIDATION_WEIGHT_OFFSET{50};
+ 
+@@ -218,6 +227,11 @@ enum opcodetype
+     // this byte keeps its BIP 342 meaning, OP_SUCCESS240.
+     OP_CHECKMLDSA44 = 0xf0,
+ 
++    // Experimental SLH-DSA-SHA2-128s signature check, only in P2MR tapscript leaves once
++    // SCRIPT_VERIFY_P2MR_SLHDSA128S applies (see doc/p2mr-slhdsa128s.md). Everywhere else
++    // this byte keeps its BIP 342 meaning, OP_SUCCESS241.
++    OP_CHECKSLHDSA128S = 0xf1,
++
+     OP_INVALIDOPCODE = 0xff,
+ };
+ 
+diff --git a/src/script/script_error.cpp b/src/script/script_error.cpp
+index 1641a80..7ca501f 100644
+--- a/src/script/script_error.cpp
++++ b/src/script/script_error.cpp
+@@ -117,6 +117,14 @@ std::string ScriptErrorString(const ScriptError serror)
+             return "Invalid ML-DSA-44 signature";
+         case SCRIPT_ERR_P2MR_EC_DISABLED:
+             return "Elliptic curve signature checks are disabled in this leaf";
++        case SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE:
++            return "Invalid SLH-DSA-SHA2-128s public key size";
++        case SCRIPT_ERR_SLHDSA128S_SIG_SIZE:
++            return "Invalid SLH-DSA-SHA2-128s signature chunk size";
++        case SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE:
++            return "Invalid SLH-DSA-SHA2-128s signature hash type";
++        case SCRIPT_ERR_SLHDSA128S_SIG:
++            return "Invalid SLH-DSA-SHA2-128s signature";
+         case SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT:
+             return "Too much signature validation relative to witness weight";
+         case SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG:
+diff --git a/src/script/script_error.h b/src/script/script_error.h
+index 7d94dfe..9d916fe 100644
+--- a/src/script/script_error.h
++++ b/src/script/script_error.h
+@@ -87,6 +87,12 @@ typedef enum ScriptError_t
+ 
+     /* Tripwired P2MR leaves (doc/p2mr-tripwire.md) */
+     SCRIPT_ERR_P2MR_EC_DISABLED,
++
++    /* OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) */
++    SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE,
++    SCRIPT_ERR_SLHDSA128S_SIG_SIZE,
++    SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE,
++    SCRIPT_ERR_SLHDSA128S_SIG,
+     SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT,
+     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
+     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
+diff --git a/src/script/sigcache.cpp b/src/script/sigcache.cpp
+index e5cfc1a..8f93946 100644
+--- a/src/script/sigcache.cpp
++++ b/src/script/sigcache.cpp
+@@ -23,16 +23,20 @@ SignatureCache::SignatureCache(const size_t max_size_bytes)
+     // We want the nonce to be 64 bytes long to force the hasher to process
+     // this chunk, which makes later hash computations more efficient. We
+     // just write our 32-byte entropy, and then pad with 'E' for ECDSA,
+-    // 'S' for Schnorr and 'M' for ML-DSA-44 (followed by 0 bytes).
++    // 'S' for Schnorr, 'M' for ML-DSA-44 and 'H' for the hash-based
++    // SLH-DSA-SHA2-128s (followed by 0 bytes).
+     static constexpr unsigned char PADDING_ECDSA[32] = {'E'};
+     static constexpr unsigned char PADDING_SCHNORR[32] = {'S'};
+     static constexpr unsigned char PADDING_MLDSA44[32] = {'M'};
++    static constexpr unsigned char PADDING_SLHDSA128S[32] = {'H'};
+     m_salted_hasher_ecdsa.Write(nonce.begin(), 32);
+     m_salted_hasher_ecdsa.Write(PADDING_ECDSA, 32);
+     m_salted_hasher_schnorr.Write(nonce.begin(), 32);
+     m_salted_hasher_schnorr.Write(PADDING_SCHNORR, 32);
+     m_salted_hasher_mldsa44.Write(nonce.begin(), 32);
+     m_salted_hasher_mldsa44.Write(PADDING_MLDSA44, 32);
++    m_salted_hasher_slhdsa128s.Write(nonce.begin(), 32);
++    m_salted_hasher_slhdsa128s.Write(PADDING_SLHDSA128S, 32);
+ 
+     const auto [num_elems, approx_size_bytes] = setValid.setup_bytes(max_size_bytes);
+     LogInfo("Using %zu MiB out of %zu MiB requested for signature cache, able to store %zu elements",
+@@ -57,6 +61,12 @@ void SignatureCache::ComputeEntryMLDSA44(uint256& entry, const uint256& hash, st
+     hasher.Write(hash.begin(), 32).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
+ }
+ 
++void SignatureCache::ComputeEntrySLHDSA128S(uint256& entry, const uint256& hash, std::span<const unsigned char> sig, std::span<const unsigned char> pubkey) const
++{
++    CSHA256 hasher = m_salted_hasher_slhdsa128s;
++    hasher.Write(hash.begin(), 32).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
++}
++
+ bool SignatureCache::Get(const uint256& entry, const bool erase)
+ {
+     std::shared_lock<std::shared_mutex> lock(cs_sigcache);
+@@ -101,3 +111,13 @@ bool CachingTransactionSignatureChecker::VerifyMLDSA44Signature(std::span<const
+     if (store) m_signature_cache.Set(entry);
+     return true;
+ }
++
++bool CachingTransactionSignatureChecker::VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const
++{
++    uint256 entry;
++    m_signature_cache.ComputeEntrySLHDSA128S(entry, sighash, sig, pubkey);
++    if (m_signature_cache.Get(entry, !store)) return true;
++    if (!TransactionSignatureChecker::VerifySLHDSA128SSignature(sig, pubkey, sighash)) return false;
++    if (store) m_signature_cache.Set(entry);
++    return true;
++}
+diff --git a/src/script/sigcache.h b/src/script/sigcache.h
+index 2c1078b..49603f8 100644
+--- a/src/script/sigcache.h
++++ b/src/script/sigcache.h
+@@ -38,10 +38,11 @@ static_assert(DEFAULT_VALIDATION_CACHE_BYTES == DEFAULT_SIGNATURE_CACHE_BYTES +
+ class SignatureCache
+ {
+ private:
+-    //! Entries are SHA256(nonce || 'E', 'S' or 'M' || 31 zero bytes || signature hash || public key || signature):
++    //! Entries are SHA256(nonce || 'E', 'S', 'M' or 'H' || 31 zero bytes || signature hash || public key || signature):
+     CSHA256 m_salted_hasher_ecdsa;
+     CSHA256 m_salted_hasher_schnorr;
+     CSHA256 m_salted_hasher_mldsa44;
++    CSHA256 m_salted_hasher_slhdsa128s;
+     typedef CuckooCache::cache<uint256, SignatureCacheHasher> map_type;
+     map_type setValid;
+     std::shared_mutex cs_sigcache;
+@@ -58,6 +59,8 @@ public:
+ 
+     void ComputeEntryMLDSA44(uint256& entry, const uint256& hash, std::span<const unsigned char> sig, std::span<const unsigned char> pubkey) const;
+ 
++    void ComputeEntrySLHDSA128S(uint256& entry, const uint256& hash, std::span<const unsigned char> sig, std::span<const unsigned char> pubkey) const;
++
+     bool Get(const uint256& entry, bool erase);
+ 
+     void Set(const uint256& entry);
+@@ -75,6 +78,7 @@ public:
+     bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const override;
+     bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const override;
+     bool VerifyMLDSA44Signature(std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE> sig, std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey, const uint256& sighash) const override;
++    bool VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const override;
+ };
+ 
+ #endif // BITCOIN_SCRIPT_SIGCACHE_H
+diff --git a/src/test/fuzz/script_flags.cpp b/src/test/fuzz/script_flags.cpp
+index c92c961..caa7701 100644
+--- a/src/test/fuzz/script_flags.cpp
++++ b/src/test/fuzz/script_flags.cpp
+@@ -44,10 +44,11 @@ FUZZ_TARGET(script_flags)
+         // DISCOURAGE flag refuses: a P2MR output is an unknown witness program
+         // (DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM), OP_CHECKMLDSA44 is OP_SUCCESS240
+         // (DISCOURAGE_OP_SUCCESS), a P2MR leaf of version 0xe0 has an unknown leaf version
+-        // (DISCOURAGE_UPGRADABLE_TAPROOT_VERSION). Removing one can turn a pass into a failure and
+-        // adding one a failure into a pass, so the check below leaves them alone.
++        // (DISCOURAGE_UPGRADABLE_TAPROOT_VERSION), OP_CHECKSLHDSA128S is OP_SUCCESS241
++        // (DISCOURAGE_OP_SUCCESS). Removing one can turn a pass into a failure and adding one a
++        // failure into a pass, so the check below leaves them alone.
+         // SCRIPT_VERIFY_P2MR_EC_DISABLED only makes more scripts fail, and is fuzzed.
+-        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE);
++        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S);
+ 
+         std::vector<CTxOut> spent_outputs;
+         for (unsigned i = 0; i < tx.vin.size(); ++i) {
+diff --git a/src/test/script_tests.cpp b/src/test/script_tests.cpp
+index 06eb831..8493b0e 100644
+--- a/src/test/script_tests.cpp
++++ b/src/test/script_tests.cpp
+@@ -99,6 +99,10 @@ static ScriptErrorDesc script_errors[]={
+     {SCRIPT_ERR_MLDSA44_SIG_HASHTYPE, "MLDSA44_SIG_HASHTYPE"},
+     {SCRIPT_ERR_MLDSA44_SIG, "MLDSA44_SIG"},
+     {SCRIPT_ERR_P2MR_EC_DISABLED, "P2MR_EC_DISABLED"},
++    {SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE, "SLHDSA128S_PUBKEY_SIZE"},
++    {SCRIPT_ERR_SLHDSA128S_SIG_SIZE, "SLHDSA128S_SIG_SIZE"},
++    {SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE, "SLHDSA128S_SIG_HASHTYPE"},
++    {SCRIPT_ERR_SLHDSA128S_SIG, "SLHDSA128S_SIG"},
+     {SCRIPT_ERR_DISCOURAGE_OP_SUCCESS, "DISCOURAGE_OP_SUCCESS"},
+     {SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE, "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"},
+     {SCRIPT_ERR_SCHNORR_SIG_SIZE, "SCHNORR_SIG_SIZE"},
+-- 
+2.43.0
+
