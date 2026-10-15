@@ -5,6 +5,27 @@ import (
 	"testing"
 )
 
+func TestBrowserAppleScript(t *testing.T) {
+	url := "http://127.0.0.1:12345/0123456789abcdefABCDEF-/"
+	got, err := browserAppleScript(url)
+	if want := "open location \"" + url + "\"\n"; err != nil || got != want {
+		t.Fatalf("script = %q, %v; want %q", got, err, want)
+	}
+	for _, c := range []struct{ name, url string }{
+		{"empty", ""}, {"quote", "http://localhost/\""}, {"backslash", "http://localhost/\\"},
+		{"newline", "http://localhost/\n"}, {"carriage return", "http://localhost/\r"},
+		{"space", "http://localhost/ "}, {"query", "http://localhost/?"}, {"fragment", "http://localhost/#"},
+		{"percent escape", "http://localhost/%22"}, {"underscore", "http://localhost/_"},
+		{"non ASCII letter", "http://localhost/\u00e9"}, {"null byte", "http://localhost/\x00"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got, err := browserAppleScript(c.url); err == nil || got != "" {
+				t.Fatalf("unsafe URL produced script %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestBrowserDecision(t *testing.T) {
 	for _, platform := range []string{"windows", "darwin", "linux"} {
 		for _, noBrowser := range []bool{false, true} {

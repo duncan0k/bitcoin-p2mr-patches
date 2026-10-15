@@ -263,12 +263,26 @@ func testLeftoverNode(t *testing.T, target string) {
 	}) {
 		t.Fatal("earlier witness did not start and record its private fake node")
 	}
+	expected := filepath.Join(dir, "node", nodeName)
+	orphan, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orphan.Release()
+	var recoveryDone chan error
+	defer func() {
+		if image, err := processExecutable(pid); err == nil && image == expected {
+			_ = orphan.Kill()
+		}
+		if recoveryDone != nil {
+			<-recoveryDone
+		}
+	}()
 	if err := helper.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	_ = helper.Wait()
 	helperDone = true
-	expected := filepath.Join(dir, "node", nodeName)
 	if image, err := processExecutable(pid); err != nil || image != expected {
 		t.Fatalf("no orphaned private node: %q %v", image, err)
 	}
@@ -277,8 +291,17 @@ func testLeftoverNode(t *testing.T, target string) {
 		t.Fatal(err)
 	}
 	defer release()
-	if err := stopLeftoverNode(dir, consoleTexts["en"].Leftover); err != nil {
-		t.Fatal(err)
+	done := make(chan error, 1)
+	recoveryDone = done
+	go func() { done <- stopLeftoverNode(dir, consoleTexts["en"].Leftover) }()
+	select {
+	case err := <-recoveryDone:
+		recoveryDone = nil
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("leftover node recovery exceeded twenty seconds")
 	}
 	if !eventually(5*time.Second, func() bool { image, err := processExecutable(pid); return err == nil && image != expected }) {
 		t.Fatal("orphaned node still runs")

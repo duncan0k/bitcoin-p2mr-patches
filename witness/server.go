@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -56,6 +57,9 @@ func newServer(n *node, dataDir string) (*server, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
+	}
+	if runtime.GOOS == "linux" {
+		l = &pageListener{Listener: l, uid: uint32(os.Geteuid())}
 	}
 	s := &server{
 		addr:      l.Addr().String(),

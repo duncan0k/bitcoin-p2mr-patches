@@ -15,6 +15,7 @@ zip attributes and level 9 deflation. Unix archives use executable modes and LF 
 import gzip
 import hashlib
 import io
+import stat
 import sys
 import tarfile
 import zipfile
@@ -73,7 +74,7 @@ def pack_zip(out: Path, top: str, files: list, programs: set, platform: str) -> 
             info = zipfile.ZipInfo(top + name, STAMP)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 0 if platform == "windows" else 3
-            info.external_attr = 0 if platform == "windows" else (0o755 if name in programs else 0o644) << 16
+            info.external_attr = 0 if platform == "windows" else (stat.S_IFREG | (0o755 if name in programs else 0o644)) << 16
             z.writestr(info, data, compresslevel=9)
 
 

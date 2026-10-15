@@ -5,6 +5,9 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,31 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLinuxPageServerAcceptsOwnUser(t *testing.T) {
+	dir := privateTempDir(t)
+	s, err := newServer(newNode("", "", dir), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A client that sends nothing must not block acceptance of the next connection.
+	idle, err := net.DialTimeout("tcp", s.addr, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get(s.url())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<html") {
+		t.Fatalf("page response: status=%d body=%q error=%v", resp.StatusCode, body, err)
+	}
+}
 
 func setTestFolderACL(t *testing.T, path, name string, mask uint16) {
 	t.Helper()

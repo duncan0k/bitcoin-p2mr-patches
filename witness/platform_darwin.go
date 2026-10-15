@@ -114,7 +114,15 @@ func processExecutable(pid int) (string, error) {
 	return strings.TrimSuffix(string(data), "\n"), err
 }
 
-func openBrowser(url string) error { return exec.Command("/usr/bin/open", url).Start() }
+func openBrowser(url string) error {
+	script, err := browserAppleScript(url)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("/usr/bin/osascript", "-")
+	cmd.Stdin = strings.NewReader(script)
+	return cmd.Start()
+}
 
 func stopRecordedNode(pid int, expected, message string) error {
 	image, err := processExecutable(pid)
