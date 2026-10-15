@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -103,9 +104,17 @@ func readCookie(path string) ([]byte, error) {
 func readPageFile(path string) ([]byte, error) {
 	f, err := openRegularFile(path, os.O_RDONLY|syscall.O_NOFOLLOW)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot safely open page file %q: %w", path, err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect page file %q: %w", path, err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	if reason := instanceFileProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
+		return nil, fmt.Errorf("unsafe page file %q: %s; delete it or the data folder and retry", path, reason)
+	}
 	return io.ReadAll(io.LimitReader(f, 1024))
 }
 
@@ -137,25 +146,95 @@ func shutdownNode(n *node, timeout time.Duration) {
 }
 
 func lockInstance(path string) (func(), error) {
+	unsafe := func(err error) (func(), error) {
+		return nil, fmt.Errorf("cannot safely lock file %q: %w; delete this file or the data folder %s and retry", path, err, shellFolder(filepath.Dir(path)))
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
-		return nil, err
+		return unsafe(err)
 	}
 	info, err := f.Stat()
 	if err == nil {
-		if reason := privateFileProblem(info.Mode(), fileOwner(info), uint32(os.Geteuid())); reason != "" {
-			err = fmt.Errorf("unsafe lock file %q: %s; remove it before retrying", path, reason)
+		stat := info.Sys().(*syscall.Stat_t)
+		if reason := instanceFileProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
+			err = errors.New(reason)
 		}
 	}
 	if err != nil {
 		_ = f.Close()
-		return nil, err
+		return unsafe(err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, err
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, errInstanceRunning
+		}
+		return unsafe(err)
 	}
 	return func() { _ = f.Close() }, nil
+}
+
+func instanceFileProblem(mode os.FileMode, owner, uid uint32, links uint64) string {
+	if reason := privateFileProblem(mode, owner, uid); reason != "" {
+		return reason
+	}
+	if links != 1 {
+		return "must have exactly one hard link"
+	}
+	if mode.Perm()&0o077 != 0 {
+		return "must not grant any permissions to group or others"
+	}
+	return ""
+}
+
+func dataEntryProblem(mode os.FileMode, owner, uid uint32, links uint64) string {
+	if !mode.IsDir() && !mode.IsRegular() {
+		return "must be a directory or a regular file (no symlinks or special files)"
+	}
+	if owner != uid {
+		return "must be owned by the effective user"
+	}
+	if mode.Perm()&0o022 != 0 {
+		return "must not be writable by group or others"
+	}
+	if mode.IsRegular() && links != 1 {
+		return "must have exactly one hard link"
+	}
+	return ""
+}
+
+func dataTreeError(dataDir, path string, err error) error {
+	return fmt.Errorf("unsafe data folder entry %q: %w; another user may have placed or changed it; delete the data folder %s and start again (the node will sync again), or choose another folder with -datadir", path, err, shellFolder(dataDir))
+}
+
+// Call only while holding the instance lock, after stopping any leftover node and before preparing a new one.
+// Fixing the folder permissions does not remove old entries. Every entry another user created is owned by that
+// user, and a hard link they made to one of our own files has a link count above one. These checks reject both.
+func checkDataTree(dataDir string) error {
+	err := filepath.WalkDir(dataDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return dataTreeError(dataDir, path, err)
+		}
+		// DirEntry.Info uses Lstat semantics, so neither the inspection nor WalkDir follows symlinks.
+		info, err := entry.Info()
+		if err != nil {
+			return dataTreeError(dataDir, path, err)
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if reason := dataEntryProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), uint64(stat.Nlink)); reason != "" {
+			return dataTreeError(dataDir, path, errors.New(reason))
+		}
+		if runtime.GOOS == "linux" && info.IsDir() {
+			if err := checkFolderACL(path); err != nil {
+				return dataTreeError(dataDir, path, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return checkDataTreeACL(dataDir)
 }
 
 func ownedByUser(info os.FileInfo) bool {

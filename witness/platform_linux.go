@@ -14,6 +14,8 @@ import (
 	"unsafe"
 )
 
+func checkDataTreeACL(string) error { return nil }
+
 func checkFolderACL(path string) error {
 	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
 		_, err := syscall.Getxattr(path, name, nil)

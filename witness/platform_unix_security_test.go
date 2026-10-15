@@ -3,6 +3,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,298 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDataEntryDecision(t *testing.T) {
+	const uid = uint32(1000)
+	for _, c := range []struct {
+		name  string
+		mode  os.FileMode
+		owner uint32
+		links uint64
+		safe  bool
+	}{
+		{"regular", 0o644, uid, 1, true},
+		{"directory", os.ModeDir | 0o755, uid, 3, true},
+		{"foreign file", 0o600, uid + 1, 1, false},
+		{"foreign directory", os.ModeDir | 0o700, uid + 1, 2, false},
+		{"hard link", 0o600, uid, 2, false},
+		{"unlinked file", 0o600, uid, 0, false},
+		{"symlink", os.ModeSymlink | 0o777, uid, 1, false},
+		{"fifo", os.ModeNamedPipe | 0o600, uid, 1, false},
+		{"socket", os.ModeSocket | 0o600, uid, 1, false},
+		{"device", os.ModeDevice | 0o600, uid, 1, false},
+		{"group writable file", 0o620, uid, 1, false},
+		{"other writable file", 0o602, uid, 1, false},
+		{"group writable directory", os.ModeDir | 0o770, uid, 2, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if reason := dataEntryProblem(c.mode, c.owner, uid, c.links); (reason == "") != c.safe {
+				t.Fatalf("safe=%v: %s", c.safe, reason)
+			}
+		})
+	}
+}
+
+func checkDataTreeAdvice(t *testing.T, dataDir, path string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("unsafe data tree was accepted")
+	}
+	for _, text := range []string{path, "another user may have placed or changed it", "delete the data folder " + shellFolder(dataDir), "sync again", "-datadir"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("missing %q in error: %v", text, err)
+		}
+	}
+}
+
+func TestDataTreeRejectsUnsafeEntries(t *testing.T) {
+	for _, kind := range []string{"symlink", "hard link", "fifo", "group writable file", "group writable directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := filepath.Join(privateTempDir(t), "data's folder")
+			if err := os.MkdirAll(filepath.Join(dir, "signet"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(privateTempDir(t), "outside")
+			writeTestFile(t, outside, "keep this private key", 0o600)
+			path := filepath.Join(dir, "signet", "bitcoind.pid")
+			switch kind {
+			case "symlink":
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			case "hard link":
+				if err := os.Link(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "group writable file":
+				writeTestFile(t, path, "unsafe", 0o620)
+			case "group writable directory":
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			}
+			checkDataTreeAdvice(t, dir, path, checkDataTree(dir))
+			output, err := runWitnessStartup(t, dir)
+			if err == nil || !strings.Contains(output, path) || !strings.Contains(output, "another user may have placed or changed it") {
+				t.Fatalf("unsafe tree did not stop startup: %v\n%s", err, output)
+			}
+			if data, err := os.ReadFile(outside); err != nil || string(data) != "keep this private key" {
+				t.Fatalf("outside file changed: %q %v", data, err)
+			}
+			if starts(dir) != 0 {
+				t.Fatal("a node was started with an unsafe data tree")
+			}
+		})
+	}
+}
+
+func TestDataTreeAfterFakeNodeRun(t *testing.T) {
+	dir := privateTempDir(t)
+	release, err := lockInstance(filepath.Join(dir, lockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := stopLeftoverNode(dir, "unused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDataTree(dir); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := fakeNodeProcess(t, "ready", dir, fileHash(t, exe))
+	n.start()
+	if !eventually(10*time.Second, func() bool { return n.client() != nil }) {
+		t.Fatal("fake node did not become ready")
+	}
+	// Keep the real cookie after shutdown, as Core may leave one after an interrupted run.
+	cookie, err := readCookie(cookiePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdownNode(n, 3*time.Second)
+	if !stoppedWithin(n, 5*time.Second) {
+		t.Fatal("fake node did not stop")
+	}
+	if err := writePageFile(filepath.Join(dir, pageFile), []byte("saved page")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNodePID(dir, 123); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, cookiePath(dir), string(cookie), 0o600)
+	for _, path := range []string{"node", filepath.Join("node", nodeName), nodePIDFile, pageFile, "signet", filepath.Join("signet", ".cookie")} {
+		if _, err := os.Lstat(filepath.Join(dir, path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := checkDataTree(dir); err != nil {
+		t.Fatalf("safe tree after a full fake node run: %v", err)
+	}
+}
+
+func TestInstanceFileDecision(t *testing.T) {
+	for _, file := range []string{lockFile, pageFile} {
+		t.Run(file, func(t *testing.T) {
+			for _, c := range []struct {
+				name  string
+				mode  os.FileMode
+				owner uint32
+				links uint64
+				safe  bool
+			}{
+				{"private", 0o600, 1000, 1, true},
+				{"foreign owner", 0o600, 1001, 1, false},
+				{"two links", 0o600, 1000, 2, false},
+				{"group read", 0o640, 1000, 1, false},
+				{"group write", 0o620, 1000, 1, false},
+				{"group execute", 0o610, 1000, 1, false},
+				{"other read", 0o604, 1000, 1, false},
+				{"directory", os.ModeDir | 0o700, 1000, 2, false},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					if reason := instanceFileProblem(c.mode, c.owner, 1000, c.links); (reason == "") != c.safe {
+						t.Fatalf("safe=%v: %s", c.safe, reason)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestUnsafeInstanceFiles(t *testing.T) {
+	for _, file := range []string{lockFile, pageFile} {
+		for _, kind := range []string{"symlink", "hard link", "group read", "group write", "group execute", "fifo", "directory"} {
+			t.Run(file+"/"+kind, func(t *testing.T) {
+				dir := privateTempDir(t)
+				path := filepath.Join(dir, file)
+				target := filepath.Join(privateTempDir(t), "target")
+				url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
+				writeTestFile(t, target, url, 0o600)
+				switch kind {
+				case "symlink":
+					if err := os.Symlink(target, path); err != nil {
+						t.Fatal(err)
+					}
+				case "hard link":
+					if err := os.Link(target, path); err != nil {
+						t.Fatal(err)
+					}
+				case "fifo":
+					if err := syscall.Mkfifo(path, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					mode := os.FileMode(0o640)
+					if kind == "group write" {
+						mode = 0o620
+					} else if kind == "group execute" {
+						mode = 0o610
+					}
+					writeTestFile(t, path, url, mode)
+				}
+				if file == lockFile {
+					release, err := lockInstance(path)
+					if release != nil {
+						release()
+					}
+					if err == nil || errors.Is(err, errInstanceRunning) || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "delete") {
+						t.Fatalf("unsafe lock must be an error, not a busy instance: %v", err)
+					}
+					if err := writePageFile(filepath.Join(dir, pageFile), []byte(url)); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if data, err := readPageFile(path); err == nil || data != nil || !strings.Contains(err.Error(), path) {
+						t.Fatalf("unsafe page file: %q %v", data, err)
+					}
+					if url, err := readPageURL(dir); err == nil || url != "" {
+						t.Fatalf("unsafe page yielded a URL: %q %v", url, err)
+					}
+					release, err := lockInstance(filepath.Join(dir, lockFile))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer release()
+				}
+				output, err := runWitnessStartup(t, dir)
+				if err == nil || !strings.Contains(output, path) || strings.Contains(output, url) {
+					t.Fatalf("unsafe instance file reached the page: %v\n%s", err, output)
+				}
+			})
+		}
+	}
+}
+
+func TestBusyInstanceDoesNotScanDataTree(t *testing.T) {
+	dir := privateTempDir(t)
+	release, err := lockInstance(filepath.Join(dir, lockFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if again, err := lockInstance(filepath.Join(dir, lockFile)); !errors.Is(err, errInstanceRunning) {
+		if again != nil {
+			again()
+		}
+		t.Fatalf("busy flock did not identify a second instance: %v", err)
+	}
+	url := "http://127.0.0.1:40123/" + strings.Repeat("ab", 32) + "/"
+	if err := writePageFile(filepath.Join(dir, pageFile), []byte(url)); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "unsafe-entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runWitnessStartup(t, dir)
+	if err != nil || !strings.Contains(output, url) || strings.Contains(output, "unsafe data folder entry") {
+		t.Fatalf("second instance did not show the existing page: %v\n%s", err, output)
+	}
+}
+
+func runWitnessStartup(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestWitnessStartupHelper$")
+	cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=", "WITNESS_STARTUP_HELPER="+dir)
+	cmd.Stdin = strings.NewReader("\n")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("witness startup did not finish: %v\n%s", ctx.Err(), output)
+	}
+	return string(output), err
+}
+
+func TestWitnessStartupHelper(t *testing.T) {
+	dir := os.Getenv("WITNESS_STARTUP_HELPER")
+	if dir == "" {
+		return
+	}
+	flag.CommandLine = flag.NewFlagSet("witness", flag.ExitOnError)
+	os.Args = []string{os.Args[0], "-datadir", dir, "-bitcoind", os.Args[0], "-no-browser", "-lang", "en"}
+	if code := run(); code != 0 {
+		os.Exit(code)
+	}
+}
 
 func checkCookieOwnerAndLinks(t *testing.T, path string) {
 	t.Helper()

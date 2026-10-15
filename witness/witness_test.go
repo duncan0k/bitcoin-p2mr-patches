@@ -947,8 +947,8 @@ func TestFilesAndPaths(t *testing.T) {
 	for text, ok := range map[string]bool{page + "\n": true, "https://evil.example/": false, "http://127.0.0.1:1/x/": false,
 		"http://localhost:40123/" + strings.Repeat("ab", 32) + "/": false, page + "x": false} {
 		_ = os.WriteFile(filepath.Join(dir, pageFile), []byte(text), 0o600)
-		if _, got := readPageURL(dir); got != ok {
-			t.Errorf("page %q: %v", text, got)
+		if _, err := readPageURL(dir); (err == nil) != ok {
+			t.Errorf("page %q: %v", text, err)
 		}
 	}
 

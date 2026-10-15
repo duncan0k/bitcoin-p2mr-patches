@@ -149,6 +149,25 @@ func TestLinuxFolderACLInspectionFailure(t *testing.T) {
 	}
 }
 
+func TestLinuxDataTreeSubfolderACLs(t *testing.T) {
+	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
+		t.Run(name, func(t *testing.T) {
+			dir := privateTempDir(t)
+			path := filepath.Join(dir, "signet", "blocks", "index")
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// A zero access mask keeps the mode safe, so the ACL check must cause refusal.
+			setTestFolderACL(t, path, name, 0)
+			err := checkDataTree(dir)
+			checkDataTreeAdvice(t, dir, path, err)
+			if err == nil || !strings.Contains(err.Error(), "POSIX ACL") {
+				t.Fatalf("subfolder ACL was not refused: %v", err)
+			}
+		})
+	}
+}
+
 func TestLinuxAbsoluteXDGWithoutHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	base := privateTempDir(t)

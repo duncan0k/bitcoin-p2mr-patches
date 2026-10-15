@@ -49,6 +49,9 @@ Ark-0 is a test network for trying things out. It may be reset at any time.
   started has written its cookie, which the node does only after binding the port, and follows no redirect.
 - The page is served on 127.0.0.1, on a port the system picks, only under a random 256-bit path, and only to
   requests whose Host is that address: another site's page cannot find it or reach it under a name of its own.
+  Other users of the computer can read the command lines of its programs, so on macOS the program hands the
+  address to the browser without putting it on one, and on Linux, where the browser's own command line may
+  hold it, the page answers only to programs of the user who started it, or of root.
 - No update checks, no statistics, no other network traffic than the node's own.
 - The program is built with the SHA-256 of the node it ships with and starts no other.
   - On Windows it holds `bitcoind.exe` open, so that no other program can change it, while it checks the
@@ -56,9 +59,10 @@ Ark-0 is a test network for trying things out. It may be reset at any time.
     it let the node run. That check needs file ids, which FAT32 and exFAT drives do not give (see below).
   - On macOS and Linux it copies `bitcoind` into the folder `node` of its data folder, hashing the copy as it
     writes it, and starts that copy. It refuses a data folder that another user could change, or replace
-    through a folder above it, and a copy that is not its own. On Linux it starts the copy from the very file
-    it checked, through `/proc/self/fd`. On macOS the copy also spares a second prompt from Gatekeeper: a
-    file the program writes carries no quarantine attribute.
+    through a folder above it, or that holds anything another user could have put there (a link, a file of
+    another owner, a file others can write), and a copy that is not its own. On Linux it starts the copy from
+    the very file it checked, through `/proc/self/fd`. On macOS the copy also spares a second prompt from
+    Gatekeeper: a file the program writes carries no quarantine attribute.
 - What the page calls good rests on the node's own answers: it says so only once the node has confirmed
   block 1264 and reported both tripwires; anything it could not read shows as unknown, also in the report.
 - A second start while the program runs shows the running one's page.

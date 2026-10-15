@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,6 +91,52 @@ func TestFolderACLParsing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDataTreeACLParsing(t *testing.T) {
+	const dir = "/private/data"
+	const listing = "/private/data:\ntotal 0\ndrwx------+ 2 alice staff 64 Oct 14 12:00 signet\n"
+	const child = "\n/private/data/signet:\ntotal 8\n-rw-------+ 1 alice staff 10 Oct 14 12:00 debug log\n"
+	for _, c := range []struct {
+		name, output, entry string
+	}{
+		{"no ACL", "total 0\n", ""},
+		{"deny only", listing + " 0: group:everyone deny delete\n" + child + " 0: user:bob inherited deny write\n", ""},
+		{"allow in filename", "-rw------- 1 alice staff 10 Oct 14 12:00 allow\n", ""},
+		{"directory allow", listing + " 0: user:bob allow add_file\n", dir + "/signet"},
+		{"file allow after deny", listing + " 0: group:everyone deny delete\n" + child + " 0: group:everyone deny delete\n 1: user:bob allow write\n", dir + "/signet/debug log"},
+		{"inherited allow", listing + child + " 0: user:bob inherited allow write\n", dir + "/signet/debug log"},
+		{"allow field anywhere", listing + child + " 23: user:bob allow inherited write\n", dir + "/signet/debug log"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := dataTreeACLProblem(dir, c.output)
+			if c.entry == "" {
+				if err != nil {
+					t.Fatalf("safe recursive ACL output: %v", err)
+				}
+				return
+			}
+			checkDataTreeAdvice(t, dir, c.entry, err)
+			if !strings.Contains(err.Error(), "allow access control entry") {
+				t.Fatalf("allow entry was not identified: %v", err)
+			}
+		})
+	}
+}
+
+func TestDarwinDataTreeACLInspection(t *testing.T) {
+	dir := privateTempDir(t)
+	missing := filepath.Join(dir, "missing")
+	checkDataTreeAdvice(t, missing, missing, checkDataTreeACL(missing))
+	path := filepath.Join(dir, "file")
+	writeTestFile(t, path, "safe file", 0o600)
+	if err := checkDataTree(dir); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("/bin/chmod", "+a", "everyone allow write", path).CombinedOutput(); err != nil {
+		t.Fatalf("add write ACL: %v: %s", err, output)
+	}
+	checkDataTreeAdvice(t, dir, path, checkDataTree(dir))
 }
 
 func TestAppleLanguages(t *testing.T) {

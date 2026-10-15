@@ -24,8 +24,9 @@ import (
 // version and bitcoindSHA256 are set at build time with -ldflags -X (see build.sh). A build without
 // bitcoindSHA256 runs whatever bitcoind it finds next to it, which only development builds should do.
 var (
-	version        = "dev"
-	bitcoindSHA256 = ""
+	version            = "dev"
+	bitcoindSHA256     = ""
+	errInstanceRunning = errors.New("another witness instance is running")
 )
 
 func main() {
@@ -66,8 +67,12 @@ func run() int {
 	}
 	release, err := lockInstance(filepath.Join(dataDir, lockFile))
 	if err != nil {
+		if runtime.GOOS != "windows" && !errors.Is(err, errInstanceRunning) {
+			return fail(fmt.Sprintf(t.StartFailed, err))
+		}
 		// Another window already runs the witness on this data folder: show its page rather than start a second node.
-		if url, ok := readPageURL(dataDir); ok {
+		url, pageErr := readPageURL(dataDir)
+		if pageErr == nil {
 			fmt.Printf("%s\n%s\n", t.Already, url)
 			if !*noBrowser {
 				_ = openBrowser(url)
@@ -78,10 +83,16 @@ func run() int {
 			}
 			return 0
 		}
+		if runtime.GOOS != "windows" {
+			return fail(t.Busy + "\n" + pageErr.Error())
+		}
 		return fail(t.Busy)
 	}
 	defer release()
 	if err := stopLeftoverNode(dataDir, t.Leftover); err != nil {
+		return fail(fmt.Sprintf(t.StartFailed, err))
+	}
+	if err := checkDataTree(dataDir); err != nil {
 		return fail(fmt.Sprintf(t.StartFailed, err))
 	}
 
@@ -220,11 +231,15 @@ func runningText(t console, attempted bool, err error) string {
 var pageURLPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/[0-9a-f]{64}/$`)
 
 // readPageURL is the page of the window that already runs on this data folder, if its file holds one.
-func readPageURL(dataDir string) (string, bool) {
-	data, err := readPageFile(filepath.Join(dataDir, pageFile))
+func readPageURL(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, pageFile)
+	data, err := readPageFile(path)
 	if err != nil {
-		return "", false
+		return "", err
 	}
 	url := strings.TrimSpace(string(data))
-	return url, pageURLPattern.MatchString(url)
+	if !pageURLPattern.MatchString(url) {
+		return "", fmt.Errorf("page file %q does not contain a valid witness page URL", path)
+	}
+	return url, nil
 }

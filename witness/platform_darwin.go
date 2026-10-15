@@ -16,8 +16,10 @@ import (
 	"time"
 )
 
+const aclInspectionTimeout = time.Second
+
 func checkFolderACL(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), aclInspectionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
 	cmd.Env = []string{"LC_ALL=C"}
@@ -27,6 +29,41 @@ func checkFolderACL(path string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("unsafe or unreadable access list on folder %q; remove the access list with chmod -N or choose another folder with -datadir: %w", path, err)
+	}
+	return nil
+}
+
+func checkDataTreeACL(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), aclInspectionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/ls", "-leR", "--", path)
+	cmd.Env = []string{"LC_ALL=C"}
+	data, err := cmd.Output()
+	if err != nil {
+		return dataTreeError(path, path, fmt.Errorf("cannot inspect recursive access lists: %w", err))
+	}
+	return dataTreeACLProblem(path, string(data))
+}
+
+var treeACLEntry = regexp.MustCompile(`^\s+[0-9]+:`)
+var treeACLFile = regexp.MustCompile(`^[bcdlps-][rwxstST-]{9}[+@]?\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$`)
+
+func dataTreeACLProblem(dataDir, output string) error {
+	dir, path := dataDir, dataDir
+	for _, line := range strings.Split(output, "\n") {
+		if treeACLEntry.MatchString(line) {
+			// Inheritance flags can precede the action; inspect every field of every ACL entry.
+			for _, field := range strings.Fields(line) {
+				if field == "allow" {
+					return dataTreeError(dataDir, path, errors.New("contains an allow access control entry"))
+				}
+			}
+		} else if file := treeACLFile.FindStringSubmatch(line); file != nil {
+			path = filepath.Join(dir, file[1])
+		} else if strings.HasSuffix(line, ":") && filepath.IsAbs(line) {
+			dir = strings.TrimSuffix(line, ":")
+			path = dir
+		}
 	}
 	return nil
 }
