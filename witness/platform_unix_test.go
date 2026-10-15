@@ -69,10 +69,7 @@ func TestPrivateNodeCopy(t *testing.T) {
 		}
 		return info
 	}
-	first := prepare()
-	if reused := os.SameFile(first, prepare()); reused != (runtime.GOOS == "linux") {
-		t.Fatalf("copy reused=%v on %s", reused, runtime.GOOS)
-	}
+	prepare()
 	for _, kind := range []string{"wrong hash", "symlink", "group writable", "others writable", "not executable"} {
 		t.Run(kind, func(t *testing.T) {
 			if err := os.Remove(copyPath); err != nil {
@@ -100,11 +97,74 @@ func TestPrivateNodeCopy(t *testing.T) {
 			}
 		})
 	}
-	// Even a reusable copy must not bypass the check of the program supplied in this release.
+	// An existing copy must not bypass the check of the program supplied in this release.
 	writeTestFile(t, shipped, "changed shipped node", 0o700)
 	if f, err := prepareNodeProgram(shipped, want, dataDir); err == nil {
 		f.Close()
 		t.Fatal("a changed shipped file was accepted")
+	}
+}
+
+func TestStartReplacesPrivateCopy(t *testing.T) {
+	t.Setenv("WITNESS_FAKE_NODE", "silent")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := privateTempDir(t)
+	want := fileHash(t, exe)
+	f, err := prepareNodeProgram(exe, want, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := f.Stat()
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "node", nodeName)
+	if runtime.GOOS == "darwin" {
+		// A write ACL on the old inode must not reach the next start through a reused copy.
+		if output, err := exec.Command("/bin/chmod", "+a", "everyone allow write", path).CombinedOutput(); err != nil {
+			t.Fatalf("add write ACL: %v: %s", err, output)
+		}
+	}
+	// Tightening permissions does not revoke an already open write descriptor on either system.
+	if err := os.Chmod(path, 0o720); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := newNode(exe, want, dir)
+	for i := 0; i < 3; i++ {
+		func() {
+			cmd := exec.Command(exe, nodeArgs(dir, 1)...)
+			configureNode(cmd)
+			if err := n.startNode(cmd); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			current, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(previous, current) {
+				t.Fatalf("start %d reused the old inode", i+1)
+			}
+			if _, err := writer.WriteAt([]byte("changed old inode"), 0); err != nil {
+				t.Fatal(err)
+			}
+			if fileHash(t, path) != want {
+				t.Fatalf("start %d copy changed through the old write descriptor", i+1)
+			}
+			previous = current
+		}()
 	}
 }
 

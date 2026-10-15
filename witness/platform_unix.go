@@ -276,7 +276,7 @@ func checkSignetFolder(dataDir string) error {
 		return fmt.Errorf("cannot inspect signet folder %q; fix it or choose another folder with -datadir: %w", path, err)
 	}
 	stat := info.Sys().(*syscall.Stat_t)
-	if reason := folderProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), true, false); reason != "" {
+	if reason := folderProblem(info.Mode(), stat.Uid, uint32(os.Geteuid()), true); reason != "" {
 		return fmt.Errorf("signet folder %q %s; use a real directory owned by you and run chmod 700 on it, or choose another folder with -datadir", path, reason)
 	}
 	return checkFolderACL(path)
@@ -364,17 +364,9 @@ func prepareNodeProgram(exe, want, dataDir string) (*os.File, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, nodeName)
-	// On macOS a file's ACL is not limited by its group bits, so an old copy could be writable by others even if its
-	// mode and hash pass.
-	// Before each start it is replaced by a new inode, created with O_EXCL in the node folder, which has no allow
-	// entry to inherit.
-	// On Linux the group bits include the ACL mask and the node runs from the checked descriptor, so the copy is
-	// reused.
-	if runtime.GOOS == "linux" {
-		if f, err := checkedPrivateCopy(path, want); err == nil {
-			return f, nil
-		}
-	}
+	// On both Linux and macOS, tightening permissions does not revoke write descriptors held by other users.
+	// Before each start, write a fresh inode with O_EXCL in the private node folder so those descriptors cannot
+	// change the new copy. On macOS the folder has no allow entry to inherit.
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -523,11 +515,10 @@ func dataPathProblem(path string) error {
 	return nil
 }
 
-// The data folder has the stricter rule. Above the shield, a parent folder writable by group or others needs the
-// sticky bit:
-// every folder on the path is owned by root or the user, and the sticky bit keeps other users from renaming or
-// removing entries they do not own.
-func folderProblem(mode os.FileMode, owner, uid uint32, data, shield bool) string {
+// The data folder has the stricter rule. Every parent folder must be owned by root or the user, and any parent
+// writable by group or others needs the sticky bit to prevent other users from renaming or removing entries
+// they do not own. A private ancestor does not revoke access through an existing working directory or descriptor.
+func folderProblem(mode os.FileMode, owner, uid uint32, data bool) string {
 	if !mode.IsDir() {
 		return "must be a directory"
 	}
@@ -543,7 +534,7 @@ func folderProblem(mode os.FileMode, owner, uid uint32, data, shield bool) strin
 	if owner != 0 && owner != uid {
 		return "must be owned by root or the effective user"
 	}
-	if !shield && mode.Perm()&0o022 != 0 && mode&os.ModeSticky == 0 {
+	if mode.Perm()&0o022 != 0 && mode&os.ModeSticky == 0 {
 		return "is writable by group or others without the sticky bit"
 	}
 	return ""
@@ -551,12 +542,11 @@ func folderProblem(mode os.FileMode, owner, uid uint32, data, shield bool) strin
 
 type folderWalk struct {
 	uid             uint32
-	shield          bool
 	writableParents []string
 }
 
 func (w *folderWalk) check(path string, mode os.FileMode, owner uint32, data bool) error {
-	if reason := folderProblem(mode, owner, w.uid, data, w.shield); reason != "" {
+	if reason := folderProblem(mode, owner, w.uid, data); reason != "" {
 		if data {
 			ownership := ""
 			if owner != w.uid {
@@ -581,13 +571,6 @@ func (w *folderWalk) check(path string, mode os.FileMode, owner uint32, data boo
 			return fmt.Errorf("parent folder %s could be changed by other users because it is writable by group or others; run chmod go-w %s or choose another folder with -datadir", quoted[0], quoted[0])
 		}
 		return fmt.Errorf("parent folders %s could be changed by other users because they are writable by group or others; run chmod go-w %s or choose another folder with -datadir", strings.Join(quoted, ", "), strings.Join(quoted, " "))
-	}
-	// A folder owned by the user that gives neither group nor others search permission keeps other users out of
-	// everything below it.
-	// On Linux the group bits are the ACL mask, which limits every named entry; on macOS the caller checks that the
-	// folder has no allow entry before the walk goes on.
-	if owner == w.uid && mode.Perm()&0o011 == 0 {
-		w.shield = true
 	}
 	return nil
 }

@@ -17,49 +17,6 @@ import (
 	"time"
 )
 
-func TestDarwinStartReplacesPrivateCopy(t *testing.T) {
-	t.Setenv("WITNESS_FAKE_NODE", "silent")
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := privateTempDir(t)
-	want := fileHash(t, exe)
-	f, err := prepareNodeProgram(exe, want, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous, err := f.Stat()
-	f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "node", nodeName)
-	// A write ACL on the old inode must not reach the next start through a reused copy.
-	if output, err := exec.Command("/bin/chmod", "+a", "everyone allow write", path).CombinedOutput(); err != nil {
-		t.Fatalf("add write ACL: %v: %s", err, output)
-	}
-	n := newNode(exe, want, dir)
-	for i := 0; i < 3; i++ {
-		func() {
-			cmd := exec.Command(exe, nodeArgs(dir, 1)...)
-			configureNode(cmd)
-			if err := n.startNode(cmd); err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-			current, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if os.SameFile(previous, current) {
-				t.Fatalf("start %d reused the old inode", i+1)
-			}
-			previous = current
-		}()
-	}
-}
-
 func TestLeftoverNodeUnicode(t *testing.T) {
 	t.Setenv("LC_ALL", "C")
 	t.Setenv("COLUMNS", "1")

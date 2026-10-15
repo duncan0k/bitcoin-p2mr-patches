@@ -89,10 +89,10 @@ quarantined, and macOS does not ask.
 **Linux.** It needs 64-bit Linux on x86_64 or aarch64 with glibc 2.35 or later, such as Ubuntu 22.04,
 Debian 12 or Raspberry Pi OS (bookworm), or later releases; the node carries its own C++ runtime. Unpack the
 tarball with `tar -xzf` and run `./ark0-witness` in a terminal. If other users could change a folder above its
-data folder, as with a group-writable `~/.local` in a home folder that others can enter, it stops and prints
-the `chmod` command that fixes it. With a desktop, the page opens in the browser; without one, open the printed
-address in a browser on the same computer, or from another computer through `ssh -L <port>:127.0.0.1:<port>`
-with the same port number, since the page answers only to its own address.
+data folder, as with a group-writable `~/.local`, it stops and prints the `chmod` command that fixes it. With a
+desktop, the page opens in the browser; without one, open the printed address in a browser on the same computer,
+or from another computer through `ssh -L <port>:127.0.0.1:<port>` with the same port number, since the page
+answers only to its own address.
 
 ## Build
 

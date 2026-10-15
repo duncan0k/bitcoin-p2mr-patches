@@ -349,7 +349,7 @@ func TestFolderPermissions(t *testing.T) {
 		{"parent file", 0o700, uid, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if problem := folderProblem(c.mode, c.owner, uid, c.data, false); (problem == "") != c.safe {
+			if problem := folderProblem(c.mode, c.owner, uid, c.data); (problem == "") != c.safe {
 				t.Fatalf("safe=%v: %s", c.safe, problem)
 			}
 		})
@@ -367,7 +367,7 @@ func TestFolderGroupDoesNotMatter(t *testing.T) {
 			{0o775, false},
 			{os.ModeSticky | 0o775, true},
 		} {
-			if reason := folderProblem(os.ModeDir|c.mode, stat.Uid, 1000, false, false); (reason == "") != c.safe {
+			if reason := folderProblem(os.ModeDir|c.mode, stat.Uid, 1000, false); (reason == "") != c.safe {
 				t.Fatalf("gid=%d mode=%v safe=%v: %s", gid, c.mode, c.safe, reason)
 			}
 		}
@@ -411,14 +411,18 @@ func TestFolderWalk(t *testing.T) {
 		t.Fatalf("single parent: %v; want %s", err, want)
 	}
 
-	for _, shield := range []bool{false, true} {
-		walk := folderWalk{uid: uid, shield: shield}
-		err := walk.check("/foreign", os.ModeDir|0o700, uid+1, false)
-		if err == nil || !strings.Contains(err.Error(), "/foreign") {
-			t.Fatalf("foreign owner must fail immediately, shield=%v: %v", shield, err)
-		}
+	walk = folderWalk{uid: uid}
+	if err := walk.check("/private", os.ModeDir|0o700, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	err = walk.check("/private/foreign", os.ModeDir|0o700, uid+1, false)
+	if err == nil || !strings.Contains(err.Error(), "/private/foreign") {
+		t.Fatalf("foreign owner must fail immediately: %v", err)
 	}
 	walk = folderWalk{uid: uid}
+	if err := walk.check("/home/alice", os.ModeDir|0o700, uid, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := walk.check(local, os.ModeDir|0o775, uid, false); err != nil {
 		t.Fatal(err)
 	}
@@ -430,33 +434,11 @@ func TestFolderWalk(t *testing.T) {
 	}
 }
 
-func TestShieldFolderPermissions(t *testing.T) {
-	for _, c := range []struct {
-		name       string
-		mode       os.FileMode
-		owner      uint32
-		data, safe bool
-	}{
-		{"group writable below shield", os.ModeDir | 0o770, 1000, false, true},
-		{"other writable below shield", os.ModeDir | 0o777, 1000, false, true},
-		{"root group writable below shield", os.ModeDir | 0o775, 0, false, true},
-		{"foreign owner below shield", os.ModeDir | 0o700, 1001, false, false},
-		{"data group writable below shield", os.ModeDir | 0o770, 1000, true, false},
-		{"data other writable below shield", os.ModeDir | 0o707, 1000, true, false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			if reason := folderProblem(c.mode, c.owner, 1000, c.data, true); (reason == "") != c.safe {
-				t.Fatalf("safe=%v: %s", c.safe, reason)
-			}
-		})
-	}
-}
-
-func TestFolderWalkShield(t *testing.T) {
+func TestFolderWalkBelowPrivateParent(t *testing.T) {
 	for _, stickyMode := range []os.FileMode{0o770, 0o777} {
 		walk := folderWalk{uid: 1000}
 		if err := walk.check("/tmp", os.ModeDir|os.ModeSticky|stickyMode, 0, false); err != nil {
-			t.Fatalf("sticky parent above shield: %v", err)
+			t.Fatalf("sticky parent: %v", err)
 		}
 		for _, c := range []struct {
 			path string
@@ -464,15 +446,27 @@ func TestFolderWalkShield(t *testing.T) {
 		}{
 			{"/tmp/home", 0o750},
 			{"/tmp/home/private", 0o700},
-			{"/tmp/home/private/group", 0o775},
-			{"/tmp/home/private/group/other", 0o777},
+			{"/tmp/home/private/group", 0o770},
+			{"/tmp/home/private/group/other", 0o707},
 		} {
 			if err := walk.check(c.path, os.ModeDir|c.mode, 1000, false); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := walk.check("/tmp/home/private/group/other/data", os.ModeDir|0o700, 1000, true); err != nil {
-			t.Fatalf("writable parents below shield: %v", err)
+		err := walk.check("/tmp/home/private/group/other/data", os.ModeDir|0o700, 1000, true)
+		command := "chmod go-w '/tmp/home/private/group' '/tmp/home/private/group/other'"
+		if err == nil || !strings.Contains(err.Error(), command) || strings.Count(err.Error(), "chmod") != 1 {
+			t.Fatalf("writable parents below private parent: %v; want one command %s", err, command)
+		}
+		walk = folderWalk{uid: 1000}
+		if err := walk.check("/private", os.ModeDir|0o700, 1000, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := walk.check("/private/sticky", os.ModeDir|os.ModeSticky|stickyMode, 1000, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := walk.check("/private/sticky/data", os.ModeDir|0o700, 1000, true); err != nil {
+			t.Fatalf("sticky parent below private parent: %v", err)
 		}
 	}
 }
@@ -491,7 +485,7 @@ func TestShellFolder(t *testing.T) {
 }
 
 func TestSignetFolder(t *testing.T) {
-	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, true, false); reason == "" {
+	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, true); reason == "" {
 		t.Fatal("accepted a signet folder owned by another uid")
 	}
 	for _, kind := range []string{"symlink", "group writable", "other writable", "file", "safe", "missing"} {
@@ -646,7 +640,6 @@ func TestShippedNodeFIFO(t *testing.T) {
 }
 
 func TestDataFolderBoundary(t *testing.T) {
-	// The outer 0700 folder is a shield: the write permission of the folders inside it is not open to other users.
 	root := filepath.Join(privateTempDir(t), "parent")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -683,8 +676,8 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := dataFolder(alias); err != nil || got != want {
-		t.Fatalf("other writable parent below shield: %q %v", got, err)
+	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(root)) {
+		t.Fatalf("other writable parent below private parent: %v", err)
 	}
 	if err := os.Chmod(root, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
@@ -695,8 +688,8 @@ func TestDataFolderBoundary(t *testing.T) {
 	if err := os.Chmod(root, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := dataFolder(alias); err != nil || got != want {
-		t.Fatalf("group writable parent below shield: %q %v", got, err)
+	if _, err := dataFolder(alias); err == nil || !strings.Contains(err.Error(), "chmod go-w "+shellFolder(root)) {
+		t.Fatalf("group writable parent below private parent: %v", err)
 	}
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
