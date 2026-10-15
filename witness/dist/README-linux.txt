@@ -12,8 +12,9 @@ aarch64 download for 64-bit ARM, such as a Raspberry Pi with the 64-bit system.
      cd ark0-witness-{version}-linux-{arch}
      ./ark0-witness
 2. On a desktop, your browser shows the status page. Otherwise, open the address the program
-   prints in a browser on the same computer. Keep the terminal open: closing it, or pressing
-   Ctrl+C, stops the node.
+   prints in a browser on the same computer. If it stops instead and prints a chmod command
+   for your folders, run that command, then start the program again. Keep the terminal
+   open: closing it, or pressing Ctrl+C, stops the node.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
 applies and the two tripwires, and has your node judge a raw transaction you paste into

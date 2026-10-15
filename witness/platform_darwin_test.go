@@ -27,7 +27,7 @@ func TestDarwinStartReplacesPrivateCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "node", nodeName)
-	// 旧 inode 上的写 ACL 不应随副本复用而进入下一次启动。
+	// A write ACL on the old inode must not reach the next start through a reused copy.
 	if output, err := exec.Command("/bin/chmod", "+a", "everyone allow write", path).CombinedOutput(); err != nil {
 		t.Fatalf("add write ACL: %v: %s", err, output)
 	}

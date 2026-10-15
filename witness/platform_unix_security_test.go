@@ -14,159 +14,147 @@ import (
 )
 
 func TestFolderPermissions(t *testing.T) {
-	const uid, gid = uint32(1000), uint32(1000)
+	const uid = uint32(1000)
 	for _, c := range []struct {
-		name         string
-		mode         os.FileMode
-		owner, group uint32
-		data, safe   bool
+		name       string
+		mode       os.FileMode
+		owner      uint32
+		data, safe bool
 	}{
-		{"private data", os.ModeDir | 0o700, uid, gid, true, true},
-		{"readable data", os.ModeDir | 0o755, uid, gid, true, true},
-		{"root data", os.ModeDir | 0o700, 0, gid, true, false},
-		{"foreign data", os.ModeDir | 0o700, uid + 1, gid, true, false},
-		{"group writable data", os.ModeDir | 0o770, uid, gid, true, false},
-		{"sticky data", os.ModeDir | os.ModeSticky | 0o777, uid, gid, true, false},
-		{"other writable data", os.ModeDir | 0o702, uid, gid, true, false},
-		{"data file", 0o700, uid, gid, true, false},
-		{"root parent", os.ModeDir | 0o755, 0, 0, false, true},
-		{"private parent", os.ModeDir | 0o700, uid, gid, false, true},
-		{"foreign parent", os.ModeDir | 0o755, uid + 1, gid, false, false},
-		{"user private group", os.ModeDir | 0o775, uid, gid, false, true},
-		{"foreign group", os.ModeDir | 0o775, uid, gid + 1, false, false},
-		{"root group writable", os.ModeDir | 0o775, 0, gid, false, false},
-		{"other writable parent", os.ModeDir | 0o777, uid, gid, false, false},
-		{"sticky root parent", os.ModeDir | os.ModeSticky | 0o777, 0, 0, false, true},
-		{"sticky user parent", os.ModeDir | os.ModeSticky | 0o777, uid, gid, false, true},
-		{"sticky foreign parent", os.ModeDir | os.ModeSticky | 0o777, uid + 1, gid, false, false},
-		{"sticky foreign group only", os.ModeDir | os.ModeSticky | 0o770, uid, gid + 1, false, false},
-		{"parent file", 0o700, uid, gid, false, false},
+		{"private data", os.ModeDir | 0o700, uid, true, true},
+		{"readable data", os.ModeDir | 0o755, uid, true, true},
+		{"root data", os.ModeDir | 0o700, 0, true, false},
+		{"foreign data", os.ModeDir | 0o700, uid + 1, true, false},
+		{"group writable data", os.ModeDir | 0o770, uid, true, false},
+		{"sticky data", os.ModeDir | os.ModeSticky | 0o777, uid, true, false},
+		{"other writable data", os.ModeDir | 0o702, uid, true, false},
+		{"data file", 0o700, uid, true, false},
+		{"root parent", os.ModeDir | 0o755, 0, false, true},
+		{"private parent", os.ModeDir | 0o700, uid, false, true},
+		{"foreign parent", os.ModeDir | 0o755, uid + 1, false, false},
+		{"group writable parent", os.ModeDir | 0o775, uid, false, false},
+		{"root group writable", os.ModeDir | 0o775, 0, false, false},
+		{"other writable parent", os.ModeDir | 0o777, uid, false, false},
+		{"sticky root parent", os.ModeDir | os.ModeSticky | 0o777, 0, false, true},
+		{"sticky user parent", os.ModeDir | os.ModeSticky | 0o777, uid, false, true},
+		{"sticky foreign parent", os.ModeDir | os.ModeSticky | 0o777, uid + 1, false, false},
+		{"sticky group writable parent", os.ModeDir | os.ModeSticky | 0o770, uid, false, true},
+		{"parent file", 0o700, uid, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if problem := folderProblem(c.mode, c.owner, c.group, uid, gid, c.data, true, false, false); (problem == "") != c.safe {
+			if problem := folderProblem(c.mode, c.owner, uid, c.data, false); (problem == "") != c.safe {
 				t.Fatalf("safe=%v: %s", c.safe, problem)
 			}
 		})
 	}
 }
 
-func TestUserPrivateGroup(t *testing.T) {
-	for _, c := range []struct {
-		name, username, groupname string
-		members                   []string
-		acl, safe                 bool
-	}{
-		{"empty private group", "alice", "alice", nil, false, true},
-		{"self member", "alice", "alice", []string{"alice"}, false, true},
-		{"shared staff", "alice", "staff", nil, false, false},
-		{"shared users", "alice", "users", []string{"alice", "bob"}, false, false},
-		{"extra member", "alice", "alice", []string{"alice", "bob"}, false, false},
-		{"different name", "alice", "other", nil, false, false},
-		{"lookup failed", "", "", nil, false, false},
-		{"Linux access ACL", "alice", "alice", nil, true, false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			private := privateGroupMembers(c.username, c.groupname, c.members)
-			problem := folderProblem(os.ModeDir|0o770, 1000, 1000, 1000, 1000, false, private, c.acl, false)
-			if (problem == "") != c.safe {
-				t.Fatalf("safe=%v: %s", c.safe, problem)
+func TestFolderGroupDoesNotMatter(t *testing.T) {
+	for _, gid := range []uint32{0, 1000, 1001} {
+		stat := syscall.Stat_t{Uid: 1000, Gid: gid}
+		for _, c := range []struct {
+			mode os.FileMode
+			safe bool
+		}{
+			{0o755, true},
+			{0o775, false},
+			{os.ModeSticky | 0o775, true},
+		} {
+			if reason := folderProblem(os.ModeDir|c.mode, stat.Uid, 1000, false, false); (reason == "") != c.safe {
+				t.Fatalf("gid=%d mode=%v safe=%v: %s", gid, c.mode, c.safe, reason)
 			}
-		})
+		}
 	}
 }
 
-func TestPrivateGroupAccountFiles(t *testing.T) {
-	const passwd = "alice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n"
-	const group = "alice:x:1000:alice\nbob:x:1001:\n"
+func TestFolderWalk(t *testing.T) {
+	const uid = uint32(1000)
+	local := "/home/alice/.local"
+	share := local + "/share"
+	walk := folderWalk{uid: uid}
 	for _, c := range []struct {
-		name, nsswitch, passwd, group, missing string
-		safe                                   bool
+		path string
+		mode os.FileMode
 	}{
-		{"private", "passwd: files systemd\ngroup: files systemd\n", passwd, group, "", true},
-		{"empty members", "passwd: files\ngroup: files\n", passwd, "alice:x:1000:\n", "", true},
-		{"actions and comments", "passwd: files [NOTFOUND=return SUCCESS=continue] systemd # local\ngroup: files [SUCCESS=return]\n", passwd, group, "", true},
-		{"shared primary GID", "passwd: files\ngroup: files\n", passwd + "eve:x:1002:1000::/home/eve:/bin/sh\n", group, "", false},
-		{"same name different UID", "passwd: files\ngroup: files\n", passwd + "alice:x:1002:1000::/home/eve:/bin/sh\n", group, "", false},
-		{"same UID different name", "passwd: files\ngroup: files\n", passwd + "eve:x:1000:1000::/home/eve:/bin/sh\n", group, "", false},
-		{"group alias", "passwd: files\ngroup: files\n", passwd, group + "alias:x:1000:\n", "", false},
-		{"extra member", "passwd: files\ngroup: files\n", passwd, "alice:x:1000:alice,eve\n", "", false},
-		{"ldap passwd", "passwd: files ldap\ngroup: files\n", passwd, group, "", false},
-		{"sss group", "passwd: files\ngroup: files sss\n", passwd, group, "", false},
-		{"missing nsswitch", "", passwd, group, "/etc/nsswitch.conf", false},
-		{"missing passwd", "passwd: files\ngroup: files\n", "", group, "/etc/passwd", false},
-		{"missing group", "passwd: files\ngroup: files\n", passwd, "", "/etc/group", false},
-		{"NIS passwd include", "passwd: files\ngroup: files\n", passwd + "+::::::\n", group, "", false},
-		{"NIS passwd exclude", "passwd: files\ngroup: files\n", passwd + "-eve::::::\n", group, "", false},
-		{"NIS group include", "passwd: files\ngroup: files\n", passwd, group + "+:::\n", "", false},
-		{"NIS group exclude", "passwd: files\ngroup: files\n", passwd, group + "-eve:::\n", "", false},
-		{"bad passwd fields", "passwd: files\ngroup: files\n", passwd + "bad\n", group, "", false},
-		{"bad passwd UID", "passwd: files\ngroup: files\n", passwd + "eve:x:bad:1001::/:/bin/sh\n", group, "", false},
-		{"bad passwd GID", "passwd: files\ngroup: files\n", passwd + "eve:x:1002:bad::/:/bin/sh\n", group, "", false},
-		{"bad group fields", "passwd: files\ngroup: files\n", passwd, group + "bad\n", "", false},
-		{"bad group GID", "passwd: files\ngroup: files\n", passwd, group + "eve:x:bad:\n", "", false},
-		{"missing own passwd", "passwd: files\ngroup: files\n", "bob:x:1001:1001::/:/bin/sh\n", group, "", false},
-		{"missing own group", "passwd: files\ngroup: files\n", passwd, "bob:x:1001:\n", "", false},
-		{"missing group sources", "passwd: files\n", passwd, group, "", false},
-		{"empty passwd sources", "passwd:\ngroup: files\n", passwd, group, "", false},
-		{"bad action", "passwd: files [NOTFOUND=return\ngroup: files\n", passwd, group, "", false},
-		{"duplicate sources", "passwd: files\npasswd: ldap\ngroup: files\n", passwd, group, "", false},
+		{"/home/alice", 0o750},
+		{local, 0o775},
+		{share, 0o775},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			files := map[string]string{"/etc/nsswitch.conf": c.nsswitch, "/etc/passwd": c.passwd, "/etc/group": c.group}
-			read := func(path string) ([]byte, error) {
-				if path == c.missing {
-					return nil, os.ErrNotExist
-				}
-				text, ok := files[path]
-				if !ok {
-					t.Fatalf("unexpected account file %q", path)
-				}
-				return []byte(text), nil
-			}
-			private := userPrivateGroupFromFiles("alice", 1000, 1000, read)
-			if private != c.safe {
-				t.Fatalf("private=%v, want %v", private, c.safe)
-			}
-			// 位于屏障上方的组可写目录必须通过完整的私有组证明。
-			if problem := folderProblem(os.ModeDir|0o770, 1000, 1000, 1000, 1000, false, private, false, false); (problem == "") != c.safe {
-				t.Fatalf("group writable above shield: %s", problem)
-			}
-		})
+		if err := walk.check(c.path, os.ModeDir|c.mode, uid, false); err != nil {
+			t.Fatalf("must collect unsafe parents until the data folder: %v", err)
+		}
 	}
-	for _, path := range []string{"/etc/nsswitch.conf", "/etc/passwd", "/etc/group"} {
-		t.Run("unreadable "+path, func(t *testing.T) {
-			read := func(name string) ([]byte, error) {
-				if name == path {
-					return nil, os.ErrPermission
-				}
-				return []byte(map[string]string{"/etc/nsswitch.conf": "passwd: files\ngroup: files\n", "/etc/passwd": passwd, "/etc/group": group}[name]), nil
-			}
-			if userPrivateGroupFromFiles("alice", 1000, 1000, read) {
-				t.Fatal("unreadable account database was accepted")
-			}
-		})
+	err := walk.check(share+"/data", os.ModeDir|0o700, uid, true)
+	command := "chmod go-w " + shellFolder(local) + " " + shellFolder(share)
+	if err == nil || !strings.Contains(err.Error(), command) || strings.Count(err.Error(), "chmod") != 1 ||
+		!strings.Contains(err.Error(), "could be changed by other users because they are writable by group or others") ||
+		!strings.Contains(err.Error(), "-datadir") {
+		t.Fatalf("unsafe parents: %v; want one command %s", err, command)
+	}
+
+	for _, shield := range []bool{false, true} {
+		walk := folderWalk{uid: uid, shield: shield}
+		err := walk.check("/foreign", os.ModeDir|0o700, uid+1, false)
+		if err == nil || !strings.Contains(err.Error(), "/foreign") {
+			t.Fatalf("foreign owner must fail immediately, shield=%v: %v", shield, err)
+		}
+	}
+	walk = folderWalk{uid: uid}
+	if err := walk.check(local, os.ModeDir|0o775, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	err = walk.check("/root-parent", os.ModeDir|0o775, 0, false)
+	if err == nil || !strings.Contains(err.Error(), "/root-parent") ||
+		!strings.Contains(err.Error(), "other users could change it") ||
+		!strings.Contains(err.Error(), "-datadir") || strings.Contains(err.Error(), "chmod") {
+		t.Fatalf("root parent must fail immediately without chmod advice: %v", err)
 	}
 }
 
 func TestShieldFolderPermissions(t *testing.T) {
 	for _, c := range []struct {
-		name         string
-		mode         os.FileMode
-		owner, group uint32
-		data, safe   bool
+		name       string
+		mode       os.FileMode
+		owner      uint32
+		data, safe bool
 	}{
-		{"group writable below shield", os.ModeDir | 0o770, 1000, 1001, false, true},
-		{"other writable below shield", os.ModeDir | 0o777, 1000, 1001, false, true},
-		{"root group writable below shield", os.ModeDir | 0o775, 0, 0, false, true},
-		{"foreign owner below shield", os.ModeDir | 0o700, 1001, 1000, false, false},
-		{"data group writable below shield", os.ModeDir | 0o770, 1000, 1000, true, false},
-		{"data other writable below shield", os.ModeDir | 0o707, 1000, 1000, true, false},
+		{"group writable below shield", os.ModeDir | 0o770, 1000, false, true},
+		{"other writable below shield", os.ModeDir | 0o777, 1000, false, true},
+		{"root group writable below shield", os.ModeDir | 0o775, 0, false, true},
+		{"foreign owner below shield", os.ModeDir | 0o700, 1001, false, false},
+		{"data group writable below shield", os.ModeDir | 0o770, 1000, true, false},
+		{"data other writable below shield", os.ModeDir | 0o707, 1000, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if reason := folderProblem(c.mode, c.owner, c.group, 1000, 1000, c.data, false, true, true); (reason == "") != c.safe {
+			if reason := folderProblem(c.mode, c.owner, 1000, c.data, true); (reason == "") != c.safe {
 				t.Fatalf("safe=%v: %s", c.safe, reason)
 			}
 		})
+	}
+}
+
+func TestFolderWalkShield(t *testing.T) {
+	for _, stickyMode := range []os.FileMode{0o770, 0o777} {
+		walk := folderWalk{uid: 1000}
+		if err := walk.check("/tmp", os.ModeDir|os.ModeSticky|stickyMode, 0, false); err != nil {
+			t.Fatalf("sticky parent above shield: %v", err)
+		}
+		for _, c := range []struct {
+			path string
+			mode os.FileMode
+		}{
+			{"/tmp/home", 0o750},
+			{"/tmp/home/private", 0o700},
+			{"/tmp/home/private/group", 0o775},
+			{"/tmp/home/private/group/other", 0o777},
+		} {
+			if err := walk.check(c.path, os.ModeDir|c.mode, 1000, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := walk.check("/tmp/home/private/group/other/data", os.ModeDir|0o700, 1000, true); err != nil {
+			t.Fatalf("writable parents below shield: %v", err)
+		}
 	}
 }
 
@@ -184,7 +172,7 @@ func TestShellFolder(t *testing.T) {
 }
 
 func TestSignetFolder(t *testing.T) {
-	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, 1000, 1000, true, false, false, false); reason == "" {
+	if reason := folderProblem(os.ModeDir|0o700, 1001, 1000, true, false); reason == "" {
 		t.Fatal("accepted a signet folder owned by another uid")
 	}
 	for _, kind := range []string{"symlink", "group writable", "other writable", "file", "safe", "missing"} {
@@ -288,6 +276,28 @@ func TestCookieFiles(t *testing.T) {
 	}
 }
 
+func TestCookiePermissions(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o600} {
+		t.Run(strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			path := filepath.Join(privateTempDir(t), ".cookie")
+			writeTestFile(t, path, "cookie", 0o600)
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+			data, err := readCookie(path)
+			if mode == 0o600 {
+				if err != nil || string(data) != "cookie" {
+					t.Fatalf("private cookie: %q %v", data, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), path) ||
+				!strings.Contains(err.Error(), "could be read by other users") ||
+				!strings.Contains(err.Error(), "remove it and let the node recreate it") {
+				t.Fatalf("readable cookie: %q %v", data, err)
+			}
+		})
+	}
+}
+
 func TestShippedNodeFIFO(t *testing.T) {
 	path := filepath.Join(privateTempDir(t), nodeName)
 	if err := syscall.Mkfifo(path, 0o700); err != nil {
@@ -317,7 +327,7 @@ func TestShippedNodeFIFO(t *testing.T) {
 }
 
 func TestDataFolderBoundary(t *testing.T) {
-	// 外层 0700 目录提供屏障，内层父目录的写权限不会再暴露给其他用户。
+	// The outer 0700 folder is a shield: the write permission of the folders inside it is not open to other users.
 	root := filepath.Join(privateTempDir(t), "parent")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)

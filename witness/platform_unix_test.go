@@ -204,7 +204,7 @@ func TestEarlierWitnessHelper(t *testing.T) {
 	cmd := exec.Command(exe, nodeArgs(dir, 1)...)
 	cmd.Env = append(os.Environ(), "WITNESS_FAKE_NODE=orphan")
 	configureNode(cmd)
-	// 仅此测试辅助进程移除 Pdeathsig，让 SIGKILL 留下真实孤儿；正式启动仍保留它。
+	// Only this test helper drops Pdeathsig, so that SIGKILL leaves a real orphan; the program's own start keeps it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := n.startNode(cmd); err != nil {
 		t.Fatal(err)

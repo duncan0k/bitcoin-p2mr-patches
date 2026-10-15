@@ -16,8 +16,6 @@ import (
 	"time"
 )
 
-func folderHasAccessACL(string) (bool, error) { return false, nil }
-
 func checkFolderACL(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -36,7 +34,7 @@ func checkFolderACL(path string) error {
 var folderACLHeader = regexp.MustCompile(`^d[rwxstST-]{9}[+@]?\s+[0-9]+\s+\S.+$`)
 var folderACLEntry = regexp.MustCompile(`^\s+([0-9]+): (user|group):.+ (allow|deny) [a-z_]+(,[a-z_]+)*$`)
 
-// 只接受完整的目录行及顺序编号的 deny 条目；意外输出必须拒绝。
+// Only the folder's own line followed by deny entries numbered in order is accepted; any other output is refused.
 func folderACLProblem(output string) error {
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	if len(lines) == 0 || !folderACLHeader.MatchString(lines[0]) {
@@ -50,7 +48,7 @@ func folderACLProblem(output string) error {
 		return errors.New("cannot parse ls folder size")
 	}
 	for i, line := range lines[1:] {
-		// ls 把继承标记放在 allow/deny 前面；也不能让名称中的 allow 掩盖授权。
+		// ls prints inheritance flags before allow or deny, so every field is checked: no name can hide an allow entry.
 		for _, field := range strings.Fields(line) {
 			if field == "allow" {
 				return errors.New("contains an allow access control entry")
@@ -111,7 +109,8 @@ func processExecutable(pid int) (string, error) {
 	if errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil {
 		return "", nil
 	}
-	// 同整个设计一样，此检查信任同一用户的进程；仅去掉 ps 的输出换行，完整路径必须精确相等。
+	// Like the whole design, this check trusts processes of the same user. Only the newline that ps adds is removed:
+	// the full path must match exactly.
 	return strings.TrimSuffix(string(data), "\n"), err
 }
 
@@ -123,7 +122,8 @@ func stopRecordedNode(pid int, expected, message string) error {
 		return err
 	}
 	fmt.Println(message)
-	// macOS 没有 pidfd：发信号前再次检查，仍有在这一瞬间 PID 被重用的风险。
+	// macOS has no pidfd: the check is repeated just before the signal, which still leaves that instant for the PID to
+	// be reused.
 	image, err = processExecutable(pid)
 	if err != nil || image != expected {
 		return err

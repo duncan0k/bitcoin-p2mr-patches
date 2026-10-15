@@ -14,14 +14,19 @@ import (
 	"unsafe"
 )
 
-func checkFolderACL(string) error { return nil }
-
-func folderHasAccessACL(path string) (bool, error) {
-	_, err := syscall.Getxattr(path, "system.posix_acl_access", nil)
-	if errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.ENOTSUP) {
-		return false, nil
+func checkFolderACL(path string) error {
+	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
+		_, err := syscall.Getxattr(path, name, nil)
+		if errors.Is(err, syscall.ENODATA) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) {
+			continue
+		}
+		advice := fmt.Sprintf("folder %q has an unsafe or unreadable POSIX ACL; other users could be given access to what the node writes there; run setfacl -b -k %s or choose another folder with -datadir", path, shellFolder(path))
+		if err != nil {
+			return fmt.Errorf("%s: %w", advice, err)
+		}
+		return errors.New(advice)
 	}
-	return err == nil, err
+	return nil
 }
 
 func defaultDataHome() (string, error) {
@@ -39,7 +44,8 @@ func configureNode(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
 }
 
-// 继承的只读描述符确保执行已检查的文件；节点保留自己的程序描述符是无害的。
+// The inherited read-only descriptor makes the node run the file that was checked; that the node keeps a
+// descriptor of its own program is harmless.
 func runCheckedCopy(cmd *exec.Cmd, f *os.File) error {
 	path := "/proc/self/fd/" + strconv.FormatUint(uint64(f.Fd()), 10)
 	info, err := os.Stat(path)
@@ -71,7 +77,8 @@ func openBrowser(url string) error {
 }
 
 func stopRecordedNode(pid int, expected, message string) error {
-	// 先取得 pidfd，再查程序路径；之后只通过该句柄发送信号及等待，避免 PID 重用。
+	// Take a pidfd first, then check the program path; from then on, signal and wait only through that handle, so that
+	// a reused PID cannot be hit.
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return err
@@ -94,7 +101,8 @@ func stopRecordedNode(pid int, expected, message string) error {
 }
 
 func waitLeftoverNode(p *os.Process, timeout time.Duration) error {
-	// 孤儿不是本进程的子进程，Wait 会返回 ECHILD；poll pidfd 可等待实际退出（包括 zombie）。
+	// The orphan is not a child of this process, so Wait would return ECHILD; polling the pidfd waits for its actual
+	// exit (a zombie included).
 	var waitErr error
 	err := p.WithHandle(func(handle uintptr) {
 		poll := struct {
