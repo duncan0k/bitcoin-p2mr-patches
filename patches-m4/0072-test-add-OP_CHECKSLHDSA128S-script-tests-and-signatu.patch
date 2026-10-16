@@ -1,5 +1,5 @@
-From 2a83ae3e1902efdb5d0e4baaf50f3de9c65495bb Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 5645bdc23c30e3fe471802e4732e6da616a3d11d Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 72/77] test: add OP_CHECKSLHDSA128S script tests and signature
  message vectors
@@ -11,10 +11,11 @@ interpreter computes. Every spend is checked with the plain checker,
 through DeferringSignatureChecker, and with the caching checker of block
 validation, which must agree.
 
-- The parameters: Ark-0 does not activate the rules at any height,
-  ARK0_SLHDSA128S_HEIGHT is std::numeric_limits<int>::max() (setting it
-  at release changes this test on purpose), other signets and the public
-  chains never activate them, regtest does from genesis or where
+- The parameters: Ark-0 activates the rules at height 32000, and the
+  script flags of its blocks at heights 31999 and 32000 differ by exactly
+  SCRIPT_VERIFY_P2MR_SLHDSA128S (and the deployment is reported active
+  for a tip at 31999, not at 31998); other signets and the public chains
+  never activate them, regtest does from genesis or where
   -testactivationheight says, and -signetslhdsa128s with every way it is
   refused.
 - The signature messages of 11 cases, against those of the functional
@@ -25,7 +26,7 @@ validation, which must agree.
   annex; a check after OP_CODESEPARATOR.
 - Failures: a signature for the other leaf version, another hash type
   byte, another annex or none, key_version 0, 1 and 3, the empty context
-  string and those of M1 and M4-B, the internal interface and
+  string and those of OP_CHECKMLDSA44 and a block signature, the internal interface and
   HashSLH-DSA, a flipped bit in each part of the signature, PK.seed or
   PK.root changed; the stack, chunk, key and hash type rules and the
   order in which they are checked; sixteen empty chunks push false, and
@@ -33,8 +34,7 @@ validation, which must agree.
 - The validation weight: a leaf whose budget its checks use up exactly
   passes, one byte of witness less fails, and empty signatures use none.
   The number of checks and the padding follow from
-  VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, so that the provisional value
-  can change without touching the test.
+  VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK (two checks at 5000).
 - Where the byte is not the opcode: before activation, in P2TR, in
   legacy and witness v0 scripts, at depth zero, inside pushed data, next
   to another OP_SUCCESSx, in a branch that does not execute.
@@ -42,10 +42,10 @@ validation, which must agree.
   not call the library; the relay template.
 ---
  src/test/CMakeLists.txt                       |   2 +
- src/test/data/p2mr_slhdsa128s_sighash.json    | 145 ++++
- src/test/p2mr_slhdsa128s_tests.cpp            | 801 ++++++++++++++++++
- test/util/generate_p2mr_slhdsa128s_sighash.py | 100 +++
- 4 files changed, 1048 insertions(+)
+ src/test/data/p2mr_slhdsa128s_sighash.json    | 145 +++
+ src/test/p2mr_slhdsa128s_tests.cpp            | 853 ++++++++++++++++++
+ test/util/generate_p2mr_slhdsa128s_sighash.py | 100 ++
+ 4 files changed, 1100 insertions(+)
  create mode 100644 src/test/data/p2mr_slhdsa128s_sighash.json
  create mode 100644 src/test/p2mr_slhdsa128s_tests.cpp
  create mode 100644 test/util/generate_p2mr_slhdsa128s_sighash.py
@@ -223,11 +223,11 @@ index 0000000..3d4d55c
 +]
 diff --git a/src/test/p2mr_slhdsa128s_tests.cpp b/src/test/p2mr_slhdsa128s_tests.cpp
 new file mode 100644
-index 0000000..f722c48
+index 0000000..cf7af49
 --- /dev/null
 +++ b/src/test/p2mr_slhdsa128s_tests.cpp
-@@ -0,0 +1,801 @@
-+// Copyright (c) 2026 CipherScope
+@@ -0,0 +1,853 @@
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -239,9 +239,12 @@ index 0000000..f722c48
 +#include <common/args.h>
 +#include <consensus/params.h>
 +#include <crypto/slhdsa128s.h>
++#include <dbwrapper.h>
 +#include <deploymentstatus.h>
 +#include <hash.h>
 +#include <kernel/chainparams.h>
++#include <kernel/notifications_interface.h>
++#include <node/blockstorage.h>
 +#include <policy/policy.h>
 +#include <primitives/transaction.h>
 +#include <pubkey.h>
@@ -259,6 +262,7 @@ index 0000000..f722c48
 +#include <uint256.h>
 +#include <util/chaintype.h>
 +#include <util/strencodings.h>
++#include <validation.h>
 +
 +#include <univalue.h>
 +
@@ -449,22 +453,71 @@ index 0000000..f722c48
 +
 +BOOST_FIXTURE_TEST_SUITE(p2mr_slhdsa128s_tests, BasicTestingSetup)
 +
-+// The height is a rule of the Ark-0 network, fixed in the code, and not set yet: this build must
-+// not activate M4-S on Ark-0 at any height. Setting ARK0_SLHDSA128S_HEIGHT at release changes this
-+// test on purpose.
-+BOOST_AUTO_TEST_CASE(ark0_not_active)
++// The height is a rule of the Ark-0 network, fixed in the code at 32000, above the height of
++// the tripwire rules; it covers OP_CHECKSLHDSA128S only.
++BOOST_AUTO_TEST_CASE(ark0_activation_height)
 +{
-+    BOOST_CHECK_EQUAL(ARK0_SLHDSA128S_HEIGHT, NEVER);
++    static_assert(ARK0_SLHDSA128S_HEIGHT == 32000);
++    static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT);
 +    CChainParams::SigNetOptions options;
 +    options.challenge = ParseHex(ARK0_CHALLENGE);
 +    const auto ark0{CChainParams::SigNet(options)};
-+    BOOST_CHECK_EQUAL(ark0->GetConsensus().P2MRSLHDSA128SHeight, ARK0_SLHDSA128S_HEIGHT);
-+    // So the deployment is not enabled at all, and no block has the flag.
-+    BOOST_CHECK(!DeploymentEnabled(ark0->GetConsensus(), Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
-+    BOOST_CHECK_EQUAL(ark0->GetConsensus().DeploymentHeight(Consensus::DEPLOYMENT_P2MR_SLHDSA128S), NEVER);
-+    // The rules of M1 to M3 on Ark-0 are as they were.
-+    BOOST_CHECK_EQUAL(ark0->GetConsensus().P2MRMLDSA44Height, ARK0_MLDSA44_HEIGHT);
-+    BOOST_CHECK_EQUAL(ark0->GetConsensus().P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
++    const Consensus::Params& consensus{ark0->GetConsensus()};
++    BOOST_CHECK_EQUAL(consensus.P2MRSLHDSA128SHeight, 32000);
++    BOOST_CHECK(DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
++    BOOST_CHECK_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_P2MR_SLHDSA128S), 32000);
++    // The earlier P2MR rules of Ark-0 (OP_CHECKMLDSA44, the tripwire leaves) keep their heights.
++    BOOST_CHECK_EQUAL(consensus.P2MRMLDSA44Height, ARK0_MLDSA44_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
++
++    // The script flags of blocks at heights 31999 and 32000 on Ark-0 differ by exactly
++    // SCRIPT_VERIFY_P2MR_SLHDSA128S. GetBlockScriptFlags only reads the block's height and hash
++    // and the chain parameters, so two block index entries do.
++    kernel::Notifications notifications{};
++    const ChainstateManager::Options chainman_opts{
++        .chainparams = *ark0,
++        .datadir = m_args.GetDataDirNet(),
++        .notifications = notifications,
++    };
++    const node::BlockManager::Options blockman_opts{
++        .chainparams = *ark0,
++        .blocks_dir = m_args.GetBlocksDirPath(),
++        .notifications = notifications,
++        .block_tree_db_params = DBParams{
++            .path = m_args.GetDataDirNet() / "blocks" / "index",
++            .cache_bytes = 1 << 20,
++            .memory_only = true,
++        },
++    };
++    ChainstateManager chainman{m_interrupt, chainman_opts, blockman_opts};
++    const uint256 hash_below{1}, hash_at{2};
++    CBlockIndex below;
++    below.nHeight = ARK0_SLHDSA128S_HEIGHT - 1;
++    below.phashBlock = &hash_below;
++    CBlockIndex at;
++    at.nHeight = ARK0_SLHDSA128S_HEIGHT;
++    at.pprev = &below;
++    at.phashBlock = &hash_at;
++    const script_verify_flags flags_below{GetBlockScriptFlags(below, chainman)};
++    const script_verify_flags flags_at{GetBlockScriptFlags(at, chainman)};
++    BOOST_CHECK(!(flags_below & SCRIPT_VERIFY_P2MR_SLHDSA128S));
++    BOOST_CHECK(flags_at & SCRIPT_VERIFY_P2MR_SLHDSA128S);
++    BOOST_CHECK(flags_at == (flags_below | SCRIPT_VERIFY_P2MR_SLHDSA128S));
++    // What getdeploymentinfo reports as "active" for a tip is whether the rules apply to the next
++    // block: false with the tip at 31998, true with the tip at 31999.
++    const uint256 hash_before{3};
++    CBlockIndex before;
++    before.nHeight = ARK0_SLHDSA128S_HEIGHT - 2;
++    before.phashBlock = &hash_before;
++    below.pprev = &before;
++    BOOST_CHECK(!DeploymentActiveAfter(&before, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
++    BOOST_CHECK(DeploymentActiveAfter(&below, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
++    BOOST_CHECK(DeploymentActiveAt(at, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
++    BOOST_CHECK(!DeploymentActiveAt(below, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S));
++    // Both have the rules of P2MR, OP_CHECKMLDSA44 and the tripwire leaves, active far below.
++    for (const auto flag : {SCRIPT_VERIFY_P2MR, SCRIPT_VERIFY_P2MR_MLDSA44, SCRIPT_VERIFY_P2MR_TRIPWIRE}) {
++        BOOST_CHECK(flags_below & flag);
++    }
 +}
 +
 +BOOST_AUTO_TEST_CASE(other_chains)
@@ -557,14 +610,14 @@ index 0000000..f722c48
 +    BOOST_CHECK_EQUAL(without_message, 3);
 +}
 +
-+// Valid spends of SLH1 (4S-1 to 4S-11): in leaf versions 0xc0 and 0xe0, with every hash type.
++// Valid spends of SLH1: in leaf versions 0xc0 and 0xe0, with every hash type.
 +BOOST_AUTO_TEST_CASE(valid_spends)
 +{
 +    for (const uint8_t leaf_version : {TAPROOT_LEAF_TAPSCRIPT, P2MR_LEAF_TRIPWIRED}) {
 +        const P2MRSpend spend{SLH1(Key().pubkey), leaf_version};
 +        const valtype sig{SignMessage(*spend.Message())};
 +        CHECK_ERR(spend.Verify(Chunks(sig), ACTIVE), SCRIPT_ERR_OK);
-+        // A tripwire output missing (SCRIPT_VERIFY_P2MR_EC_DISABLED) does not affect it (4S-13).
++        // A tripwire output missing (SCRIPT_VERIFY_P2MR_EC_DISABLED) does not affect it.
 +        CHECK_ERR(spend.Verify(Chunks(sig), ACTIVE | SCRIPT_VERIFY_P2MR_EC_DISABLED), SCRIPT_ERR_OK);
 +        // A signature for one leaf version does not spend the other (the tapleaf hash commits to it).
 +        const uint8_t other_version{leaf_version == TAPROOT_LEAF_TAPSCRIPT ? P2MR_LEAF_TRIPWIRED : TAPROOT_LEAF_TAPSCRIPT};
@@ -595,7 +648,7 @@ index 0000000..f722c48
 +    }
 +}
 +
-+// The annex and OP_CODESEPARATOR are committed to (4S-10).
++// The annex and OP_CODESEPARATOR are committed to.
 +BOOST_AUTO_TEST_CASE(annex_and_codeseparator)
 +{
 +    const valtype annex{ANNEX_TAG, 0x01, 0x02, 0x03};
@@ -618,8 +671,8 @@ index 0000000..f722c48
 +    CHECK_ERR(codesep.Verify(Chunks(SignMessage(*codesep.Message())), ACTIVE), SCRIPT_ERR_SLHDSA128S_SIG);
 +}
 +
-+// The message is that of key_version 2 (4S-10) and the signature is pure SLH-DSA with the context
-+// string "P2MR/SLHDSA128S/EXP0" (4S-11): every other domain fails.
++// The message is that of key_version 2 and the signature is pure SLH-DSA with the context
++// string "P2MR/SLHDSA128S/EXP0": every other domain fails.
 +BOOST_AUTO_TEST_CASE(domain_separation)
 +{
 +    const P2MRSpend spend{SLH1(Key().pubkey)};
@@ -635,7 +688,7 @@ index 0000000..f722c48
 +}
 +
 +// A valid signature with one bit flipped, in each part of it, and a key with PK.seed or PK.root
-+// changed, fail the script (4S-11): not push false.
++// changed, fail the script: not push false.
 +BOOST_AUTO_TEST_CASE(modified_signature_and_key)
 +{
 +    const P2MRSpend spend{SLH1(Key().pubkey)};
@@ -664,7 +717,7 @@ index 0000000..f722c48
 +    }
 +}
 +
-+// The sizes of the sixteen chunks and of the key (4S-4, 4S-6, 4S-7, 4S-8), the hash type (4S-9) and
++// The sizes of the sixteen chunks and of the key, the hash type and
 +// the order the checks run in.
 +BOOST_AUTO_TEST_CASE(encoding)
 +{
@@ -672,7 +725,7 @@ index 0000000..f722c48
 +    const valtype sig{SignMessage(*spend.Message())};
 +    const std::vector<valtype> good{Chunks(sig)};
 +
-+    // Sixteen empty chunks: no signature, which pushes false (4S-7) and charges nothing.
++    // Sixteen empty chunks: no signature, which pushes false and charges nothing.
 +    const std::vector<valtype> empty(SLHDSA128S_SIG_CHUNK_COUNT);
 +    CHECK_ERR(spend.Verify(empty, ACTIVE), SCRIPT_ERR_EVAL_FALSE);
 +    const P2MRSpend negated{CScript{} << ToByteVector(Key().pubkey) << OP_CHECKSLHDSA128S << OP_NOT};
@@ -682,7 +735,7 @@ index 0000000..f722c48
 +    bad[100] ^= 1;
 +    CHECK_ERR(negated.Verify(Chunks(bad), ACTIVE), SCRIPT_ERR_SLHDSA128S_SIG);
 +
-+    // Fewer than seventeen elements with the key (4S-4).
++    // Fewer than seventeen elements with the key.
 +    CHECK_ERR(spend.Verify({good.begin() + 1, good.end()}, ACTIVE), SCRIPT_ERR_INVALID_STACK_OPERATION);
 +    CHECK_ERR(spend.Verify({}, ACTIVE), SCRIPT_ERR_INVALID_STACK_OPERATION);
 +    // One more is left on the stack.
@@ -690,7 +743,7 @@ index 0000000..f722c48
 +    extra.insert(extra.begin(), valtype{0x01});
 +    CHECK_ERR(spend.Verify(extra, ACTIVE), SCRIPT_ERR_CLEANSTACK);
 +
-+    // Chunk sizes (4S-8): 519 anywhere, a last chunk of 55 or 58, some chunks empty.
++    // Chunk sizes: 519 anywhere, a last chunk of 55 or 58, some chunks empty.
 +    for (size_t i = 0; i < SLHDSA128S_SIG_CHUNK_COUNT; i += 5) {
 +        std::vector<valtype> chunks{good};
 +        chunks[i].pop_back();
@@ -728,7 +781,7 @@ index 0000000..f722c48
 +        CHECK_ERR(spend.Verify(chunks, ACTIVE), SCRIPT_ERR_PUSH_SIZE);
 +    }
 +
-+    // Public key sizes (4S-6): with a signature, and with an empty one too.
++    // Public key sizes: with a signature, and with an empty one too.
 +    for (const size_t size : {size_t{0}, size_t{31}, size_t{33}, size_t{64}}) {
 +        const P2MRSpend wrong_key{CScript{} << valtype(size, 0x02) << OP_CHECKSLHDSA128S};
 +        BOOST_TEST_CONTEXT("public key of " << size << " bytes") {
@@ -741,7 +794,7 @@ index 0000000..f722c48
 +        }
 +    }
 +
-+    // Hash types (4S-9): an explicit 0x00, and every byte BIP 341 does not allow, fail before the
++    // Hash types: an explicit 0x00, and every byte BIP 341 does not allow, fail before the
 +    // signature is looked at. So does SIGHASH_SINGLE without an output of the same index.
 +    for (const uint8_t hash_type : {0x00, 0x04, 0x05, 0x40, 0x80, 0x84, 0xc1, 0xff}) {
 +        BOOST_TEST_CONTEXT("hash type " << int{hash_type}) CHECK_ERR(spend.Verify(Chunks(WithHashType(sig, hash_type)), ACTIVE), SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE);
@@ -760,13 +813,12 @@ index 0000000..f722c48
 +}
 +
 +// A check with any non-empty chunk uses VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK of the input's budget
-+// first of all (4S-5); an empty signature uses none.
++// first of all; an empty signature uses none.
 +BOOST_AUTO_TEST_CASE(validation_weight)
 +{
-+    // Everything below follows from VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, which is provisional: a
-+    // later value only has to keep these two design limits. A single SLH1 spend has a budget of
-+    // 7972 + 50 = 8022, so the weight must stay below it, and an almost empty witness must not pay
-+    // for a check.
++    // Everything below follows from VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK and holds for any value
++    // within these two limits. A single SLH1 spend has a budget of 7972 + 50 = 8022, so the weight
++    // must stay below it, and an almost empty witness must not pay for a check.
 +    constexpr int64_t weight{VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK};
 +    static_assert(weight < 8022);
 +    static_assert(weight > 200);
@@ -846,7 +898,7 @@ index 0000000..f722c48
 +    CHECK_ERR(P2MRSpend{empty_checks}.Verify({}, ACTIVE), SCRIPT_ERR_OK);
 +}
 +
-+// Where 0xf1 is not OP_CHECKSLHDSA128S (4S-2, 4S-3, 4S-12).
++// Where 0xf1 is not OP_CHECKSLHDSA128S.
 +BOOST_AUTO_TEST_CASE(where_it_executes)
 +{
 +    const P2MRSpend spend{SLH1(Key().pubkey)};
@@ -1030,12 +1082,12 @@ index 0000000..f722c48
 +BOOST_AUTO_TEST_SUITE_END()
 diff --git a/test/util/generate_p2mr_slhdsa128s_sighash.py b/test/util/generate_p2mr_slhdsa128s_sighash.py
 new file mode 100644
-index 0000000..5bc1fa3
+index 0000000..26fcb1d
 --- /dev/null
 +++ b/test/util/generate_p2mr_slhdsa128s_sighash.py
 @@ -0,0 +1,100 @@
 +#!/usr/bin/env python3
-+# Copyright (c) 2026 CipherScope
++# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
 +# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +"""Generate src/test/data/p2mr_slhdsa128s_sighash.json, the signature messages of OP_CHECKSLHDSA128S.
@@ -1135,5 +1187,5 @@ index 0000000..5bc1fa3
 +if __name__ == "__main__":
 +    main()
 -- 
-2.43.0
+2.49.0.windows.1
 

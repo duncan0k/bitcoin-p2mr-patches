@@ -1,19 +1,18 @@
-From 4a79b89e61a4b4f4bf45dde3b02b0806a80a5d65 Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From e8f8dc91c5631aaf854feeb0eb30787439ce90e8 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
-Subject: [PATCH 69/77] consensus: deploy OP_CHECKSLHDSA128S, not yet at a
- height on Ark-0
+Subject: [PATCH 69/77] consensus: deploy OP_CHECKSLHDSA128S, on Ark-0 from
+ height 32000
 
 A buried deployment, p2mr_slhdsa128s, sets SCRIPT_VERIFY_P2MR_SLHDSA128S
 on blocks at or above its height where P2MR is active too.
 
 - On the Ark-0 signet the height is a rule of that network,
-  ARK0_SLHDSA128S_HEIGHT. It is not decided yet: it is to be set at the
-  release, from the chain height then, together with the final
-  validation weight. Until then it is std::numeric_limits<int>::max(), so
-  this build never activates the rules on Ark-0, and a unit test later in
-  this series checks exactly that. A static_assert keeps it above the
-  height of the P2MR tripwire rules.
+  ARK0_SLHDSA128S_HEIGHT: 32000. It covers this opcode only. A
+  static_assert keeps it above the height of the P2MR tripwire rules
+  (30000), since leaf version 0xe0 must execute before the opcode can run
+  in it. Once a build carrying it has left the network's own nodes, the
+  height does not change.
 - Another custom signet gets the rules from -signetslhdsa128s=<height>,
   which requires -signetchallenge and which Ark-0 refuses. A node refuses
   to start with it on any other chain, whatever its value.
@@ -31,11 +30,11 @@ logs "P2MR SLH-DSA-SHA2-128s rules active from height N (leaf versions
  src/deploymentinfo.cpp            |  4 ++++
  src/init.cpp                      |  6 ++++++
  src/kernel/chainparams.cpp        | 16 ++++++++++++++++
- src/kernel/chainparams.h          | 22 ++++++++++++++++++++++
+ src/kernel/chainparams.h          | 20 ++++++++++++++++++++
  src/rpc/blockchain.cpp            |  1 +
  src/validation.cpp                |  6 ++++++
  test/functional/rpc_blockchain.py |  3 ++-
- 10 files changed, 92 insertions(+), 5 deletions(-)
+ 10 files changed, 90 insertions(+), 5 deletions(-)
 
 diff --git a/src/chainparams.cpp b/src/chainparams.cpp
 index 35114b2..9d0c10c 100644
@@ -164,7 +163,7 @@ index b90f6d0..797d024 100644
      return std::nullopt;
  }
 diff --git a/src/init.cpp b/src/init.cpp
-index c348446..8803d8a 100644
+index c348446..13f54fa 100644
 --- a/src/init.cpp
 +++ b/src/init.cpp
 @@ -963,6 +963,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
@@ -172,7 +171,7 @@ index c348446..8803d8a 100644
          LogInfo("P2MR ML-DSA-44 rules active from height %d", chainparams.GetConsensus().P2MRMLDSA44Height);
      }
 +    // OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) is only enabled on a signet given
-+    // -signetslhdsa128s and on regtest, and on the Ark-0 signet once its height is set. It executes
++    // -signetslhdsa128s, on regtest, and on the Ark-0 signet from ARK0_SLHDSA128S_HEIGHT. It executes
 +    // in the leaf versions that execute as tapscript: 0xc0, and 0xe0 from the P2MR tripwire height.
 +    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
 +        LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0)", chainparams.GetConsensus().P2MRSLHDSA128SHeight);
@@ -181,7 +180,7 @@ index c348446..8803d8a 100644
      // Warn if unrecognized section name are present in the config file.
      bilingual_str warnings;
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index 74626fc..af4007a 100644
+index 74626fc..4cfddec 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
 @@ -199,6 +199,7 @@ public:
@@ -213,8 +212,8 @@ index 74626fc..af4007a 100644
              consensus.P2MRMLDSA44Height = std::ranges::equal(bin, ARK0_SIGNET_CHALLENGE) ? ARK0_MLDSA44_HEIGHT : std::numeric_limits<int>::max();
          }
 +        // OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md): on the Ark-0 signet from the
-+        // height this code fixes for that network, which is not set yet, so never; on another custom
-+        // signet only from the height -signetslhdsa128s gives. ReadSigNetArgs refuses the option on Ark-0.
++        // height this code fixes for that network, on another custom signet only from the height
++        // -signetslhdsa128s gives. ReadSigNetArgs refuses the option on Ark-0.
 +        if (options.slhdsa128s_height) {
 +            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge));
 +            consensus.P2MRSLHDSA128SHeight = *options.slhdsa128s_height;
@@ -243,33 +242,31 @@ index 74626fc..af4007a 100644
          }
          // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index bcdd31f..f85cea9 100644
+index bcdd31f..b32534f 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
-@@ -59,6 +59,22 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
+@@ -59,6 +59,20 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
  // Leaf version 0xe0 runs OP_CHECKMLDSA44, which has to be active before the leaves are.
  static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
  
 +/**
-+ * Height from which the Ark-0 signet executes OP_CHECKSLHDSA128S in P2MR leaves
-+ * (doc/p2mr-slhdsa128s.md). Like the heights above, a rule of that network, fixed here
-+ * rather than given by an option.
++ * Height from which the Ark-0 signet executes OP_CHECKSLHDSA128S in P2MR leaves of leaf
++ * versions 0xc0 and 0xe0 (doc/p2mr-slhdsa128s.md). Like the heights above, a rule of that
++ * network, fixed here rather than given by an option.
 + *
-+ * NOT SET YET: H4 is decided at release (H4 = the chain height then + 7 * 960, rounded up
-+ * to a multiple of 1000), together with the final VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK.
-+ * Until then it is std::numeric_limits<int>::max(), so this build never activates M4-S on
-+ * Ark-0, and a unit test (p2mr_slhdsa128s_tests) checks exactly that. Setting it is a change
-+ * of its own; once set, it does not change after a build carrying it has left the network's
-+ * own nodes.
++ * Set at the release of this rule, together with the final VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
++ * about a week of blocks above the chain then. It covers this opcode only; other rules come with
++ * heights of their own. Once set, it does not change after a build carrying it has left the
++ * network's own nodes.
 + */
-+inline constexpr int ARK0_SLHDSA128S_HEIGHT{std::numeric_limits<int>::max()};
-+// M4 follows M3: H1 < H2 < H3 < H4.
-+static_assert(ARK0_SLHDSA128S_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
++inline constexpr int ARK0_SLHDSA128S_HEIGHT{32000};
++// Leaf version 0xe0 must execute before this opcode can run in it: the tripwire height comes first.
++static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT);
 +
  /** Height of the block that created both tripwire outputs of the Ark-0 signet. */
  inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
  // An output counts as present only when it was created below the height of the rules.
-@@ -210,6 +226,12 @@ public:
+@@ -210,6 +224,12 @@ public:
           * below its height.
           */
          std::optional<TripwireOptions> tripwire{};
@@ -333,5 +330,5 @@ index d8d2b19..c331fdd 100755
                  'type': 'bip9',
                  'bip9': {
 -- 
-2.43.0
+2.49.0.windows.1
 

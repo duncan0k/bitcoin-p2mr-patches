@@ -1,28 +1,38 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6109639..d5c06ee 100644
+index 6109639..9a4cf1d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -184,6 +184,46 @@ endif()
+@@ -184,6 +184,72 @@ endif()
  option(BUILD_BENCH "Build bench_bitcoin executable." OFF)
  option(BUILD_FUZZ_BINARY "Build fuzz binary." OFF)
  option(BUILD_FOR_FUZZING "Build for fuzzing. Enabling this will disable all other targets and override BUILD_FUZZ_BINARY." OFF)
 +# MEASUREMENT ONLY (contrib/m4-measure): the worst-case hook of the vendored SLH-DSA code, and a choice
 +# of SHA-256 in bench_bitcoin. Every executable or shared library linking the consensus code would get
-+# the hook, so this configuration may define no such target but bench_bitcoin. The check looks at the
-+# targets themselves, not at options: at the end of the top-level CMakeLists.txt (cmake_language(DEFER))
-+# it walks every directory's BUILDSYSTEM_TARGETS and stops on any EXECUTABLE, SHARED_LIBRARY or
-+# MODULE_LIBRARY other than bench_bitcoin, whichever option created it.
++# the hook, so this configuration may define no such target but bench_bitcoin and, with
++# SLH_MEASURE_NODE, the measurement-only node bitcoind_m4_measure, which has no install rule; and
++# `cmake --install` fails. The check looks at the
++# targets themselves, not at options: deferred to the end of the top-level CMakeLists.txt
++# (cmake_language(DEFER)), it queues itself again while other deferred calls of that directory are
++# pending, so that it runs last, after any of them could still define a target; then it walks every
++# directory's BUILDSYSTEM_TARGETS and stops on any EXECUTABLE, SHARED_LIBRARY or MODULE_LIBRARY other
++# than those two, whichever option created it.
 +option(SLH_MEASURE_WORST "Measurement build of contrib/m4-measure (bench_bitcoin only, never a node)." OFF)
++option(SLH_MEASURE_NODE "With SLH_MEASURE_WORST: the measurement-only node bitcoind_m4_measure of the whole-block script." OFF)
++if(SLH_MEASURE_NODE AND NOT SLH_MEASURE_WORST)
++  message(FATAL_ERROR "SLH_MEASURE_NODE needs SLH_MEASURE_WORST.")
++endif()
 +if(SLH_MEASURE_WORST)
-+  if(NOT BUILD_BENCH)
-+    message(FATAL_ERROR "SLH_MEASURE_WORST needs -DBUILD_BENCH=ON.")
++  if(NOT BUILD_BENCH AND NOT SLH_MEASURE_NODE)
++    message(FATAL_ERROR "SLH_MEASURE_WORST needs -DBUILD_BENCH=ON or -DSLH_MEASURE_NODE=ON.")
 +  endif()
++  # Nothing of a measurement build may be installed or packaged.
++  install(CODE "message(FATAL_ERROR \"A SLH_MEASURE_WORST build (contrib/m4-measure) cannot be installed.\")")
 +  function(slh_measure_collect_targets dir out)
 +    set(found)
 +    get_property(targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
 +    foreach(target IN LISTS targets)
 +      get_target_property(type ${target} TYPE)
-+      if(type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$" AND NOT target STREQUAL "bench_bitcoin")
++      if(type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$" AND NOT target IN_LIST SLH_MEASURE_ALLOWED_TARGETS)
 +        list(APPEND found ${target})
 +      endif()
 +    endforeach()
@@ -34,21 +44,72 @@ index 6109639..d5c06ee 100644
 +    set(${out} ${found} PARENT_SCOPE)
 +  endfunction()
 +  function(slh_measure_check_targets)
++    cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" GET_CALL_IDS pending)
++    if(pending)
++      get_property(rounds GLOBAL PROPERTY SLH_MEASURE_CHECK_ROUNDS)
++      if(NOT rounds)
++        set(rounds 0)
++      endif()
++      math(EXPR rounds "${rounds} + 1")
++      if(rounds GREATER 100)
++        message(FATAL_ERROR "SLH_MEASURE_WORST: the target check could not run after the other deferred calls.")
++      endif()
++      set_property(GLOBAL PROPERTY SLH_MEASURE_CHECK_ROUNDS ${rounds})
++      cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL slh_measure_check_targets)
++      return()
++    endif()
 +    slh_measure_collect_targets("${PROJECT_SOURCE_DIR}" others)
 +    if(others)
 +      list(JOIN others ", " others)
-+      message(FATAL_ERROR "SLH_MEASURE_WORST builds bench_bitcoin only, but this configuration also defines: ${others}. Turn their options off (contrib/m4-measure/build.sh does).")
++      message(FATAL_ERROR "SLH_MEASURE_WORST builds bench_bitcoin (and bitcoind_m4_measure) only, but this configuration also defines: ${others}. Turn their options off (contrib/m4-measure/build.sh does).")
 +    endif()
-+    if(NOT TARGET bench_bitcoin)
++    if(BUILD_BENCH AND NOT TARGET bench_bitcoin)
 +      message(FATAL_ERROR "SLH_MEASURE_WORST: no bench_bitcoin target.")
 +    endif()
 +  endfunction()
++  # bench_bitcoin, and with SLH_MEASURE_NODE the measurement-only node; nothing else.
++  set(SLH_MEASURE_ALLOWED_TARGETS bench_bitcoin bitcoind_m4_measure)
 +  cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL slh_measure_check_targets)
 +  add_compile_definitions(SLH_MEASURE_WORST)
 +endif()
  
  option(INSTALL_MAN "Install man pages." ON)
  
+@@ -427,7 +493,8 @@ endif()
+ include(AddBoostIfNeeded)
+ add_boost_if_needed()
+ 
+-if(BUILD_DAEMON OR BUILD_GUI OR BUILD_CLI OR BUILD_TESTS OR BUILD_BENCH OR BUILD_FUZZ_BINARY)
++# MEASUREMENT ONLY (contrib/m4-measure): bitcoind_m4_measure needs libevent too.
++if(BUILD_DAEMON OR BUILD_GUI OR BUILD_CLI OR BUILD_TESTS OR BUILD_BENCH OR BUILD_FUZZ_BINARY OR SLH_MEASURE_NODE)
+   find_package(Libevent 2.1.8 MODULE REQUIRED)
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index ad18115..2e0587a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -332,6 +332,20 @@ if(ENABLE_IPC AND BUILD_DAEMON)
+   )
+   install_binary_component(bitcoin-node INTERNAL)
+ endif()
++# MEASUREMENT ONLY (contrib/m4-measure): a node with the SLH-DSA worst-case hook, for the whole-block
++# script. It has no install rule, and a measurement configuration refuses `cmake --install` anyway.
++if(SLH_MEASURE_NODE)
++  add_executable(bitcoind_m4_measure EXCLUDE_FROM_ALL
++    bitcoind.cpp
++    init/bitcoind.cpp
++  )
++  target_compile_definitions(bitcoind_m4_measure PRIVATE SLH_MEASURE_NODE)
++  target_link_libraries(bitcoind_m4_measure
++    core_interface
++    bitcoin_node
++    $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
++  )
++endif()
+ 
+ 
+ add_library(bitcoin_cli STATIC EXCLUDE_FROM_ALL
 diff --git a/src/bench/bench_bitcoin.cpp b/src/bench/bench_bitcoin.cpp
 index 987523a..6bd0a5c 100644
 --- a/src/bench/bench_bitcoin.cpp
@@ -90,21 +151,59 @@ index 987523a..6bd0a5c 100644
      if (!argsman.ParseParameters(argc, argv, error)) {
          tfm::format(std::cerr, "Error parsing command line arguments: %s\n", error);
 diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
-index 323e757..7c234f0 100644
+index 323e757..545e1d8 100644
 --- a/src/bitcoind.cpp
 +++ b/src/bitcoind.cpp
-@@ -3,6 +3,11 @@
+@@ -3,6 +3,16 @@
  // Distributed under the MIT software license, see the accompanying
  // file COPYING or http://www.opensource.org/licenses/mit-license.php.
  
-+// MEASUREMENT ONLY (contrib/m4-measure): a build with the SLH-DSA worst-case hook must never make a node.
-+#ifdef SLH_MEASURE_WORST
++// MEASUREMENT ONLY (contrib/m4-measure): a build with the SLH-DSA worst-case hook must never make a
++// node, bitcoind or bitcoin-node. Only the measurement-only target bitcoind_m4_measure, which has no
++// install rule, compiles this file with it (SLH_MEASURE_NODE), for the whole-block script.
++#if defined(SLH_MEASURE_WORST) && !defined(SLH_MEASURE_NODE)
 +#error "SLH_MEASURE_WORST is a measurement build: bitcoind and bitcoin-node cannot be built with it"
++#endif
++#if defined(SLH_MEASURE_NODE) && !defined(SLH_MEASURE_WORST)
++#error "SLH_MEASURE_NODE needs SLH_MEASURE_WORST"
 +#endif
 +
  #include <bitcoin-build-config.h> // IWYU pragma: keep
  
  #include <chainparams.h>
+@@ -29,8 +39,11 @@
+ #include <util/translation.h>
+ 
+ #include <any>
++#include <cstdlib>
+ #include <functional>
++#include <iostream>
+ #include <optional>
++#include <string>
+ 
+ using node::NodeContext;
+ 
+@@ -257,8 +270,20 @@ static bool AppInit(NodeContext& node)
+     return fRet;
+ }
+ 
++#ifdef SLH_MEASURE_NODE
++extern "C" int slh_measure_worst; // MEASUREMENT ONLY
++#endif
++
+ MAIN_FUNCTION
+ {
++#ifdef SLH_MEASURE_NODE
++    {
++        // MEASUREMENT ONLY: SLH_WORST=1 turns on the worst-case hook of the vendored SLH-DSA code.
++        const char* worst{std::getenv("SLH_WORST")};
++        if (worst && std::string{worst} == "1") slh_measure_worst = 1;
++        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4-measure), not for any network; SLH worst-case hook: " << slh_measure_worst << std::endl;
++    }
++#endif
+     NodeContext node;
+     int exit_status;
+     std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
 diff --git a/src/crypto/slhdsa128s/slh_dsa.c b/src/crypto/slhdsa128s/slh_dsa.c
 index 4fb3dad..e3e0bff 100644
 --- a/src/crypto/slhdsa128s/slh_dsa.c

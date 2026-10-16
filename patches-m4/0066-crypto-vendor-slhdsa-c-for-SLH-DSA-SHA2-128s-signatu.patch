@@ -1,5 +1,5 @@
-From 0c934569942bc3ff6bfda459ae23895084e02118 Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 0ca013f60ab89f842e6089223e14efbfb95dc3fe Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 11:40:07 +0000
 Subject: [PATCH 66/77] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
  verification
@@ -25,13 +25,15 @@ into src/crypto/slhdsa128s/.
   "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" as one unit with Core's
   optimization check, -Wstack-protector, -fstack-protector-all,
   -fcf-protection=full, -fstack-clash-protection, -mbranch-protection on
-  aarch64), a rejected unit skipped as Core does, so a skipped pair leaves
-  what CMAKE_C_FLAGS defines; the -fsanitize flags of sanitize_interface,
-  required when SANITIZERS is set; a warning set of their own instead of
-  Core's, whose style warnings the upstream files do not follow: -Wall
-  -Wextra -Wformat -Wformat-security -Wvla -Wundef -Wimplicit-fallthrough
-  -Wbidi-chars=any; and APPEND_CPPFLAGS and APPEND_CFLAGS last on their
-  command line, as cmake/secp256k1.cmake arranges for libsecp256k1.
+  aarch64; /sdl with MSVC), a rejected unit skipped as Core does, so a
+  skipped pair leaves what CMAKE_C_FLAGS defines; the -fsanitize flags of
+  sanitize_interface, required when SANITIZERS is set; a warning set of
+  their own instead of Core's, whose style warnings the upstream files do
+  not follow: -Wall -Wextra -Wvla -Wundef -Wimplicit-fallthrough
+  -Wbidi-chars=any and, as one unit, -Wformat -Wformat-security (with
+  MSVC /W3 and the warnings Core turns off); and APPEND_CPPFLAGS and
+  APPEND_CFLAGS last on their command line, as cmake/secp256k1.cmake
+  arranges for libsecp256k1.
 - src/crypto/slhdsa128s.h exposes one function, SLHDSA128SVerify:
   slh_verify of FIPS 205, the external interface of pure SLH-DSA with a
   context string, over a 32-byte message. It is not HashSLH-DSA and not
@@ -47,11 +49,11 @@ into src/crypto/slhdsa128s/.
 src/crypto/slhdsa128s/README.md records where every file came from, with
 its SHA-256.
 ---
- src/crypto/CMakeLists.txt          |  83 ++++
+ src/crypto/CMakeLists.txt          |  97 ++++
  src/crypto/slhdsa128s.cpp          |  44 ++
  src/crypto/slhdsa128s.h            |  44 ++
  src/crypto/slhdsa128s/LICENSE      | 248 ++++++++++
- src/crypto/slhdsa128s/README.md    |  79 ++++
+ src/crypto/slhdsa128s/README.md    |  80 ++++
  src/crypto/slhdsa128s/cbmc.h       | 143 ++++++
  src/crypto/slhdsa128s/plat_local.h | 266 +++++++++++
  src/crypto/slhdsa128s/sha2_256.c   | 271 +++++++++++
@@ -64,7 +66,7 @@ its SHA-256.
  src/crypto/slhdsa128s/slh_sha2.c   | 581 +++++++++++++++++++++++
  src/crypto/slhdsa128s/slh_sys.h    |  40 ++
  src/crypto/slhdsa128s/slh_var.h    |  61 +++
- 17 files changed, 3359 insertions(+)
+ 17 files changed, 3374 insertions(+)
  create mode 100644 src/crypto/slhdsa128s.cpp
  create mode 100644 src/crypto/slhdsa128s.h
  create mode 100644 src/crypto/slhdsa128s/LICENSE
@@ -83,10 +85,10 @@ its SHA-256.
  create mode 100644 src/crypto/slhdsa128s/slh_var.h
 
 diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
-index e1ae782..2533005 100644
+index e1ae782..5669bf1 100644
 --- a/src/crypto/CMakeLists.txt
 +++ b/src/crypto/CMakeLists.txt
-@@ -21,6 +21,87 @@ set_target_properties(bitcoin_mldsa44 PROPERTIES
+@@ -21,6 +21,101 @@ set_target_properties(bitcoin_mldsa44 PROPERTIES
    C_VISIBILITY_PRESET hidden
  )
  
@@ -113,10 +115,12 @@ index e1ae782..2533005 100644
 +# - Core's hardening, probed again with the C compiler as Core probes it for C++: the pair
 +#   "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3" as one unit, with the same check for optimization, then
 +#   -Wstack-protector, -fstack-protector-all, -fcf-protection=full, -fstack-clash-protection (not on
-+#   MinGW) and on aarch64 -mbranch-protection. A unit the C compiler rejects is skipped with a message,
-+#   as try_append_cxx_flags does; a skipped Fortify pair leaves what CMAKE_C_FLAGS defines.
++#   MinGW) and on aarch64 -mbranch-protection; with MSVC, /sdl, which Core gives its C++ files. A unit
++#   the C compiler rejects is skipped with a message, as try_append_cxx_flags does; a skipped Fortify
++#   pair leaves what CMAKE_C_FLAGS defines.
 +# - the -fsanitize flags of sanitize_interface, required when SANITIZERS is set;
-+# - a warning set of their own, not Core's, whose style warnings (-Wtrailing-whitespace, ...) the
++# - a warning set of their own (-Wformat -Wformat-security as one unit, as Core probes them; /W3 with
++#   MSVC), not Core's, whose style warnings (-Wtrailing-whitespace, ...) the
 +#   unmodified upstream files do not follow (libsecp256k1 likewise keeps its own);
 +# - APPEND_CPPFLAGS and APPEND_CFLAGS at the end of the command line.
 +# This follows cmake/secp256k1.cmake for libsecp256k1, plus the hardening. Each unit is a CMake list,
@@ -138,7 +142,9 @@ index e1ae782..2533005 100644
 +  endif()
 +endfunction()
 +set(slhdsa128s_main "int main(void) { return 0; }")
-+if(NOT MSVC)
++if(MSVC)
++  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" /sdl)
++else()
 +  # _FORTIFY_SOURCE requires some optimization; the probe fails without it, as Core's does.
 +  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "int main(void) {
 +    #if !defined __OPTIMIZE__ || __OPTIMIZE__ <= 0
@@ -166,15 +172,25 @@ index e1ae782..2533005 100644
 +elseif(SANITIZERS)
 +  message(FATAL_ERROR "SANITIZERS is set, but sanitize_interface has no compile options for bitcoin_slhdsa128s.")
 +endif()
-+foreach(warning IN ITEMS -Wall -Wextra -Wformat -Wformat-security -Wvla -Wundef -Wimplicit-fallthrough -Wbidi-chars=any)
-+  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" ${warning})
-+endforeach()
++if(MSVC)
++  # MSVC reads -Wall as /Wall, every warning; /W3, with the warnings Core turns off for its own
++  # code, is what Core's own code gets.
++  foreach(warning IN ITEMS /W3 /wd4018 /wd4146 /wd4244 /wd4267 /wd4715 /wd4805)
++    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" ${warning})
++  endforeach()
++else()
++  foreach(warning IN ITEMS -Wall -Wextra -Wvla -Wundef -Wimplicit-fallthrough -Wbidi-chars=any)
++    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" ${warning})
++  endforeach()
++  # -Wformat-security only works together with -Wformat, so the two are one unit, as Core has them.
++  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -Wformat -Wformat-security)
++endif()
 +string(APPEND CMAKE_C_COMPILE_OBJECT " ${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
 +
  add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    aes.cpp
    chacha20.cpp
-@@ -39,6 +120,7 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
+@@ -39,6 +134,7 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    sha3.cpp
    sha512.cpp
    siphash.cpp
@@ -182,7 +198,7 @@ index e1ae782..2533005 100644
    ../support/cleanse.cpp
  )
  
-@@ -46,6 +128,7 @@ target_link_libraries(bitcoin_crypto
+@@ -46,6 +142,7 @@ target_link_libraries(bitcoin_crypto
    PRIVATE
      core_interface
      bitcoin_mldsa44
@@ -192,11 +208,11 @@ index e1ae782..2533005 100644
  if(HAVE_SSE41)
 diff --git a/src/crypto/slhdsa128s.cpp b/src/crypto/slhdsa128s.cpp
 new file mode 100644
-index 0000000..7917101
+index 0000000..1a03d51
 --- /dev/null
 +++ b/src/crypto/slhdsa128s.cpp
 @@ -0,0 +1,44 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -242,11 +258,11 @@ index 0000000..7917101
 +}
 diff --git a/src/crypto/slhdsa128s.h b/src/crypto/slhdsa128s.h
 new file mode 100644
-index 0000000..3cd0125
+index 0000000..7518e54
 --- /dev/null
 +++ b/src/crypto/slhdsa128s.h
 @@ -0,0 +1,44 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -546,10 +562,10 @@ index 0000000..6b6fb03
 +   limitations under the License.
 diff --git a/src/crypto/slhdsa128s/README.md b/src/crypto/slhdsa128s/README.md
 new file mode 100644
-index 0000000..84b90b4
+index 0000000..d95317c
 --- /dev/null
 +++ b/src/crypto/slhdsa128s/README.md
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,80 @@
 +# SLH-DSA-SHA2-128s verification (vendored slhdsa-c)
 +
 +This directory holds files of [slhdsa-c](https://github.com/pq-code-package/slhdsa-c),
@@ -614,10 +630,11 @@ index 0000000..84b90b4
 +(the pair `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3` as one unit with Core's
 +optimization check, `-Wstack-protector`, `-fstack-protector-all`,
 +`-fcf-protection=full`, `-fstack-clash-protection`, `-mbranch-protection` on
-+aarch64; a rejected unit is skipped, as Core does); the `-fsanitize` flags of
-+`sanitize_interface`, required when `SANITIZERS` is set; a warning set of its
-+own instead of Core's (`-Wall -Wextra -Wformat -Wformat-security -Wvla
-+-Wundef -Wimplicit-fallthrough -Wbidi-chars=any`), as these files keep
++aarch64; `/sdl` with MSVC; a rejected unit is skipped, as Core does); the
++`-fsanitize` flags of `sanitize_interface`, required when `SANITIZERS` is set;
++a warning set of its own instead of Core's (`-Wall -Wextra -Wvla -Wundef
++-Wimplicit-fallthrough -Wbidi-chars=any`, and `-Wformat -Wformat-security` as
++one unit; with MSVC `/W3` and the warnings Core turns off), as these files keep
 +upstream's style; `APPEND_CPPFLAGS` and `APPEND_CFLAGS` last; nothing else of
 +`core_interface`; and none of the library's optional macros (`SLH_EXPERIMENTAL`,
 +`XDEBUG`) defined.
@@ -3563,5 +3580,5 @@ index 0000000..3be27a4
 +/* _SLH_VAR_H_ */
 +#endif
 -- 
-2.43.0
+2.49.0.windows.1
 

@@ -1,5 +1,5 @@
-From 06e0ee6e7e060475d1cdbee9b26384b717fb4d9c Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 5b492ac562cc6de25af6a99ae9508b2c27be5dc8 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 73/77] test: add feature_p2mr_slhdsa128s.py
 
@@ -9,7 +9,7 @@ output that disables elliptic curve checks in leaf version 0xe0 from
 height 150:
 
 - the startup log, getdeploymentinfo, and -signetslhdsa128s refused on
-  regtest;
+  regtest and on the Ark-0 signet;
 - the mempool refuses a valid SLH1 spend while the next block is below
   the height, on both nodes, and takes it from the block before; a block
   below the height takes invalid signatures in leaf versions 0xc0 and
@@ -33,19 +33,19 @@ height 150:
 It makes ten SLH-DSA signatures in Python and derives the invalid
 witnesses from them.
 ---
- test/functional/feature_p2mr_slhdsa128s.py | 494 +++++++++++++++++++++
+ test/functional/feature_p2mr_slhdsa128s.py | 501 +++++++++++++++++++++
  test/functional/test_runner.py             |   1 +
- 2 files changed, 495 insertions(+)
+ 2 files changed, 502 insertions(+)
  create mode 100644 test/functional/feature_p2mr_slhdsa128s.py
 
 diff --git a/test/functional/feature_p2mr_slhdsa128s.py b/test/functional/feature_p2mr_slhdsa128s.py
 new file mode 100644
-index 0000000..d10ab63
+index 0000000..e471632
 --- /dev/null
 +++ b/test/functional/feature_p2mr_slhdsa128s.py
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,501 @@
 +#!/usr/bin/env python3
-+# Copyright (c) 2026 CipherScope
++# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
 +# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +"""Test OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) around its activation.
@@ -130,6 +130,9 @@ index 0000000..d10ab63
 +
 +ACTIVATION_HEIGHT = 200
 +TRIPWIRE_HEIGHT = 150
++# The challenge of the Ark-0 signet, which takes no -signetslhdsa128s.
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++
 +# A tripwire output that never exists, so that elliptic curve checks in leaf version 0xe0 fail from
 +# TRIPWIRE_HEIGHT on (doc/p2mr-tripwire.md).
 +MISSING_TRIPWIRE = "ab" * 32 + ":0"
@@ -374,6 +377,10 @@ index 0000000..d10ab63
 +        self.log.info("-signetslhdsa128s is refused on regtest")
 +        self.stop_node(1)
 +        self.nodes[1].assert_start_raises_init_error(["-signetslhdsa128s=10"], "Error: -signetslhdsa128s can only be used with signet.")
++        self.log.info("-signetslhdsa128s is refused on the Ark-0 signet, whose height is fixed at 32000")
++        self.nodes[1].assert_start_raises_init_error(
++            ["-regtest=0", "-signet", f"-signetchallenge={ARK0_CHALLENGE}", "-signetslhdsa128s=10"],
++            "Error: -signetslhdsa128s cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
 +        self.start_node(1, self.extra_args[1])
 +        self.connect_nodes(0, 1)
 +
@@ -551,5 +558,5 @@ index be81612..b6046ff 100755
      'feature_signet_pqblock.py',
      'wallet_p2mr.py',
 -- 
-2.43.0
+2.49.0.windows.1
 

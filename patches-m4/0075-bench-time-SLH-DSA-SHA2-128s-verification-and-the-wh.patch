@@ -1,5 +1,5 @@
-From a9ecb9412649ff822982cb100a16709339f7726d Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 6432f0920ab09d9f2772d3973f0995a1dd8d990e Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:47 +0000
 Subject: [PATCH 75/77] bench: time SLH-DSA-SHA2-128s verification and the
  whole path of its check
@@ -10,7 +10,7 @@ a P2MR input with the caching checker, whose cache never fills, over 16
 spends with keys and messages of their own, signed when the benchmark
 starts, one check per epoch so that -output-json holds the distribution
 of single checks. Next to VerifyScriptP2MRSchnorr, these are the
-measurements that fix the validation weight of the opcode:
+measurements behind the validation weight of the opcode:
 C >= 1.25 x 50 x p99(SLH-DSA, worst case) / median(Schnorr), with a
 SHA-256 that uses no SHA extensions.
 ---
@@ -41,11 +41,11 @@ index 852fd70..9c228e2 100644
  
 diff --git a/src/bench/slhdsa128s.cpp b/src/bench/slhdsa128s.cpp
 new file mode 100644
-index 0000000..063905f
+index 0000000..b7612cf
 --- /dev/null
 +++ b/src/bench/slhdsa128s.cpp
 @@ -0,0 +1,115 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -65,8 +65,8 @@ index 0000000..063905f
 +#include <cstdint>
 +#include <vector>
 +
-+// What M4-S weighs against BIP 340 when it fixes the validation weight of an SLH-DSA-SHA2-128s
-+// check (doc/p2mr-slhdsa128s.md): the verification on its own, and the whole path of a check as a
++// What the validation weight of an SLH-DSA-SHA2-128s check (doc/p2mr-slhdsa128s.md) is measured
++// with against BIP 340: the verification on its own, and the whole path of a check as a
 +// block validates it. VerifySchnorrBIP340 and VerifyScriptP2MRSchnorr (bench/mldsa44.cpp) are the
 +// other side; run them in the same process on the same machine.
 +
@@ -161,5 +161,5 @@ index 0000000..063905f
 +BENCHMARK(VerifySLHDSA128S);
 +BENCHMARK(VerifyScriptP2MRSLHDSA128S);
 -- 
-2.43.0
+2.49.0.windows.1
 

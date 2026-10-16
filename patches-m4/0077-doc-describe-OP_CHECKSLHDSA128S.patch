@@ -1,25 +1,25 @@
-From 22f236fbd5b6117997f4b5699208abf5c8334e87 Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 4d85a3529657b79a65fe459afd495d098886353f Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:47 +0000
 Subject: [PATCH 77/77] doc: describe OP_CHECKSLHDSA128S
 
 doc/p2mr-slhdsa128s.md is the specification of the opcode in this build:
 where it executes, the encoding and its one template, the order of the
-checks, the verification library, the provisional validation weight and
-how it is to be fixed, the activation (not yet on Ark-0), the relay
+checks, the verification library, the validation weight (5000) and how
+it was set, the activation (on Ark-0 from height 32000), the relay
 policy, what a wallet should do, and the tests.
 ---
- doc/p2mr-slhdsa128s.md | 227 +++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr-slhdsa128s.md | 233 +++++++++++++++++++++++++++++++++++++++++
  doc/p2mr.md            |  11 +-
- 2 files changed, 234 insertions(+), 4 deletions(-)
+ 2 files changed, 240 insertions(+), 4 deletions(-)
  create mode 100644 doc/p2mr-slhdsa128s.md
 
 diff --git a/doc/p2mr-slhdsa128s.md b/doc/p2mr-slhdsa128s.md
 new file mode 100644
-index 0000000..5ae3712
+index 0000000..5cbee76
 --- /dev/null
 +++ b/doc/p2mr-slhdsa128s.md
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,233 @@
 +# OP_CHECKSLHDSA128S: an experimental SLH-DSA-SHA2-128s check in P2MR leaves
 +
 +This build adds one opcode, `OP_CHECKSLHDSA128S`, that verifies an SLH-DSA-SHA2-128s signature
@@ -36,10 +36,9 @@ index 0000000..5ae3712
 +one signature that is valid for two messages, so a signature must never be taken as a commitment
 +to the message it signs.
 +
-+**Not active on Ark-0 yet.** The activation height of the Ark-0 signet, `ARK0_SLHDSA128S_HEIGHT`,
-+is decided at release; until then it is `std::numeric_limits<int>::max()` and this build never
-+applies the rules there (see [Activation](#activation)). The validation weight is provisional
-+too (see [Validation weight](#validation-weight)).
++**On Ark-0 from height 32000.** The Ark-0 signet applies these rules from block 32000
++(`ARK0_SLHDSA128S_HEIGHT`, see [Activation](#activation)); the validation weight of a check is
++5,000 (see [Validation weight](#validation-weight)). Both are fixed and do not change.
 +
 +## Where the opcode executes
 +
@@ -138,39 +137,44 @@ index 0000000..5ae3712
 +Each check with a signature uses `VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK` units of the input's
 +budget, which BIP 342 sets to the witness size plus 50 and charges 50 per Schnorr check.
 +
-+**The value in this build, 2,000, is provisional.** It is to be fixed by measurement before any
-+release, and then never changes on a network once a build carrying it has been published:
++**The value is 5,000, final.** It never changes on a network once a build carrying it has been
++published. It was set from these rules:
 +
-+- the condition is `C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr check)`, both
-+  over the whole path of a check, measured with a SHA-256 that uses no SHA extensions;
++- the single-check condition is `C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr
++  check)`, both over the whole path of a check, measured with a SHA-256 that uses no SHA
++  extensions;
 +- the worst case is that of the verification itself: every WOTS+ chain of every layer at its
 +  longest (510 steps), 3,894 SHA-256 compressions against about 2,194 on average. An honest
 +  signature cannot be pushed there, but the weight is set for it so that it does not depend on
 +  how much work an attacker spends grinding;
-+- the decisive check is a whole block that uses up its budget on such checks against one that
-+  uses it up on Schnorr checks;
-+- it must stay below 8,022, or a single-signature spend would not fit its own budget; if the
-+  measurement does not allow that, M4-S is not released.
++- it must stay below 8,022, the budget of a single-signature spend. At 5,000 a single SLH1 spend
++  fits, and so does one check per signature in any script; checking one signature twice (with
++  `OP_PICK`, say) does not fit the budget of a single signature.
 +
-+First measurement (2026-10-15, not yet a gate result): on a cloud virtual machine (Intel Xeon at
-+2.8 GHz, no SHA extensions, release build, GCC 13.3), `bench_bitcoin -filter='VerifyScriptP2MR.*'`
-+over 10,000 single checks per run, three runs per SHA-256 implementation of Core (generic and
-+SSE4/AVX2; the vendored library always uses its own portable code):
++Measurement (2026-10-15): on a cloud virtual machine (Intel Xeon at 2.8 GHz, no SHA extensions,
++release build, GCC 13.3), `bench_bitcoin -filter='VerifyScriptP2MR.*'` over 10,000 single checks
++per run, three runs per SHA-256 implementation of Core (generic and SSE4/AVX2; the vendored
++library always uses its own portable code):
 +
 +- a Schnorr check over its whole path took 48 to 75 us (median), an SLH-DSA check with real
 +  signatures 622 to 677 us, and the worst case 1,041 to 1,170 us, through a measurement-only hook
 +  that takes every WOTS+ message digit as zero (3,894 SHA-256 compressions per check against a
 +  measured mean of 2,183 for real signatures);
-+- `1.25 x 50 x p99(worst case) / median(Schnorr)` came to 2,549 to 3,658 across the runs, so the
-+  provisional 2,000 does **not** pass this condition there. The p99 of that machine is about twice
-+  its median for Schnorr checks too, which inflates the result; the measurement is to be repeated
-+  on a quiet machine, and the whole-block comparison done, before the value is fixed.
++- `1.25 x 50 x p99(worst case) / median(Schnorr)` came to 2,550 to 3,658 across the runs (each run's
++  bound rounded up). The p99 of that machine is about twice its median for Schnorr checks too,
++  which inflates the result.
++
++5,000 is at least 1.37 times the highest of these (3,658), a margin for hardware weaker than that
++machine.
 +
 +The measurement-only build (the worst-case hook, and a choice of Core's SHA-256 implementation in
 +`bench_bitcoin`) is not part of this series: it is `contrib/m4-measure/` of the patch repository,
-+with its scripts. Configured with it, CMake builds `bench_bitcoin` and nothing else: it refuses a
-+configuration that defines any other executable or shared library target, and `bitcoind.cpp` and
-+`qt/main.cpp` do not compile.
++with its scripts, among them a whole-block comparison on regtest (blocks that use up their weight
++on SLH-DSA checks, on Schnorr checks and on both, connected by a node without a signature cache).
++Configured with it, CMake builds `bench_bitcoin` and, for that script, a measurement-only node
++`bitcoind_m4_measure` that has no install rule, and nothing else: it refuses a configuration that
++defines any other executable or shared library target, `cmake --install` fails, and `bitcoind.cpp`
++and `qt/main.cpp` do not compile for any other target.
 +
 +Empty signatures use no weight. The budget of one input is shared by every check in it:
 +`50 x N_Schnorr + 250 x N_ML-DSA-44 + C x N_SLH-DSA <= witness size + 50`.
@@ -181,12 +185,14 @@ index 0000000..5ae3712
 +
 +- On the Ark-0 signet (challenge
 +  `5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae`) they apply from
-+  `ARK0_SLHDSA128S_HEIGHT` in `src/kernel/chainparams.h`, which is **not set yet**: it is
-+  `std::numeric_limits<int>::max()`, and this build does not apply the rules on Ark-0. It is to
-+  be set at release, to the chain height then plus 7 x 960 blocks rounded up to a multiple of
-+  1,000, above the height of the P2MR tripwire rules. The height is a rule of that network, so
-+  there is no option to change it; once a build that carries a height has been published, the
-+  height and the validation weight do not change on that network.
++  `ARK0_SLHDSA128S_HEIGHT` in `src/kernel/chainparams.h`: **height 32000**, above the height of the
++  P2MR tripwire rules (30000), which a compile-time check enforces. The height is a rule of that
++  network, so there is no option to change it; once a build that carries it has been published,
++  the height and the validation weight do not change on that network. It covers this opcode only:
++  other rules of the network come with heights of their own. At the rate of about 870 blocks a day
++  that the signet had when the height was set, block 32000 is expected around 2026-10-25 00:30
++  UTC; even at the producer's maximum of 960 blocks a day it cannot come before 2026-10-24 04:00
++  UTC.
 +- On another custom signet they apply from `-signetslhdsa128s=<height>`, which requires
 +  `-signetchallenge` and which the Ark-0 signet refuses. A node refuses the option on any other
 +  chain.
@@ -237,7 +243,7 @@ index 0000000..5ae3712
 +  `test/util/generate_p2mr_slhdsa128s_sighash.py`), and the script rules, with spends signed in
 +  the test by the vendored library: every rule above, each hash type, the chunk layout, empty
 +  signatures, the validation weight, where the byte executes, the caches and the relay policy.
-+- `src/test/p2mr_ts_m4_tests.cpp`: vectors made by the wallet side, p2mr-ts, from the same design
++- `src/test/p2mr_ts_m4_tests.cpp`: vectors made by the wallet side, p2mr-ts, written independently
 +  (`src/test/data/p2mr_ts_m4_vectors.md`): their signature messages for key_version 0, 1 and 2,
 +  their signatures, their witnesses through `VerifyScript`, their keys, leaves, trees, control
 +  blocks, scriptPubKeys and addresses.
@@ -277,5 +283,5 @@ index 78f59df..b747d3c 100644
    for P2MR inputs. Neither is interoperable with anything outside this build.
  - The wallet never generates P2MR addresses or change, because P2MR has no output type. It can only
 -- 
-2.43.0
+2.49.0.windows.1
 

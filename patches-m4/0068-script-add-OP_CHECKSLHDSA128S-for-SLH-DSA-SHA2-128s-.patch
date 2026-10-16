@@ -1,5 +1,5 @@
-From 170dc6cd183210b96fdb668bbfee34d2b910a5cd Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From e60ca8c7032de68575ce0f546e6369c1662eedc8 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 68/77] script: add OP_CHECKSLHDSA128S for SLH-DSA-SHA2-128s
  checks in P2MR leaves
@@ -30,12 +30,14 @@ context string "P2MR/SLHDSA128S/EXP0". An invalid signature fails the
 script; a valid one pushes 1. Disabled elliptic curve checks in leaf
 version 0xe0 do not touch it.
 
-VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK is 2000, a provisional value
-within the range the design estimates. It is to be fixed by measurement
-(the worst-case verification without SHA extensions against a Schnorr
-check, and a whole block of each) before any build carrying it leaves
-the network's own nodes, and it must stay below 8022, the budget of a
-single-signature spend.
+VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK is 5000, final. The single-check
+condition, C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr
+check), measured over the whole path of a check on a machine without SHA
+extensions, asked for 2550 to 3658; 5000 leaves a margin of at least
+1.37x for weaker hardware. It stays below 8022, the budget of a
+single-signature spend, so a single SLH1 spend and one check per
+signature in any script fit. It never changes once a build carrying it
+has left the network's own nodes.
 
 - The checkers gain CheckSLHDSA128SSignature: the hash type and the
   message in GenericTransactionSignatureChecker, the verification in the
@@ -382,7 +384,7 @@ index 1052a1e..5bc3945 100644
      case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
  
 diff --git a/src/script/script.h b/src/script/script.h
-index 5e56fad..bf9696c 100644
+index 5e56fad..5658baa 100644
 --- a/src/script/script.h
 +++ b/src/script/script.h
 @@ -64,6 +64,15 @@ static constexpr int64_t VALIDATION_WEIGHT_PER_SIGOP_PASSED{50};
@@ -391,12 +393,12 @@ index 5e56fad..bf9696c 100644
  
 +// Validation weight per OP_CHECKSLHDSA128S with a signature (P2MR tapscript leaves only,
 +// see doc/p2mr-slhdsa128s.md): an SLH-DSA-SHA2-128s verification against the 50 of BIP 342.
-+// PROVISIONAL: 2000 is a placeholder within the estimated range of the design (1,500 to
-+// 2,500). It is fixed by measurement before any release (worst-case verification without
-+// SHA extensions, C >= 1.25 * 50 * p99(SLH-DSA) / median(Schnorr), and the whole-block
-+// test), and never changes once a build carrying it has left the network's own nodes. It
-+// must stay below 8,022, the budget of a single-signature spend.
-+static constexpr int64_t VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK{2000};
++// Final at 5,000. The single-check condition, C >= 1.25 * 50 * p99(worst-case SLH-DSA check) /
++// median(Schnorr check), measured on a machine without SHA extensions, asked for 2,550 to 3,658;
++// 5,000 leaves a margin of at least 1.37x for weaker hardware. It stays below 8,022, the budget
++// of a single-signature spend, so one SLH1 spend and one check per signature in any script fit.
++// It never changes once a build carrying it has left the network's own nodes.
++static constexpr int64_t VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK{5000};
 +
  // How much weight budget is added to the witness size (Tapscript only, see BIP 342).
  static constexpr int64_t VALIDATION_WEIGHT_OFFSET{50};
@@ -571,5 +573,5 @@ index 06eb831..8493b0e 100644
      {SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE, "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"},
      {SCRIPT_ERR_SCHNORR_SIG_SIZE, "SCHNORR_SIG_SIZE"},
 -- 
-2.43.0
+2.49.0.windows.1
 

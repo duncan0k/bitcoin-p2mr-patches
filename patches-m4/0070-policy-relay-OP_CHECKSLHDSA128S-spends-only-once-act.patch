@@ -1,5 +1,5 @@
-From 5a25983bf211883630b8b4fb124fd6dbe57e901f Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 8b8b262160bd140cd178e61e291641166a4742f8 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 70/77] policy: relay OP_CHECKSLHDSA128S spends only once
  active, and in one template
@@ -172,5 +172,5 @@ index 0331ad7..77820dc 100644
  
          // The transaction must be final.
 -- 
-2.43.0
+2.49.0.windows.1
 

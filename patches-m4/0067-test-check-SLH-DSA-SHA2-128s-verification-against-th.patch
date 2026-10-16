@@ -1,5 +1,5 @@
-From f834789e39f376dde2556261f6392553dc2b68b1 Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From 388381c48285a5fed65d96fa50ff400db1ec1479 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:45 +0000
 Subject: [PATCH 67/77] test: check SLH-DSA-SHA2-128s verification against the
  ACVP vectors
@@ -24,17 +24,17 @@ Subject: [PATCH 67/77] test: check SLH-DSA-SHA2-128s verification against the
 - The lengths: a signature of 0 to 7855 bytes or of 7857 and more, a key
   of any other size than 32 bytes, a message of any other size than 32
   bytes and a context string over 255 bytes are rejected, and the counter
-  of library calls shows that none reaches the library. This is the
-  regression test the design asks for, since the vendored slh_verify
-  reads the first 16 bytes of the signature before it checks the
-  signature's length.
+  of library calls shows that none reaches the library. This is a
+  regression test for the order of the checks, since the vendored
+  slh_verify reads the first 16 bytes of the signature before it checks
+  the signature's length.
 - One signature made by another implementation (@noble/post-quantum
   0.7.1, deterministic signing) in the shape M4-S uses: a 32-byte message
   and the context string "P2MR/SLHDSA128S/EXP0". It verifies, the vendored
   library makes the same bytes from the same seed, and a flipped bit in R,
   the FORS part, each hypertree layer, the message, PK.seed or PK.root is
-  rejected, as are other context strings: empty, M1's, that of the M4-B
-  block signature.
+  rejected, as are other context strings: empty, that of OP_CHECKMLDSA44,
+  that of another use of SLH-DSA (a block signature's).
 - Signatures over the same message through the internal interface and
   through HashSLH-DSA with SHA-256 are rejected, and a set of malformed
   signatures of the right length too.
@@ -159,11 +159,11 @@ index 0000000..77bd50a
 +]
 diff --git a/src/test/slhdsa128s_tests.cpp b/src/test/slhdsa128s_tests.cpp
 new file mode 100644
-index 0000000..63f5f10
+index 0000000..5bc7210
 --- /dev/null
 +++ b/src/test/slhdsa128s_tests.cpp
 @@ -0,0 +1,310 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -362,7 +362,7 @@ index 0000000..63f5f10
 +
 +BOOST_AUTO_TEST_CASE(m4s_fixture)
 +{
-+    // A signature made by another implementation, in the shape Ark-0's M4-S
++    // A signature made by another implementation, in the shape OP_CHECKSLHDSA128S
 +    // uses: a 32-byte message and the context string "P2MR/SLHDSA128S/EXP0".
 +    const std::vector<unsigned char> pubkey{ParseHex(SLHDSA128S_FIXTURE_PUBKEY_HEX)};
 +    const std::vector<unsigned char> msg{ParseHex(SLHDSA128S_FIXTURE_MSG_HEX)};
@@ -405,8 +405,8 @@ index 0000000..63f5f10
 +        BOOST_CHECK_MESSAGE(!Verify(other_pubkey, msg, CONTEXT, sig), "public key bit flipped at byte " << pos);
 +    }
 +
-+    // The context string is part of what is signed: not the empty one, not M1's, not the one of
-+    // the M4-B block signature, not one byte more or less.
++    // The context string is part of what is signed: not the empty one, not that of OP_CHECKMLDSA44,
++    // not that of another use of SLH-DSA (a block signature's), not one byte more or less.
 +    BOOST_CHECK(!Verify(pubkey, msg, {}, sig));
 +    BOOST_CHECK(!Verify(pubkey, msg, Bytes("P2MR/MLDSA44/EXP0"), sig));
 +    BOOST_CHECK(!Verify(pubkey, msg, Bytes("SIGNET/SLHBLOCK/EXP0"), sig));
@@ -475,11 +475,11 @@ index 0000000..63f5f10
 +BOOST_AUTO_TEST_SUITE_END()
 diff --git a/src/test/util/slhdsa128s.h b/src/test/util/slhdsa128s.h
 new file mode 100644
-index 0000000..0a82094
+index 0000000..32f5429
 --- /dev/null
 +++ b/src/test/util/slhdsa128s.h
 @@ -0,0 +1,91 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -572,11 +572,11 @@ index 0000000..0a82094
 +#endif // BITCOIN_TEST_UTIL_SLHDSA128S_H
 diff --git a/src/test/util/slhdsa128s_fixture.h b/src/test/util/slhdsa128s_fixture.h
 new file mode 100644
-index 0000000..50a921f
+index 0000000..de1cb06
 --- /dev/null
 +++ b/src/test/util/slhdsa128s_fixture.h
 @@ -0,0 +1,190 @@
-+// Copyright (c) 2026 CipherScope
++// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +
@@ -585,7 +585,7 @@ index 0000000..50a921f
 +
 +#include <string_view>
 +
-+// One SLH-DSA-SHA2-128s signature in the shape Ark-0's M4-S uses it: a 32-byte
++// One SLH-DSA-SHA2-128s signature in the shape OP_CHECKSLHDSA128S uses it: a 32-byte
 +// message and the context string "P2MR/SLHDSA128S/EXP0". Produced outside this
 +// code base, by @noble/post-quantum 0.7.1 slh_dsa_sha2_128s:
 +// keygen(sha512("ark0 m4-s slhdsa128s fixture seed")[0:48]), sign(extraEntropy: false)
@@ -767,5 +767,5 @@ index 0000000..50a921f
 +
 +#endif // BITCOIN_TEST_UTIL_SLHDSA128S_FIXTURE_H
 -- 
-2.43.0
+2.49.0.windows.1
 

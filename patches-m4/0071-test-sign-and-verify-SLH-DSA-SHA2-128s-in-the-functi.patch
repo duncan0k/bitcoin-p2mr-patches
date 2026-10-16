@@ -1,5 +1,5 @@
-From 5ee50992a1bdc035cfa97dd10f988df2de6df22d Mon Sep 17 00:00:00 2001
-From: CipherScope <dev@cipherscope.io>
+From e27c8ddbeba857a7bdb38d0d3da92f5ba9f65047 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 71/77] test: sign and verify SLH-DSA-SHA2-128s in the
  functional test framework
@@ -26,12 +26,12 @@ Subject: [PATCH 71/77] test: sign and verify SLH-DSA-SHA2-128s in the
 
 diff --git a/test/functional/test_framework/crypto/slhdsa128s.py b/test/functional/test_framework/crypto/slhdsa128s.py
 new file mode 100644
-index 0000000..8ef6461
+index 0000000..b4508be
 --- /dev/null
 +++ b/test/functional/test_framework/crypto/slhdsa128s.py
 @@ -0,0 +1,422 @@
 +#!/usr/bin/env python3
-+# Copyright (c) 2026 CipherScope
++# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
 +# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +"""SLH-DSA-SHA2-128s (FIPS 205) for the functional test framework. Test-only code, not constant time.
@@ -454,12 +454,12 @@ index 0000000..8ef6461
 +    return verify_internal(_pure_message(m, ctx), sig, pk)
 diff --git a/test/functional/test_framework/p2mr_slhdsa128s.py b/test/functional/test_framework/p2mr_slhdsa128s.py
 new file mode 100644
-index 0000000..9ac32f1
+index 0000000..687bbce
 --- /dev/null
 +++ b/test/functional/test_framework/p2mr_slhdsa128s.py
 @@ -0,0 +1,126 @@
 +#!/usr/bin/env python3
-+# Copyright (c) 2026 CipherScope
++# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
 +# file COPYING or http://www.opensource.org/licenses/mit-license.php.
 +"""Helpers for OP_CHECKSLHDSA128S, the experimental SLH-DSA-SHA2-128s check in P2MR leaves.
@@ -499,9 +499,9 @@ index 0000000..9ac32f1
 +SLHDSA128S_SIG_CHUNK_SIZES = (520,) * 15 + (56,)
 +SLHDSA128S_KEY_VERSION = 2
 +SLHDSA128S_CONTEXT = b"P2MR/SLHDSA128S/EXP0"
-+# Validation weight one OP_CHECKSLHDSA128S with a signature uses up (provisional, see
++# Validation weight one OP_CHECKSLHDSA128S with a signature uses up (final, see
 +# VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK in src/script/script.h).
-+VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK = 2000
++VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK = 5000
 +
 +assert sum(SLHDSA128S_SIG_CHUNK_SIZES) == SLHDSA128S_SIGNATURE_SIZE
 +
@@ -585,5 +585,5 @@ index 0000000..9ac32f1
 +        sig += bytes([hash_type])
 +    return sig
 -- 
-2.43.0
+2.49.0.windows.1
 
