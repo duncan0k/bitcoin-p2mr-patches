@@ -38,4 +38,12 @@ cmake -S "$WORK" -B "$WORK/build-node" -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=
       -DSLH_MEASURE_WORST=ON -DSLH_MEASURE_NODE=ON
 refuse_node_targets "$WORK/build-node"
 cmake --build "$WORK/build-node" -j"$(nproc)" --target bitcoind_m4_measure
-echo "built $WORK/build-node/bin/bitcoind_m4_measure"
+# The node refuses every chain but regtest: check it on mainnet before anything else uses it.
+mkdir -p "$WORK/build-node/guard-check"
+if timeout 60 "$WORK/build-node/bin/bitcoind_m4_measure" -chain=main -datadir="$WORK/build-node/guard-check" \
+     > "$WORK/build-node/guard-check.log" 2>&1 \
+   || ! grep -q "runs on regtest only" "$WORK/build-node/guard-check.log"; then
+  echo "bitcoind_m4_measure did not refuse mainnet as expected; refusing to continue" >&2
+  exit 1
+fi
+echo "built $WORK/build-node/bin/bitcoind_m4_measure (refuses mainnet: checked)"

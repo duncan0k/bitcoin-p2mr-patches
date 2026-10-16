@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
-"""Whole-block measurement of OP_CHECKSLHDSA128S on regtest (README.md, "Whole-block test").
+"""Whole-block gate of OP_CHECKSLHDSA128S on regtest (README.md, "Whole-block gate").
 
-Builds, in Python, a regtest chain and three blocks on top of it that use up the block weight with
-spends whose validation budget is used up by their checks:
+Builds, in Python with the functional test framework of the patched tree, a regtest chain and blocks
+filled to the maximum block weight, every input of which uses up its validation budget (witness size
++ 50) to within one check's cost:
 
-  slh      every input checks one SLH-DSA-SHA2-128s signature many times (copies of its sixteen
-           chunks taken with OP_PICK), with as much padding in the leaf as the budget needs;
-  schnorr  every input checks one Schnorr signature many times (OP_DUP ... OP_CHECKSIGVERIFY), the
-           most checks per unit of budget (50 each);
-  mixed    about half the block weight of each.
+  slh               inputs that each check one valid SLH-DSA-SHA2-128s signature many times (copies of
+                    its sixteen chunks taken with OP_PICK);
+  schnorr           inputs that each check one Schnorr signature many times (OP_DUP ... OP_CHECKSIGVERIFY),
+                    the most checks per unit of budget: the reference;
+  mixed             a third of the weight each of SLH-DSA, ML-DSA-44 and Schnorr inputs of that kind;
+  slh-invalid-last  the slh block with the signature of its last input made invalid: the time to reject.
 
-Each block is connected with `submitblock` by a fresh node, the measurement-only bitcoind_m4_measure
-(build.sh), started with -maxsigcachesize=0 and once with -par=1, once with the default -par, and
-with the worst-case hook on (SLH_WORST=1): every WOTS+ chain at its longest, the hypertree judged
-valid, so the SLH-DSA checks take the slowest path of the verification, and any signature of the
-right length passes. The script reports the time to connect each block (from -debug=bench) and the
-ratio of the SLH-DSA block to the Schnorr block.
+Every block is connected by a fresh node with -maxsigcachesize=0 through `submitblock`, never through
+the mempool, with -par=1 and with the default -par, in two builds:
+
+  release  a normal bitcoind built from the series (--bitcoind-release): real verification;
+  hook     bitcoind_m4_measure (build.sh) with the worst-case hook on (SLH_WORST=1): every SLH-DSA check
+           takes the slowest path of the verification; any signature of the right length passes, so
+           slh-invalid-last is measured in the release build only.
+
+bitcoind_m4_measure also counts, per block, the complete SLH-DSA verifications and the SHA-256
+compressions of the vendored library: in the hook runs, and in one run per block with the hook off
+(-par=1, not timed) for the real path. The counters are plain counters, exact when one thread checks
+the scripts, so the figures come from -par=1 runs; there the verifications counted must equal the
+checks planned.
+
+Gate: for each build and -par, the maximum connect time of every block kind is at most the median
+connect time of the schnorr block of the same build and -par. Connect time is the time `submitblock`
+takes, which is also what a rejected block can be measured by; the -debug=bench "Connect block" time
+of accepted blocks is reported next to it.
 
 Usage:
-  python3 wholeblock.py --core <patched Core tree> --bitcoind <build-node>/bin/bitcoind_m4_measure \\
-                        --workdir <new directory> [--rounds 3] [--fill 0.95]
+  python3 wholeblock.py --core <patched tree> --bitcoind-release <bitcoind> \\
+      --bitcoind-measure <build-node>/bin/bitcoind_m4_measure --workdir <new directory> [--rounds 5]
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -37,14 +52,17 @@ from pathlib import Path
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--core", required=True, help="the patched Core tree (for test/functional/test_framework)")
-    ap.add_argument("--bitcoind", required=True, help="bitcoind_m4_measure from build.sh")
-    ap.add_argument("--workdir", required=True, help="a new directory for the node data directories and the results")
-    ap.add_argument("--rounds", type=int, default=3, help="fresh nodes per block and -par setting (default 3)")
-    ap.add_argument("--fill", type=float, default=0.95, help="fraction of the maximum block weight to use (default 0.95)")
-    ap.add_argument("--slh-checks", type=int, default=40, help="SLH-DSA checks per input (default 40)")
-    ap.add_argument("--schnorr-checks", type=int, default=2000, help="Schnorr checks per input (default 2000)")
-    ap.add_argument("--kinds", default="slh,schnorr,mixed", help="blocks to measure (default slh,schnorr,mixed)")
+    ap.add_argument("--bitcoind-release", required=True, help="a normal bitcoind built from the series")
+    ap.add_argument("--bitcoind-measure", required=True, help="bitcoind_m4_measure from build.sh")
+    ap.add_argument("--workdir", required=True, help="a new directory for node data directories and results")
+    ap.add_argument("--rounds", type=int, default=5, help="fresh nodes per block, build and -par (default 5)")
     ap.add_argument("--par", default="1,default", help="-par settings, 'default' for none (default 1,default)")
+    ap.add_argument("--kinds", default="slh,schnorr,mixed,slh-invalid-last", help="block kinds")
+    ap.add_argument("--builds", default="release,hook", help="builds to time (default release,hook)")
+    ap.add_argument("--slh-checks", type=int, default=100, help="SLH-DSA checks of a full input (default 100)")
+    ap.add_argument("--mldsa-checks", type=int, default=1000, help="ML-DSA-44 checks of a full input (default 1000)")
+    ap.add_argument("--schnorr-checks", type=int, default=2000, help="Schnorr checks of a full input (default 2000)")
+    ap.add_argument("--min-fill", type=float, default=0.995, help="least fill of what the coinbase leaves (default 0.995)")
     return ap.parse_args()
 
 
@@ -55,7 +73,6 @@ from test_framework.authproxy import AuthServiceProxy  # noqa: E402
 from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase  # noqa: E402
 from test_framework.key import compute_xonly_pubkey, sign_schnorr  # noqa: E402
 from test_framework.messages import (  # noqa: E402
-    COIN,
     COutPoint,
     CTransaction,
     CTxIn,
@@ -64,18 +81,31 @@ from test_framework.messages import (  # noqa: E402
     MAX_BLOCK_WEIGHT,
     ser_compact_size,
 )
-from test_framework.p2mr_slhdsa128s import (  # noqa: E402
+from test_framework.p2mr import p2mr_construct  # noqa: E402
+from test_framework.p2mr_mldsa44 import (  # noqa: E402
+    LEAF_FAIL,
+    MLDSA44_PUBKEY_CHUNK_SIZES,
+    MLDSA44_SIGNATURE_SIZE,
     NO_CODESEPARATOR,
+    OP_CHECKMLDSA44,
+    mldsa44_keygen,
+    mldsa44_sig_chunks,
+    mldsa44_sign_input,
+    split_chunks,
+)
+from test_framework.p2mr_slhdsa128s import (  # noqa: E402
     OP_CHECKSLHDSA128S,
     SLHDSA128S_SIGNATURE_SIZE,
     VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
+    slhdsa128s_keygen,
     slhdsa128s_sig_chunks,
-    slhdsa128s_tree,
+    slhdsa128s_sign_input,
 )
 from test_framework.script import (  # noqa: E402
     CScript,
     LEAF_VERSION_TAPSCRIPT,
     OP_15,
+    OP_7,
     OP_CHECKSIG,
     OP_CHECKSIGVERIFY,
     OP_DROP,
@@ -87,14 +117,12 @@ from test_framework.script import (  # noqa: E402
     TaprootSignatureHash,
 )
 
-C_SLH = VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK
-C_SCHNORR = 50
 COINBASE_MATURITY = 100
-# With the hook on, the public key and the signature need not match: any 32-byte key and any
-# signature of the right length take the worst-case path and pass.
-SLH_PUB = hashlib.sha256(b"m4-measure slh public key").digest()
-SLH_SIG = b"".join(hashlib.sha256(b"m4-measure slh signature %d" % i).digest() for i in range(246))[:SLHDSA128S_SIGNATURE_SIZE]
-SCHNORR_SEC = bytes.fromhex("0101010101010101010101010101010101010101010101010101010101010101")
+VALIDATION_WEIGHT_PER_MLDSA44_CHECK = 250
+SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha384(b"m4-measure slh-dsa key").digest())
+MLDSA_PUB, MLDSA_SEC = mldsa44_keygen(hashlib.sha256(b"m4-measure ml-dsa-44 key").digest())
+MLDSA_PUB_CHUNKS = split_chunks(MLDSA_PUB, MLDSA44_PUBKEY_CHUNK_SIZES)
+SCHNORR_SEC = hashlib.sha256(b"m4-measure schnorr key").digest()
 SCHNORR_PUB = compute_xonly_pubkey(SCHNORR_SEC)[0]
 
 
@@ -111,60 +139,112 @@ def padding_ops(padding):
     return ops
 
 
-def slh_leaf(checks, padding):
-    """Checks one SLH-DSA signature `checks` times, all but the last on copies of its chunks."""
-    ops = padding_ops(padding)
-    for _ in range(checks - 1):
-        ops += [OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]
-    return CScript(ops + [SLH_PUB, OP_CHECKSLHDSA128S])
-
-
-def schnorr_leaf(checks, padding):
-    """Checks one Schnorr signature `checks` times."""
-    ops = padding_ops(padding)
-    ops += [OP_DUP, SCHNORR_PUB, OP_CHECKSIGVERIFY] * (checks - 1)
-    return CScript(ops + [SCHNORR_PUB, OP_CHECKSIG])
-
-
-def smallest_padding(make_leaf, checks, sig_stack, cost):
-    """The tree with the least padding whose spend has a budget (witness size + 50) of at least
-    checks x cost."""
-    def spend_size(padding):
-        leaf = slhdsa128s_tree(make_leaf(checks, padding)).leaves["slh"]
-        return witness_size(sig_stack + [bytes(leaf.script), leaf.control_block])
-    need = checks * cost - 50
-    lo, hi = 0, max(0, need - spend_size(0)) + 8
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if spend_size(mid) >= need:
-            hi = mid
-        else:
-            lo = mid + 1
-    return slhdsa128s_tree(make_leaf(checks, lo))
-
-
 class Kind:
-    def __init__(self, name, tree, checks, cost):
-        self.name, self.tree, self.checks, self.cost = name, tree, checks, cost
-        self.leaf = tree.leaves["slh"]
+    """One kind of budget-filling input: its leaf for a number of checks, its signature stack, and the
+    validation weight of one check."""
+
+    def __init__(self, name, cost, sig_stack_sizes, leaf_ops):
+        self.name, self.cost, self.sig_stack_sizes, self.leaf_ops = name, cost, sig_stack_sizes, leaf_ops
+        self._trees = {}
+
+    def tree(self, checks):
+        """The tree of the leaf with the least padding whose spend has a budget of at least
+        checks x cost, or None if even the unpadded leaf has a budget a whole check too large."""
+        if checks not in self._trees:
+            need = checks * self.cost - 50
+            dummy = [bytes(size) for size in self.sig_stack_sizes]
+
+            def build(padding):
+                return p2mr_construct([("m", CScript(padding_ops(padding) + self.leaf_ops(checks)), LEAF_VERSION_TAPSCRIPT),
+                                       ("fail", LEAF_FAIL, LEAF_VERSION_TAPSCRIPT)])
+
+            def size(padding):
+                leaf = build(padding).leaves["m"]
+                return witness_size(dummy + [bytes(leaf.script), leaf.control_block])
+            if size(0) > need + self.cost - 1:
+                self._trees[checks] = None
+            else:
+                lo, hi = 0, max(0, need - size(0)) + 8
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if size(mid) >= need:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                budget = size(lo) + 50
+                assert checks * self.cost <= budget < (checks + 1) * self.cost, (self.name, checks, budget)
+                self._trees[checks] = build(lo)
+        return self._trees[checks]
+
+    def min_checks(self):
+        checks = 1
+        while self.tree(checks) is None:
+            checks += 1
+        return checks
+
+    def weight(self, checks):
+        return spend_tx(self, checks, (COutPoint(0, 0), 10**8), sign=False).get_weight()
 
 
-def spend_tx(kind, utxo):
-    """A one-input, one-output transaction spending `utxo` (outpoint, value) of `kind`'s tree."""
+KINDS = {
+    "slh": Kind("slh", VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, [520] * 15 + [56],
+                lambda n: ([OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]) * (n - 1) + [SLH_PUB, OP_CHECKSLHDSA128S]),
+    "mldsa": Kind("mldsa", VALIDATION_WEIGHT_PER_MLDSA44_CHECK, [520] * 4 + [340],
+                  lambda n: list(MLDSA_PUB_CHUNKS) + ([OP_7, OP_PICK] * 8 + [OP_CHECKMLDSA44, OP_VERIFY]) * (n - 1) + [OP_CHECKMLDSA44]),
+    "schnorr": Kind("schnorr", 50, [64],
+                    lambda n: [OP_DUP, SCHNORR_PUB, OP_CHECKSIGVERIFY] * (n - 1) + [SCHNORR_PUB, OP_CHECKSIG]),
+}
+assert sum(KINDS["slh"].sig_stack_sizes) == SLHDSA128S_SIGNATURE_SIZE
+assert sum(KINDS["mldsa"].sig_stack_sizes) == MLDSA44_SIGNATURE_SIZE
+
+
+def spend_tx(kind, checks, utxo, sign=True):
+    """A one-input, one-output transaction spending `utxo` (outpoint, value) through the leaf of `kind`
+    with `checks` checks; without `sign`, a stack of the right sizes for weighing."""
     outpoint, value = utxo
+    tree = kind.tree(checks)
+    leaf = tree.leaves["m"]
     tx = CTransaction()
     tx.vin = [CTxIn(outpoint, b"", 0xffffffff)]
-    tx.vout = [CTxOut(value - 10_000, CScript([OP_TRUE]))]
+    tx.vout = [CTxOut(value - 1000, CScript([OP_TRUE]))]
     tx.wit.vtxinwit = [CTxInWitness()]
-    if kind.name == "slh":
-        stack = slhdsa128s_sig_chunks(SLH_SIG)
+    spent = [CTxOut(value, tree.scriptPubKey)]
+    if not sign:
+        stack = [bytes(size) for size in kind.sig_stack_sizes]
+    elif kind.name == "slh":
+        stack = slhdsa128s_sig_chunks(slhdsa128s_sign_input(SLH_SEC, tx, spent, 0, leaf.script))
+    elif kind.name == "mldsa":
+        stack = mldsa44_sig_chunks(mldsa44_sign_input(MLDSA_SEC, tx, spent, 0, leaf.script))
     else:
-        spent = [CTxOut(value, kind.tree.scriptPubKey)]
-        msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, 0, scriptpath=True, leaf_script=kind.leaf.script,
+        msg = TaprootSignatureHash(tx, spent, SIGHASH_DEFAULT, 0, scriptpath=True, leaf_script=leaf.script,
                                    leaf_ver=LEAF_VERSION_TAPSCRIPT, codeseparator_pos=NO_CODESEPARATOR)
         stack = [sign_schnorr(SCHNORR_SEC, msg)]
-    tx.wit.vtxinwit[0].scriptWitness.stack = stack + [bytes(kind.leaf.script), kind.leaf.control_block]
+    tx.wit.vtxinwit[0].scriptWitness.stack = stack + [bytes(leaf.script), leaf.control_block]
+    budget = witness_size(tx.wit.vtxinwit[0].scriptWitness.stack) + 50
+    assert checks * kind.cost <= budget < (checks + 1) * kind.cost, (kind.name, checks, budget)
     return tx
+
+
+def plan(kind, weight_left, full_checks):
+    """Inputs of `kind` (their numbers of checks) that fill weight_left: full inputs, then the largest
+    that fit the rest, down to the smallest input that uses up its budget."""
+    plan_checks = []
+    full_weight = kind.weight(full_checks)
+    while weight_left >= full_weight:
+        plan_checks.append(full_checks)
+        weight_left -= full_weight
+    smallest = kind.min_checks()
+    while weight_left >= kind.weight(smallest):
+        lo, hi = smallest, full_checks
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if kind.weight(mid) <= weight_left:
+                lo = mid
+            else:
+                hi = mid - 1
+        plan_checks.append(lo)
+        weight_left -= kind.weight(lo)
+    return plan_checks
 
 
 def make_block(prev_hash, height, ntime, txs):
@@ -175,16 +255,20 @@ def make_block(prev_hash, height, ntime, txs):
 
 
 class Node:
-    def __init__(self, datadir, par):
+    def __init__(self, binary, datadir, par, hook=None):
         self.datadir = Path(datadir)
         self.datadir.mkdir(parents=True)
         self.port = 30000 + (os.getpid() % 2000) * 2
-        args = [ARGS.bitcoind, "-regtest", f"-datadir={self.datadir}", "-maxsigcachesize=0", "-debug=bench",
-                "-listen=0", "-server", "-rpcuser=m", "-rpcpassword=m", f"-rpcport={self.port}", "-printtoconsole=0"]
+        args = [binary, "-regtest", f"-datadir={self.datadir}", "-maxsigcachesize=0", "-debug=bench", "-listen=0",
+                "-connect=0", "-dnsseed=0", "-server", "-rpcuser=m", "-rpcpassword=m", f"-rpcport={self.port}",
+                "-printtoconsole=0"]
         if par != "default":
             args.append(f"-par={par}")
-        self.proc = subprocess.Popen(args, env=dict(os.environ, SLH_WORST="1"),
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        env = dict(os.environ)
+        if hook is not None:
+            env["SLH_WORST"] = "1" if hook else "0"
+        self.hook = hook
+        self.proc = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         url = f"http://m:m@127.0.0.1:{self.port}"
         for _ in range(1200):
             try:
@@ -192,117 +276,194 @@ class Node:
                 break
             except Exception:
                 if self.proc.poll() is not None:
-                    raise RuntimeError(f"bitcoind_m4_measure exited: {self.proc.stderr.read().decode()}")
+                    raise RuntimeError(f"{binary} exited: {self.proc.stderr.read().decode()}")
                 time.sleep(0.1)
         else:
-            raise RuntimeError("bitcoind_m4_measure did not answer RPC")
+            raise RuntimeError(f"{binary} did not answer RPC")
         self.rpc = AuthServiceProxy(url, timeout=3600)
-        banner = self.proc.stderr.readline().decode()
-        if "SLH worst-case hook: 1" not in banner:
-            raise RuntimeError(f"the node did not report the worst-case hook on: {banner!r}")
 
     def stop(self):
         self.rpc.stop()
-        self.proc.wait(timeout=600)
+        stderr = self.proc.communicate(timeout=600)[1].decode()
+        counters = {}
+        if self.hook is not None:
+            if f"SLH worst-case hook: {1 if self.hook else 0}" not in stderr:
+                raise RuntimeError(f"the measurement node did not report the hook {'on' if self.hook else 'off'}: {stderr!r}")
+            m = re.search(r"counters: slh_verifications=(\d+) sha256_compressions=(\d+)", stderr)
+            counters = {"slh_verifications": int(m.group(1)), "sha256_compressions": int(m.group(2))}
+        return counters
 
-    def bench_lines(self):
-        return (self.datadir / "regtest" / "debug.log").read_text().splitlines()
+    def bench_connect_ms(self):
+        lines = (self.datadir / "regtest" / "debug.log").read_text().splitlines()
+        connect = [float(m.group(1)) for line in lines if (m := re.search(r"- Connect block: ([0-9.]+)ms", line))]
+        return connect[-1] if connect else None
+
+
+def run_block(binary, workdir, chain, block, par, hook, expect_valid):
+    node = Node(binary, workdir, par, hook)
+    for b in chain:
+        assert node.rpc.submitblock(b.serialize().hex()) is None
+    tip = node.rpc.getbestblockhash()
+    start = time.perf_counter()
+    result = node.rpc.submitblock(block.serialize().hex())
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    best = node.rpc.getbestblockhash()
+    bench = node.bench_connect_ms() if expect_valid else None
+    counters = node.stop()
+    if expect_valid and not (result is None and best == block.hash_hex):
+        raise RuntimeError(f"block not connected: {result}")
+    if not expect_valid and not (result is not None and "Invalid SLH-DSA-SHA2-128s signature" in result and best == tip):
+        raise RuntimeError(f"invalid block not rejected as expected: {result}")
+    return elapsed_ms, bench, counters
 
 
 def main():
     work = Path(ARGS.workdir)
     work.mkdir(parents=False, exist_ok=False)
-    kinds = {}
-    slh_tree = smallest_padding(slh_leaf, ARGS.slh_checks, slhdsa128s_sig_chunks(SLH_SIG), C_SLH)
-    kinds["slh"] = Kind("slh", slh_tree, ARGS.slh_checks, C_SLH)
-    sch_tree = smallest_padding(schnorr_leaf, ARGS.schnorr_checks, [bytes(64)], C_SCHNORR)
-    kinds["schnorr"] = Kind("schnorr", sch_tree, ARGS.schnorr_checks, C_SCHNORR)
+    kinds = ARGS.kinds.split(",")
+    pars = ARGS.par.split(",")
+    builds = ARGS.builds.split(",")
+    full = {"slh": ARGS.slh_checks, "mldsa": ARGS.mldsa_checks, "schnorr": ARGS.schnorr_checks}
 
-    # How many inputs of each kind fit the block weight.
-    limit = int(MAX_BLOCK_WEIGHT * ARGS.fill)
-    dummy_utxo = (COutPoint(0, 0), 50 * COIN)
-    weight = {k: spend_tx(kinds[k], dummy_utxo).get_weight() for k in kinds}
-    plan = {
-        "slh": [("slh", (limit - 4000) // weight["slh"])],
-        "schnorr": [("schnorr", (limit - 4000) // weight["schnorr"])],
-        "mixed": [("slh", (limit - 4000) // 2 // weight["slh"]), ("schnorr", (limit - 4000) // 2 // weight["schnorr"])],
-    }
-    need = {k: max(n for block in plan.values() for kk, n in block if kk == k) for k in kinds}
+    # What a block with only its coinbase leaves of the maximum weight.
+    empty = make_block("01" * 32, COINBASE_MATURITY + 3, 1, [])
+    available = MAX_BLOCK_WEIGHT - empty.get_weight() - 4  # room for a larger transaction count
+    plans = {}
+    for name in ("slh", "schnorr", "mixed"):
+        if name == "mixed":
+            third = available // 3
+            p_slh = plan(KINDS["slh"], third, full["slh"])
+            used = sum(KINDS["slh"].weight(c) for c in p_slh)
+            p_ml = plan(KINDS["mldsa"], 2 * third - used, full["mldsa"])
+            used += sum(KINDS["mldsa"].weight(c) for c in p_ml)
+            p_sch = plan(KINDS["schnorr"], available - used, full["schnorr"])
+            plans[name] = [("slh", c) for c in p_slh] + [("mldsa", c) for c in p_ml] + [("schnorr", c) for c in p_sch]
+        else:
+            plans[name] = [(name, c) for c in plan(KINDS[name], available, full[name])]
 
-    # The chain: COINBASE_MATURITY + 1 blocks paying to OP_TRUE, then one block funding the outputs.
-    print("building the chain", flush=True)
-    setup_node = Node(work / "setup", "default")
-    prev = setup_node.rpc.getbestblockhash()
-    t0 = setup_node.rpc.getblockheader(prev)["time"] + 1
-    setup_node.stop()
+    # The chain: blocks paying to OP_TRUE, then one funding an output for every planned input.
+    print("building the chain and signing", flush=True)
+    t0 = 1296688602 + 1
+    prev = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"  # regtest genesis
     chain = []
-    for height in range(1, COINBASE_MATURITY + 2):
+    for height in range(1, COINBASE_MATURITY + 3):
         block = make_block(prev, height, t0 + height, [])
         chain.append(block)
         prev = block.hash_hex
-    coinbase = chain[0].vtx[0]
     fund = CTransaction()
-    fund.vin = [CTxIn(COutPoint(coinbase.txid_int, 0), b"", 0xffffffff)]
-    per_output = (coinbase.vout[0].nValue - 100_000) // (need["slh"] + need["schnorr"])
-    for k in ("slh", "schnorr"):
-        fund.vout += [CTxOut(per_output, kinds[k].tree.scriptPubKey)] * need[k]
-    height = COINBASE_MATURITY + 2
-    funding_block = make_block(prev, height, t0 + height, [fund])
-    chain.append(funding_block)
-    prev = funding_block.hash_hex
-    utxos = {"slh": [], "schnorr": []}
-    for i, out in enumerate(fund.vout):
-        utxos["slh" if i < need["slh"] else "schnorr"].append((COutPoint(fund.txid_int, i), out.nValue))
+    fund.vin = [CTxIn(COutPoint(chain[i].vtx[0].txid_int, 0), b"", 0xffffffff) for i in range(2)]
+    entries = [(name, kind, checks) for name in ("slh", "schnorr", "mixed") for kind, checks in plans[name]]
+    value = (2 * chain[0].vtx[0].vout[0].nValue - 100_000) // len(entries)
+    fund.vout = [CTxOut(value, KINDS[kind].tree(checks).scriptPubKey) for _, kind, checks in entries]
+    height = COINBASE_MATURITY + 3
+    chain.append(make_block(prev, height, t0 + height, [fund]))
+    prev = chain[-1].hash_hex
+    height += 1
+    outputs = {name: [] for name in plans}
+    for i, (name, kind, checks) in enumerate(entries):
+        outputs[name].append((COutPoint(fund.txid_int, i), value))
 
     blocks = {}
-    height += 1
-    for name in ARGS.kinds.split(","):
-        txs = []
-        checks = {"slh": 0, "schnorr": 0}
-        for k, n in plan[name]:
-            txs += [spend_tx(kinds[k], utxos[k][i]) for i in range(n)]
-            checks[k] += n * kinds[k].checks
-        block = make_block(prev, height, t0 + height, txs)
+    for name in ("slh", "schnorr", "mixed"):
+        txs = [spend_tx(KINDS[kind], checks, outputs[name][i]) for i, (kind, checks) in enumerate(plans[name])]
+        blocks[name] = make_block(prev, height, t0 + height, txs)
+    # slh-invalid-last: the slh block with one byte of its last input's signature changed (its last
+    # chunk, in the last hypertree layer), so that the check runs to the end and then fails.
+    bad = copy.deepcopy(blocks["slh"].vtx[-1])
+    stack = list(bad.wit.vtxinwit[0].scriptWitness.stack)
+    stack[15] = stack[15][:-1] + bytes([stack[15][-1] ^ 1])
+    bad.wit.vtxinwit[0].scriptWitness.stack = stack
+    blocks["slh-invalid-last"] = make_block(prev, height, t0 + height, blocks["slh"].vtx[1:-1] + [bad])
+    plans["slh-invalid-last"] = plans["slh"]
+
+    info = {}
+    for name in kinds:
+        block = blocks[name]
+        planned = {k: sum(c for kk, c in plans[name] if kk == k) for k in KINDS}
+        fill = (block.get_weight() - empty.get_weight()) / (MAX_BLOCK_WEIGHT - empty.get_weight())
         assert block.get_weight() <= MAX_BLOCK_WEIGHT
-        blocks[name] = (block, checks)
-        print(f"block {name}: {len(txs)} transactions, weight {block.get_weight()}, "
-              f"{checks['slh']} SLH-DSA checks, {checks['schnorr']} Schnorr checks", flush=True)
+        assert fill >= ARGS.min_fill, (name, fill)
+        info[name] = {"weight": block.get_weight(), "fill": fill, "inputs": len(block.vtx) - 1, "planned": planned}
+        if name == "slh-invalid-last":
+            info[name]["planned_slh_to_failure"] = planned["slh"] - plans[name][-1][1] + 1
+        print(f"block {name}: weight {block.get_weight()}, fill {fill:.4%}, {len(block.vtx) - 1} inputs, "
+              f"checks planned {planned}", flush=True)
 
-    results = []
-    for name, (block, checks) in blocks.items():
-        for par in ARGS.par.split(","):
-            for rnd in range(ARGS.rounds):
-                node = Node(work / f"{name}-par{par}-r{rnd + 1}", par)
-                for b in chain:
-                    assert node.rpc.submitblock(b.serialize().hex()) is None
-                start = time.perf_counter()
-                result = node.rpc.submitblock(block.serialize().hex())
-                elapsed = time.perf_counter() - start
-                ok = result is None and node.rpc.getbestblockhash() == block.hash_hex
-                lines = node.bench_lines()
-                node.stop()
-                if not ok:
-                    raise RuntimeError(f"block {name} was not connected: {result}")
-                connect = [float(m.group(1)) for line in lines if (m := re.search(r"- Connect block: ([0-9.]+)ms", line))]
-                verify = [float(m.group(1)) for line in lines if (m := re.search(r"- Verify [0-9]+ txins: ([0-9.]+)ms", line))]
-                row = {"block": name, "par": par, "round": rnd + 1, "submitblock_ms": elapsed * 1000,
-                       "connect_block_ms": connect[-1], "verify_txins_ms": verify[-1], "weight": block.get_weight(), **checks}
-                results.append(row)
-                print(json.dumps(row), flush=True)
+    runs = []
+    # The real path's counters: bitcoind_m4_measure with the hook off, -par=1, once per block.
+    for name in kinds:
+        valid = name != "slh-invalid-last"
+        _, _, counters = run_block(ARGS.bitcoind_measure, work / f"count-{name}", chain, blocks[name], "1", False, valid)
+        info[name]["counted_real"] = counters
+        print(f"counted, hook off, {name}: {counters}", flush=True)
+    for build in builds:
+        for name in kinds:
+            valid = name != "slh-invalid-last"
+            if build == "hook" and not valid:
+                continue
+            for par in pars:
+                for rnd in range(ARGS.rounds):
+                    binary = ARGS.bitcoind_release if build == "release" else ARGS.bitcoind_measure
+                    hook = None if build == "release" else True
+                    ms, bench, counters = run_block(binary, work / f"{build}-{name}-par{par}-r{rnd + 1}", chain, blocks[name], par, hook, valid)
+                    row = {"build": build, "block": name, "par": par, "round": rnd + 1, "connect_ms": ms,
+                           "bench_connect_ms": bench, **counters}
+                    runs.append(row)
+                    print(json.dumps(row), flush=True)
 
-    (work / "results.json").write_text(json.dumps(results, indent=1))
-    print("\nblock | -par | connect block ms (median) | verify txins ms (median) | SLH-DSA checks | Schnorr checks")
-    medians = {}
-    for name in blocks:
-        for par in ARGS.par.split(","):
-            rows = [r for r in results if r["block"] == name and r["par"] == par]
-            medians[(name, par)] = statistics.median(r["connect_block_ms"] for r in rows)
-            print(f"{name} | {par} | {medians[(name, par)]:.1f} | {statistics.median(r['verify_txins_ms'] for r in rows):.1f} | "
-                  f"{rows[0]['slh']} | {rows[0]['schnorr']}")
-    if "slh" in blocks and "schnorr" in blocks:
-        for par in ARGS.par.split(","):
-            print(f"ratio SLH-DSA block / Schnorr block, -par={par}: {medians[('slh', par)] / medians[('schnorr', par)]:.3f}")
+    # Counted verifications against the plan.
+    for name in kinds:
+        expected = info[name].get("planned_slh_to_failure", info[name]["planned"]["slh"])
+        counted = info[name]["counted_real"]["slh_verifications"]
+        assert counted == expected, (name, "hook off", counted, expected)
+        for row in runs:
+            if row["build"] == "hook" and row["block"] == name:
+                assert row["slh_verifications"] == expected or row["par"] != "1", (name, "hook", row)
+
+    summary = []
+    print("\nbuild | -par | block | weight | fill | inputs | checks SLH/ML-DSA/Schnorr planned | SLH counted (hook / real) | "
+          "compressions per SLH check (hook / real) | connect ms median | max | bench median | max/schnorr median | gate")
+    gate_ok = True
+    for build in builds:
+        for par in pars:
+            ref = [r["connect_ms"] for r in runs if r["build"] == build and r["par"] == par and r["block"] == "schnorr"]
+            ref_median = statistics.median(ref) if ref else None
+            for name in kinds:
+                rows = [r for r in runs if r["build"] == build and r["par"] == par and r["block"] == name]
+                if not rows:
+                    continue
+                times = [r["connect_ms"] for r in rows]
+                benches = [r["bench_connect_ms"] for r in rows if r["bench_connect_ms"] is not None]
+                # The counters are plain counters, exact only when one thread checks the scripts: they
+                # come from the -par=1 runs of the same build and block.
+                single = [r for r in runs if r["build"] == build and r["par"] == "1" and r["block"] == name]
+                hook_counts = [r.get("slh_verifications") for r in single if "slh_verifications" in r]
+                hook_comp = [r["sha256_compressions"] / r["slh_verifications"] for r in single if r.get("slh_verifications")]
+                real = info[name]["counted_real"]
+                real_comp = real["sha256_compressions"] / real["slh_verifications"] if real["slh_verifications"] else None
+                ratio = max(times) / ref_median if ref_median else None
+                passed = None if name == "schnorr" or ratio is None else ratio <= 1
+                if passed is False:
+                    gate_ok = False
+                p = info[name]["planned"]
+                entry = {"build": build, "par": par, "block": name, "weight": info[name]["weight"], "fill": info[name]["fill"],
+                         "inputs": info[name]["inputs"], "planned": p, "slh_counted_hook": hook_counts[0] if hook_counts else None,
+                         "slh_counted_real": real["slh_verifications"],
+                         "compressions_per_check_hook": statistics.median(hook_comp) if hook_comp else None,
+                         "compressions_per_check_real": real_comp, "connect_ms_median": statistics.median(times),
+                         "connect_ms_max": max(times), "bench_connect_ms_median": statistics.median(benches) if benches else None,
+                         "ratio_max_to_schnorr_median": ratio, "gate_pass": passed}
+                summary.append(entry)
+                fmt = lambda x, f="{:.1f}": "-" if x is None else f.format(x)  # noqa: E731
+                print(f"{build} | {par} | {name} | {entry['weight']} | {entry['fill']:.4%} | {entry['inputs']} | "
+                      f"{p['slh']}/{p['mldsa']}/{p['schnorr']} | {fmt(entry['slh_counted_hook'], '{}')} / {real['slh_verifications']} | "
+                      f"{fmt(entry['compressions_per_check_hook'])} / {fmt(real_comp)} | {entry['connect_ms_median']:.1f} | "
+                      f"{entry['connect_ms_max']:.1f} | {fmt(entry['bench_connect_ms_median'])} | {fmt(ratio, '{:.3f}')} | "
+                      f"{'-' if passed is None else ('pass' if passed else 'FAIL')}")
+    (work / "results.json").write_text(json.dumps({"blocks": info, "runs": runs, "summary": summary}, indent=1))
+    print(f"\ngate (every block kind's maximum <= the schnorr median, per build and -par): {'PASS' if gate_ok else 'FAIL'}")
+    return 0 if gate_ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

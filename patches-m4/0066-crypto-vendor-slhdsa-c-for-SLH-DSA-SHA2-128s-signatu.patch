@@ -1,4 +1,4 @@
-From 0ca013f60ab89f842e6089223e14efbfb95dc3fe Mon Sep 17 00:00:00 2001
+From dd57b3c1d6445e347a3213a3f5c772303679ad65 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 11:40:07 +0000
 Subject: [PATCH 66/77] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
@@ -33,7 +33,16 @@ into src/crypto/slhdsa128s/.
   -Wbidi-chars=any and, as one unit, -Wformat -Wformat-security (with
   MSVC /W3 and the warnings Core turns off); and APPEND_CPPFLAGS and
   APPEND_CFLAGS last on their command line, as cmake/secp256k1.cmake
-  arranges for libsecp256k1.
+  arranges for libsecp256k1. The probes compile with the same rule, so
+  they see the appended flags last too, as Core's C++ probes do.
+- The library chooses its byte order with
+  "#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__", which a C compiler that
+  defines neither macro (MSVC) reads as big-endian. slhdsa128s_byte_order.h,
+  included before each of its files for this target only, supplies the
+  macros on MSVC's little-endian targets (_M_IX86, _M_X64, _M_ARM,
+  _M_ARM64), stops the build for any other compiler without them or with
+  only some of them, and checks them against CMAKE_C_BYTE_ORDER, which
+  must equal CMAKE_CXX_BYTE_ORDER. The vendored files stay unmodified.
 - src/crypto/slhdsa128s.h exposes one function, SLHDSA128SVerify:
   slh_verify of FIPS 205, the external interface of pure SLH-DSA with a
   context string, over a 32-byte message. It is not HashSLH-DSA and not
@@ -49,11 +58,11 @@ into src/crypto/slhdsa128s/.
 src/crypto/slhdsa128s/README.md records where every file came from, with
 its SHA-256.
 ---
- src/crypto/CMakeLists.txt          |  97 ++++
+ src/crypto/CMakeLists.txt          | 122 +++++
  src/crypto/slhdsa128s.cpp          |  44 ++
  src/crypto/slhdsa128s.h            |  44 ++
  src/crypto/slhdsa128s/LICENSE      | 248 ++++++++++
- src/crypto/slhdsa128s/README.md    |  80 ++++
+ src/crypto/slhdsa128s/README.md    |  82 ++++
  src/crypto/slhdsa128s/cbmc.h       | 143 ++++++
  src/crypto/slhdsa128s/plat_local.h | 266 +++++++++++
  src/crypto/slhdsa128s/sha2_256.c   | 271 +++++++++++
@@ -66,7 +75,8 @@ its SHA-256.
  src/crypto/slhdsa128s/slh_sha2.c   | 581 +++++++++++++++++++++++
  src/crypto/slhdsa128s/slh_sys.h    |  40 ++
  src/crypto/slhdsa128s/slh_var.h    |  61 +++
- 17 files changed, 3374 insertions(+)
+ src/crypto/slhdsa128s_byte_order.h |  43 ++
+ 18 files changed, 3444 insertions(+)
  create mode 100644 src/crypto/slhdsa128s.cpp
  create mode 100644 src/crypto/slhdsa128s.h
  create mode 100644 src/crypto/slhdsa128s/LICENSE
@@ -83,12 +93,13 @@ its SHA-256.
  create mode 100644 src/crypto/slhdsa128s/slh_sha2.c
  create mode 100644 src/crypto/slhdsa128s/slh_sys.h
  create mode 100644 src/crypto/slhdsa128s/slh_var.h
+ create mode 100644 src/crypto/slhdsa128s_byte_order.h
 
 diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
-index e1ae782..5669bf1 100644
+index e1ae782..6b533b6 100644
 --- a/src/crypto/CMakeLists.txt
 +++ b/src/crypto/CMakeLists.txt
-@@ -21,6 +21,101 @@ set_target_properties(bitcoin_mldsa44 PROPERTIES
+@@ -21,6 +21,126 @@ set_target_properties(bitcoin_mldsa44 PROPERTIES
    C_VISIBILITY_PRESET hidden
  )
  
@@ -110,6 +121,24 @@ index e1ae782..5669bf1 100644
 +set_target_properties(bitcoin_slhdsa128s PROPERTIES
 +  C_VISIBILITY_PRESET hidden
 +)
++# Byte order. The library tests `__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`, which a C compiler without
++# these macros (MSVC) reads as true. slhdsa128s_byte_order.h, included before each of its files,
++# supplies them where they are known and stops the build otherwise; it also checks them against the
++# byte order CMake found, and the C and C++ compilers must agree on that.
++if(CMAKE_C_BYTE_ORDER AND CMAKE_CXX_BYTE_ORDER AND NOT CMAKE_C_BYTE_ORDER STREQUAL CMAKE_CXX_BYTE_ORDER)
++  message(FATAL_ERROR "The C compiler targets ${CMAKE_C_BYTE_ORDER}, the C++ compiler ${CMAKE_CXX_BYTE_ORDER}.")
++endif()
++if(CMAKE_C_BYTE_ORDER STREQUAL "LITTLE_ENDIAN")
++  target_compile_definitions(bitcoin_slhdsa128s PRIVATE SLHDSA128S_CMAKE_LITTLE_ENDIAN)
++elseif(CMAKE_C_BYTE_ORDER STREQUAL "BIG_ENDIAN")
++  target_compile_definitions(bitcoin_slhdsa128s PRIVATE SLHDSA128S_CMAKE_BIG_ENDIAN)
++endif()
++set(slhdsa128s_byte_order_header ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s_byte_order.h)
++if(MSVC OR CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
++  target_compile_options(bitcoin_slhdsa128s PRIVATE /FI${slhdsa128s_byte_order_header})
++else()
++  target_compile_options(bitcoin_slhdsa128s PRIVATE -include ${slhdsa128s_byte_order_header})
++endif()
 +# Compile options of the C files, chosen here rather than taken from core_interface (which also
 +# carries Threads' generator expressions, -fmacro-prefix-map and C++ workarounds):
 +# - Core's hardening, probed again with the C compiler as Core probes it for C++: the pair
@@ -126,11 +155,19 @@ index e1ae782..5669bf1 100644
 +# This follows cmake/secp256k1.cmake for libsecp256k1, plus the hardening. Each unit is a CMake list,
 +# never joined and split again.
 +include(CheckCSourceCompiles)
++# APPEND_CPPFLAGS and APPEND_CFLAGS end the compile command line of the C files, and of the probes below.
++string(APPEND CMAKE_C_COMPILE_OBJECT " ${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
 +function(slhdsa128s_try_add_c_options target required source)
 +  set(unit ${ARGN})
 +  list(JOIN unit " " unit_as_string)
-+  string(MAKE_C_IDENTIFIER "SLHDSA128S_C_ACCEPTS_${unit_as_string}" accepted)
++  string(SHA256 appended_hash "${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
++  string(SUBSTRING "${appended_hash}" 0 8 appended_hash)
++  string(MAKE_C_IDENTIFIER "SLHDSA128S_C_ACCEPTS_${unit_as_string}_${appended_hash}" accepted)
 +  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
++  # The probe compiles with the same rule as the library, APPEND_CPPFLAGS and APPEND_CFLAGS last, as
++  # Core passes its C++ rule to its probes (CMAKE_TRY_COMPILE_PLATFORM_VARIABLES, top-level
++  # CMakeLists.txt).
++  list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES CMAKE_C_COMPILE_OBJECT)
 +  set(CMAKE_REQUIRED_FLAGS "${unit_as_string} ${working_compiler_werror_flag}")
 +  check_c_source_compiles("${source}" ${accepted})
 +  if(${accepted})
@@ -185,12 +222,11 @@ index e1ae782..5669bf1 100644
 +  # -Wformat-security only works together with -Wformat, so the two are one unit, as Core has them.
 +  slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -Wformat -Wformat-security)
 +endif()
-+string(APPEND CMAKE_C_COMPILE_OBJECT " ${APPEND_CPPFLAGS} ${APPEND_CFLAGS}")
 +
  add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    aes.cpp
    chacha20.cpp
-@@ -39,6 +134,7 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
+@@ -39,6 +159,7 @@ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    sha3.cpp
    sha512.cpp
    siphash.cpp
@@ -198,7 +234,7 @@ index e1ae782..5669bf1 100644
    ../support/cleanse.cpp
  )
  
-@@ -46,6 +142,7 @@ target_link_libraries(bitcoin_crypto
+@@ -46,6 +167,7 @@ target_link_libraries(bitcoin_crypto
    PRIVATE
      core_interface
      bitcoin_mldsa44
@@ -562,10 +598,10 @@ index 0000000..6b6fb03
 +   limitations under the License.
 diff --git a/src/crypto/slhdsa128s/README.md b/src/crypto/slhdsa128s/README.md
 new file mode 100644
-index 0000000..d95317c
+index 0000000..b90e8fe
 --- /dev/null
 +++ b/src/crypto/slhdsa128s/README.md
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,82 @@
 +# SLH-DSA-SHA2-128s verification (vendored slhdsa-c)
 +
 +This directory holds files of [slhdsa-c](https://github.com/pq-code-package/slhdsa-c),
@@ -626,7 +662,9 @@ index 0000000..d95317c
 +
 +This file. Nothing in the files above was changed. `src/crypto/CMakeLists.txt`
 +compiles the four `.c` files as the static library `bitcoin_slhdsa128s`, with
-+hidden symbol visibility; Core's hardening probed again with the C compiler
++hidden symbol visibility; `../slhdsa128s_byte_order.h` included before each file, which
++gives the byte order macros the library tests to compilers without them (MSVC) or stops the build;
++Core's hardening probed again with the C compiler
 +(the pair `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3` as one unit with Core's
 +optimization check, `-Wstack-protector`, `-fstack-protector-all`,
 +`-fcf-protection=full`, `-fstack-clash-protection`, `-mbranch-protection` on
@@ -3579,6 +3617,55 @@ index 0000000..3be27a4
 +
 +/* _SLH_VAR_H_ */
 +#endif
+diff --git a/src/crypto/slhdsa128s_byte_order.h b/src/crypto/slhdsa128s_byte_order.h
+new file mode 100644
+index 0000000..afc34b8
+--- /dev/null
++++ b/src/crypto/slhdsa128s_byte_order.h
+@@ -0,0 +1,43 @@
++/* Copyright (c) 2026 duncan0k
++ * Distributed under the MIT software license, see the accompanying
++ * file COPYING or http://www.opensource.org/licenses/mit-license.php.
++ *
++ * Included before every file of the vendored SLH-DSA library (src/crypto/slhdsa128s/), by
++ * src/crypto/CMakeLists.txt for that target only. The library chooses its byte order with
++ * `#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`, which a C compiler that defines neither macro
++ * (MSVC) reads as 0 == 0: big-endian, on a little-endian machine. Here the macros are checked or
++ * supplied, and anything unknown stops the build.
++ */
++
++#ifndef BITCOIN_CRYPTO_SLHDSA128S_BYTE_ORDER_H
++#define BITCOIN_CRYPTO_SLHDSA128S_BYTE_ORDER_H
++
++#if defined(__BYTE_ORDER__) || defined(__ORDER_LITTLE_ENDIAN__) || defined(__ORDER_BIG_ENDIAN__)
++/* The compiler gives the byte order (GCC, Clang): all three macros, and one of the two orders. */
++#if !defined(__BYTE_ORDER__) || !defined(__ORDER_LITTLE_ENDIAN__) || !defined(__ORDER_BIG_ENDIAN__)
++#error "slhdsa128s: only some of __BYTE_ORDER__, __ORDER_LITTLE_ENDIAN__, __ORDER_BIG_ENDIAN__ are defined"
++#endif
++#if __ORDER_LITTLE_ENDIAN__ == __ORDER_BIG_ENDIAN__
++#error "slhdsa128s: __ORDER_LITTLE_ENDIAN__ equals __ORDER_BIG_ENDIAN__"
++#endif
++#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__ && __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
++#error "slhdsa128s: __BYTE_ORDER__ is neither little- nor big-endian"
++#endif
++#elif defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_ARM) || defined(_M_ARM64))
++/* MSVC defines none of them; every target it has these macros for is little-endian. */
++#define __ORDER_LITTLE_ENDIAN__ 1234
++#define __ORDER_BIG_ENDIAN__ 4321
++#define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
++#else
++#error "slhdsa128s: the byte order of this C compiler and target is unknown"
++#endif
++
++/* The byte order CMake found for the C and C++ compilers, which must agree with the above. */
++#if defined(SLHDSA128S_CMAKE_LITTLE_ENDIAN) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
++#error "slhdsa128s: CMake found a little-endian target, the C compiler says otherwise"
++#endif
++#if defined(SLHDSA128S_CMAKE_BIG_ENDIAN) && __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__
++#error "slhdsa128s: CMake found a big-endian target, the C compiler says otherwise"
++#endif
++
++#endif /* BITCOIN_CRYPTO_SLHDSA128S_BYTE_ORDER_H */
 -- 
 2.49.0.windows.1
 

@@ -1,4 +1,4 @@
-From 4d85a3529657b79a65fe459afd495d098886353f Mon Sep 17 00:00:00 2001
+From d1e67d12335b224c35a057be1f6e5199aea61776 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:47 +0000
 Subject: [PATCH 77/77] doc: describe OP_CHECKSLHDSA128S
@@ -9,17 +9,17 @@ checks, the verification library, the validation weight (5000) and how
 it was set, the activation (on Ark-0 from height 32000), the relay
 policy, what a wallet should do, and the tests.
 ---
- doc/p2mr-slhdsa128s.md | 233 +++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr-slhdsa128s.md | 242 +++++++++++++++++++++++++++++++++++++++++
  doc/p2mr.md            |  11 +-
- 2 files changed, 240 insertions(+), 4 deletions(-)
+ 2 files changed, 249 insertions(+), 4 deletions(-)
  create mode 100644 doc/p2mr-slhdsa128s.md
 
 diff --git a/doc/p2mr-slhdsa128s.md b/doc/p2mr-slhdsa128s.md
 new file mode 100644
-index 0000000..5cbee76
+index 0000000..47f1509
 --- /dev/null
 +++ b/doc/p2mr-slhdsa128s.md
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,242 @@
 +# OP_CHECKSLHDSA128S: an experimental SLH-DSA-SHA2-128s check in P2MR leaves
 +
 +This build adds one opcode, `OP_CHECKSLHDSA128S`, that verifies an SLH-DSA-SHA2-128s signature
@@ -127,6 +127,12 @@ index 0000000..5cbee76
 +upstream project calls the library work in progress, so it is checked against the NIST ACVP
 +vectors and another implementation, and fuzzed.
 +
++The library chooses its byte order with `#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`, which a C
++compiler that defines neither macro (MSVC) would read as big-endian. `src/crypto/slhdsa128s_byte_order.h`,
++included before each of its files, supplies the macros for MSVC's little-endian targets, stops the build
++for any other compiler without them or with only some of them, and checks them against the byte order
++CMake found, on which the C and C++ compilers must agree. The vendored files are not changed.
++
 +`SLHDSA128SVerify` in `src/crypto/slhdsa128s.h` is the only entry point. It checks the lengths of
 +the key (32), the message (32, a signature message), the signature (7,856) and the context string
 +(at most 255) before it calls the library: the vendored `slh_verify` hashes the first 16 bytes of the signature before it checks
@@ -164,17 +170,20 @@ index 0000000..5cbee76
 +  bound rounded up). The p99 of that machine is about twice its median for Schnorr checks too,
 +  which inflates the result.
 +
-+5,000 is at least 1.37 times the highest of these (3,658), a margin for hardware weaker than that
++5,000 is at least 1.36 times the highest of these (3,658), a margin for hardware weaker than that
 +machine.
 +
 +The measurement-only build (the worst-case hook, and a choice of Core's SHA-256 implementation in
-+`bench_bitcoin`) is not part of this series: it is `contrib/m4-measure/` of the patch repository,
-+with its scripts, among them a whole-block comparison on regtest (blocks that use up their weight
-+on SLH-DSA checks, on Schnorr checks and on both, connected by a node without a signature cache).
-+Configured with it, CMake builds `bench_bitcoin` and, for that script, a measurement-only node
-+`bitcoind_m4_measure` that has no install rule, and nothing else: it refuses a configuration that
-+defines any other executable or shared library target, `cmake --install` fails, and `bitcoind.cpp`
-+and `qt/main.cpp` do not compile for any other target.
++`bench_bitcoin`) is not part of this series: it is `contrib/m4-measure/` of the patch repository, with
++its scripts, among them the whole-block gate on regtest: blocks filled to the maximum weight on SLH-DSA
++checks, on ML-DSA-44, SLH-DSA and Schnorr checks together, and on SLH-DSA checks with an invalid last
++signature, each to be connected, by a node without a signature cache, no slower than the median of a
++block full of Schnorr checks, in a release build and with the hook. The hook lives in a measurement-only
++copy of the library that no node links. Configured with it, CMake builds `bench_bitcoin` and, for the
++whole-block gate, a measurement-only node `bitcoind_m4_measure` that runs on regtest only and without
++P2P, and nothing else: it refuses a configuration that defines any other executable or shared library
++target, nothing of it can be installed, and `bitcoind.cpp` and `qt/main.cpp` do not compile for any
++other target.
 +
 +Empty signatures use no weight. The budget of one input is shared by every check in it:
 +`50 x N_Schnorr + 250 x N_ML-DSA-44 + C x N_SLH-DSA <= witness size + 50`.

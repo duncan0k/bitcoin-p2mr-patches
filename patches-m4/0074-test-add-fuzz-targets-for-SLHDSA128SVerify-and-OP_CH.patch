@@ -1,4 +1,4 @@
-From 75325fdaa8c37988d43b3a22984cd627e77d2ee4 Mon Sep 17 00:00:00 2001
+From 49b47a80e26ba114bff02b02dbe313ad7fac07d7 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 74/77] test: add fuzz targets for SLHDSA128SVerify and
@@ -8,7 +8,9 @@ Subject: [PATCH 74/77] test: add fuzz targets for SLHDSA128SVerify and
   context strings and signatures of any length, or the valid fixture with
   a few bytes or lengths changed. It checks that a wrong length never
   reaches the library, which reads the start of the signature before it
-  checks its length, and that nothing but the fixture itself verifies.
+  checks its length, that the fixture verifies, and that no changed
+  fixture does. From arbitrary input any other valid signature may come
+  up, so there only the length rules and the fixture are checked.
 - p2mr_slhdsa128s runs an executed or unexecuted SLH-DSA leaf through
   VerifyScript with every combination of the flags around it, chunk and
   key sizes at each boundary and hash types around the valid ones, and
@@ -19,8 +21,8 @@ Subject: [PATCH 74/77] test: add fuzz targets for SLHDSA128SVerify and
 ---
  src/test/fuzz/CMakeLists.txt        |   2 +
  src/test/fuzz/p2mr_slhdsa128s.cpp   | 176 ++++++++++++++++++++++++++++
- src/test/fuzz/slhdsa128s_verify.cpp |  74 ++++++++++++
- 3 files changed, 252 insertions(+)
+ src/test/fuzz/slhdsa128s_verify.cpp |  78 ++++++++++++
+ 3 files changed, 256 insertions(+)
  create mode 100644 src/test/fuzz/p2mr_slhdsa128s.cpp
  create mode 100644 src/test/fuzz/slhdsa128s_verify.cpp
 
@@ -228,10 +230,10 @@ index 0000000..bbb5c87
 +}
 diff --git a/src/test/fuzz/slhdsa128s_verify.cpp b/src/test/fuzz/slhdsa128s_verify.cpp
 new file mode 100644
-index 0000000..df64b6f
+index 0000000..afbc46f
 --- /dev/null
 +++ b/src/test/fuzz/slhdsa128s_verify.cpp
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,78 @@
 +// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -262,8 +264,10 @@ index 0000000..df64b6f
 +
 +// SLHDSA128SVerify (src/crypto/slhdsa128s.h) on inputs of any length: it must never read out of
 +// bounds (the vendored slh_verify hashes the first 16 bytes of the signature before it checks its
-+// length), never call the library with a wrong length, and accept nothing but the valid fixture
-+// signature on its own message, key and context string.
++// length), and never call the library with a wrong length. From the fixture, changed or not, it must
++// accept exactly the unchanged fixture; from arbitrary input, any valid signature may come up (for
++// example one of another implementation's vectors), so only the length rules and the fixture itself
++// are checked there.
 +FUZZ_TARGET(slhdsa128s_verify)
 +{
 +    FuzzedDataProvider provider(buffer.data(), buffer.size());
@@ -304,7 +308,9 @@ index 0000000..df64b6f
 +    assert(SLHDSA128SVerifyLibraryCalls() == calls_before + (lengths_ok ? 1 : 0));
 +    if (!lengths_ok) assert(!valid);
 +    const bool fixture{pubkey == FIXTURE_PUBKEY && msg == FIXTURE_MSG && ctx == FIXTURE_CTX && sig == FIXTURE_SIG};
-+    assert(valid == fixture);
++    if (fixture) assert(valid);
++    // A changed fixture is a forgery of a known signature: it must fail.
++    if (from_fixture && !fixture) assert(!valid);
 +}
 -- 
 2.49.0.windows.1

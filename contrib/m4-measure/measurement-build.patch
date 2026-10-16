@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6109639..9a4cf1d 100644
+index 6109639..5f17023 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -184,6 +184,72 @@ endif()
+@@ -184,6 +184,73 @@ endif()
  option(BUILD_BENCH "Build bench_bitcoin executable." OFF)
  option(BUILD_FUZZ_BINARY "Build fuzz binary." OFF)
  option(BUILD_FOR_FUZZING "Build for fuzzing. Enabling this will disable all other targets and override BUILD_FUZZ_BINARY." OFF)
@@ -25,8 +25,9 @@ index 6109639..9a4cf1d 100644
 +  if(NOT BUILD_BENCH AND NOT SLH_MEASURE_NODE)
 +    message(FATAL_ERROR "SLH_MEASURE_WORST needs -DBUILD_BENCH=ON or -DSLH_MEASURE_NODE=ON.")
 +  endif()
-+  # Nothing of a measurement build may be installed or packaged.
-+  install(CODE "message(FATAL_ERROR \"A SLH_MEASURE_WORST build (contrib/m4-measure) cannot be installed.\")")
++  # Nothing of a measurement build may be installed or packaged: this runs for every component
++  # (cmake --install --component ... included), and bench_bitcoin has no install rule here.
++  install(CODE "message(FATAL_ERROR \"A SLH_MEASURE_WORST build (contrib/m4-measure) cannot be installed.\")" ALL_COMPONENTS)
 +  function(slh_measure_collect_targets dir out)
 +    set(found)
 +    get_property(targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
@@ -75,7 +76,7 @@ index 6109639..9a4cf1d 100644
  
  option(INSTALL_MAN "Install man pages." ON)
  
-@@ -427,7 +493,8 @@ endif()
+@@ -427,7 +494,8 @@ endif()
  include(AddBoostIfNeeded)
  add_boost_if_needed()
  
@@ -110,6 +111,28 @@ index ad18115..2e0587a 100644
  
  
  add_library(bitcoin_cli STATIC EXCLUDE_FROM_ALL
+diff --git a/src/bench/CMakeLists.txt b/src/bench/CMakeLists.txt
+index 9c228e2..640390e 100644
+--- a/src/bench/CMakeLists.txt
++++ b/src/bench/CMakeLists.txt
+@@ -70,7 +70,7 @@ target_link_libraries(bench_bitcoin
+   core_interface
+   test_util
+   bitcoin_node
+-  bitcoin_slhdsa128s
++  $<IF:$<BOOL:${SLH_MEASURE_WORST}>,bitcoin_slhdsa128s_measure,bitcoin_slhdsa128s>
+   Boost::headers
+ )
+ 
+@@ -88,4 +88,7 @@ if(ENABLE_WALLET)
+   target_link_libraries(bench_bitcoin bitcoin_wallet)
+ endif()
+ 
+-install_binary_component(bench_bitcoin INTERNAL)
++# MEASUREMENT ONLY (contrib/m4-measure): a measurement build installs nothing.
++if(NOT SLH_MEASURE_WORST)
++  install_binary_component(bench_bitcoin INTERNAL)
++endif()
 diff --git a/src/bench/bench_bitcoin.cpp b/src/bench/bench_bitcoin.cpp
 index 987523a..6bd0a5c 100644
 --- a/src/bench/bench_bitcoin.cpp
@@ -151,10 +174,10 @@ index 987523a..6bd0a5c 100644
      if (!argsman.ParseParameters(argc, argv, error)) {
          tfm::format(std::cerr, "Error parsing command line arguments: %s\n", error);
 diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
-index 323e757..545e1d8 100644
+index 323e757..0da0c4d 100644
 --- a/src/bitcoind.cpp
 +++ b/src/bitcoind.cpp
-@@ -3,6 +3,16 @@
+@@ -3,11 +3,27 @@
  // Distributed under the MIT software license, see the accompanying
  // file COPYING or http://www.opensource.org/licenses/mit-license.php.
  
@@ -171,10 +194,22 @@ index 323e757..545e1d8 100644
  #include <bitcoin-build-config.h> // IWYU pragma: keep
  
  #include <chainparams.h>
-@@ -29,8 +39,11 @@
+ #include <clientversion.h>
+ #include <common/args.h>
++#ifdef SLH_MEASURE_NODE
++#include <net.h>
++#include <util/chaintype.h>
++#include <initializer_list>
++#include <utility>
++#endif
+ #include <common/init.h>
+ #include <common/system.h>
+ #include <compat/compat.h>
+@@ -29,8 +45,12 @@
  #include <util/translation.h>
  
  #include <any>
++#include <cstdint>
 +#include <cstdlib>
  #include <functional>
 +#include <iostream>
@@ -183,12 +218,42 @@ index 323e757..545e1d8 100644
  
  using node::NodeContext;
  
-@@ -257,8 +270,20 @@ static bool AppInit(NodeContext& node)
+@@ -129,6 +149,25 @@ static bool ParseArgs(NodeContext& node, int argc, char* argv[])
+             return InitError(Untranslated(strprintf("Command line contains unexpected token '%s', see bitcoind -h for a list of options.", argv[i])));
+         }
+     }
++#ifdef SLH_MEASURE_NODE
++    // MEASUREMENT ONLY: with the worst-case hook any SLH-DSA signature of the right length passes, so
++    // this node must never follow a real network. Once the configuration has chosen the chain, it
++    // refuses anything but regtest, and it runs without P2P: no listening, no outbound connections, the
++    // network switched off, every proxy pointed at a closed port.
++    try {
++        if (args.GetChainType() != ChainType::REGTEST) {
++            return InitError(Untranslated(strprintf("bitcoind_m4_measure is a measurement-only node and runs on regtest only, not on %s.", args.GetChainTypeString())));
++        }
++    } catch (const std::exception& e) {
++        return InitError(Untranslated(strprintf("bitcoind_m4_measure: %s", e.what())));
++    }
++    for (const auto& [arg, value] : std::initializer_list<std::pair<const char*, const char*>>{
++             {"-listen", "0"}, {"-listenonion", "0"}, {"-connect", "0"}, {"-dnsseed", "0"}, {"-fixedseeds", "0"},
++             {"-discover", "0"}, {"-networkactive", "0"}, {"-maxconnections", "0"}, {"-proxy", "127.0.0.1:1"},
++             {"-onion", "127.0.0.1:1"}, {"-i2psam", ""}, {"-natpmp", "0"}}) {
++        args.ForceSetArg(arg, value);
++    }
++#endif
+     return true;
+ }
+ 
+@@ -257,8 +296,24 @@ static bool AppInit(NodeContext& node)
      return fRet;
  }
  
 +#ifdef SLH_MEASURE_NODE
 +extern "C" int slh_measure_worst; // MEASUREMENT ONLY
++// MEASUREMENT ONLY counters of the measurement library (src/crypto/CMakeLists.txt): complete SLH-DSA
++// verifications, and the SHA-256 compressions of the vendored library.
++extern "C" uint64_t slh_measure_verifications;
++extern "C" uint64_t sha2_256_compress_count;
 +#endif
 +
  MAIN_FUNCTION
@@ -204,53 +269,129 @@ index 323e757..545e1d8 100644
      NodeContext node;
      int exit_status;
      std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
-diff --git a/src/crypto/slhdsa128s/slh_dsa.c b/src/crypto/slhdsa128s/slh_dsa.c
-index 4fb3dad..e3e0bff 100644
---- a/src/crypto/slhdsa128s/slh_dsa.c
-+++ b/src/crypto/slhdsa128s/slh_dsa.c
-@@ -12,6 +12,13 @@
+@@ -280,11 +335,26 @@ MAIN_FUNCTION
+     if (ProcessInitCommands(*init, args)) return EXIT_SUCCESS;
  
- /* === Internal */
- 
-+#ifdef SLH_MEASURE_WORST
-+/* MEASUREMENT ONLY (contrib/m4-measure of the patch repository, never part of the series): when
-+   set, every WOTS+ message digit is taken as zero, the checksum computed from that, so that every
-+   chain runs 510 steps per layer, and the hypertree check is judged valid. */
-+int slh_measure_worst = 0;
+     // Start application
++#ifdef SLH_MEASURE_NODE
++    // MEASUREMENT ONLY: no P2P at all. With the network inactive and nothing to listen on or connect
++    // to, nothing has connected yet; interrupting the connection manager's network threads now also
++    // makes it refuse every later connection, setnetworkactive and addnode included, until shutdown.
++    const bool started{AppInit(node)};
++    if (started && node.connman) node.connman->Interrupt();
++    if (!started || !Assert(node.shutdown_signal)->wait()) {
++        node.exit_status = EXIT_FAILURE;
++    }
++#else
+     if (!AppInit(node) || !Assert(node.shutdown_signal)->wait()) {
+         node.exit_status = EXIT_FAILURE;
+     }
 +#endif
+     Interrupt(node);
+     Shutdown(node);
+ 
++#ifdef SLH_MEASURE_NODE
++    std::cerr << "MEASUREMENT-ONLY NODE counters: slh_verifications=" << slh_measure_verifications
++              << " sha256_compressions=" << sha2_256_compress_count << std::endl;
++#endif
+     return node.exit_status;
+ }
+diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
+index 6b533b6..b75e4b7 100644
+--- a/src/crypto/CMakeLists.txt
++++ b/src/crypto/CMakeLists.txt
+@@ -141,6 +141,82 @@ else()
+   slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -Wformat -Wformat-security)
+ endif()
+ 
++# MEASUREMENT ONLY (contrib/m4-measure, measurement-build.patch): the measurement variant of the
++# library, for the measurement configuration's executables (bench_bitcoin, bitcoind_m4_measure) only.
++# It is built from copies that CMake generates here from the unmodified vendored files: slh_dsa.c
++# with the worst-case hook (switch slh_measure_worst) and a counter of complete verifications
++# (slh_measure_verifications), each inserted by an exact replacement that must match once, and
++# sha2_256.c with the library's own SHA-256 compression counter (SLH_EXPERIMENTAL, for that copy only).
++# bitcoin_slhdsa128s itself still compiles the vendored files as they are, so no compile flag
++# (-DSLH_MEASURE_WORST in APPEND_CFLAGS, say) puts the hook into it.
++if(SLH_MEASURE_WORST)
++  set(slh_measure_dir ${CMAKE_CURRENT_BINARY_DIR}/slhdsa128s_measure)
++  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/slh_dsa.c slh_measure_source)
++  function(slh_measure_replace old new)
++    string(FIND "${slh_measure_source}" "${old}" first)
++    string(FIND "${slh_measure_source}" "${old}" last REVERSE)
++    if(first EQUAL -1 OR NOT first EQUAL last)
++      message(FATAL_ERROR "measurement build: the vendored slh_dsa.c does not contain exactly one\n${old}")
++    endif()
++    string(REPLACE "${old}" "${new}" slh_measure_source "${slh_measure_source}")
++    set(slh_measure_source "${slh_measure_source}" PARENT_SCOPE)
++  endfunction()
++  slh_measure_replace([=[/* === Internal */
++]=] [=[/* === Internal */
 +
- /* helper functions to compute "len = len1 + len2" */
- 
- static SLH_INLINE uint32_t get_len1(const slh_param_t *prm)
-@@ -150,7 +157,17 @@ static void wots_pk_from_sig(slh_var_t *var, uint8_t *pk, const uint8_t *sig,
-   uint8_t tmp[SLH_MAX_LEN * SLH_MAX_N];
-   size_t tmp_sz;
- 
--  wots_csum(vm, m, prm);
-+#ifdef SLH_MEASURE_WORST
++/* MEASUREMENT ONLY: generated by src/crypto/CMakeLists.txt from the vendored slh_dsa.c for the
++   measurement build of contrib/m4-measure. When slh_measure_worst is set, every WOTS+ message
++   digit is taken as zero and the checksum computed from that, so that every chain runs 510 steps
++   per layer, and the hypertree check is judged valid. slh_measure_verifications counts the
++   complete verifications. */
++int slh_measure_worst = 0;
++uint64_t slh_measure_verifications = 0;
++]=])
++  slh_measure_replace([=[  size_t tmp_sz;
++
++  wots_csum(vm, m, prm);
++]=] [=[  size_t tmp_sz;
++
 +  if (slh_measure_worst)
 +  {
 +    static const uint8_t zero[SLH_MAX_N] = {0};
 +    wots_csum(vm, zero, prm);
 +  }
 +  else
-+#endif
 +  {
 +    wots_csum(vm, m, prm);
 +  }
- 
-   len = get_len(prm);
-   t = (1 << prm->lg_w) - 1;
-@@ -338,6 +355,9 @@ static int ht_verify(slh_var_t *var, const uint8_t *m, const uint8_t *sig_ht,
-     xmss_pk_from_sig(var, node, i_leaf, sig_ht, node);
-   }
- 
-+#ifdef SLH_MEASURE_WORST
++]=])
++  slh_measure_replace([=[  return memcmp(node, var->pk_root, prm->n) == 0;
++]=] [=[  slh_measure_verifications++;
 +  if (slh_measure_worst) return 1;
-+#endif
-   return memcmp(node, var->pk_root, prm->n) == 0;
- }
++  return memcmp(node, var->pk_root, prm->n) == 0;
++]=])
++  file(WRITE ${slh_measure_dir}/slh_dsa_measure.c.new "${slh_measure_source}")
++  configure_file(${slh_measure_dir}/slh_dsa_measure.c.new ${slh_measure_dir}/slh_dsa_measure.c COPYONLY)
++  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/sha2_256.c ${slh_measure_dir}/sha2_256_measure.c COPYONLY)
++  set_source_files_properties(${slh_measure_dir}/sha2_256_measure.c PROPERTIES COMPILE_DEFINITIONS SLH_EXPERIMENTAL)
++  add_library(bitcoin_slhdsa128s_measure STATIC EXCLUDE_FROM_ALL
++    ${slh_measure_dir}/slh_dsa_measure.c
++    ${slh_measure_dir}/sha2_256_measure.c
++    slhdsa128s/sha2_512.c
++    slhdsa128s/slh_sha2.c
++  )
++  target_include_directories(bitcoin_slhdsa128s_measure PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s)
++  set_target_properties(bitcoin_slhdsa128s_measure PROPERTIES C_VISIBILITY_PRESET hidden)
++  # The same compile options and definitions as the production library (hardening, byte order,
++  # sanitizers, warnings).
++  foreach(property IN ITEMS COMPILE_OPTIONS COMPILE_DEFINITIONS)
++    get_target_property(values bitcoin_slhdsa128s ${property})
++    if(values)
++      set_property(TARGET bitcoin_slhdsa128s_measure PROPERTY ${property} "${values}")
++    endif()
++  endforeach()
++  set(slhdsa128s_library bitcoin_slhdsa128s_measure)
++else()
++  set(slhdsa128s_library bitcoin_slhdsa128s)
++endif()
++
+ add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
+   aes.cpp
+   chacha20.cpp
+@@ -167,7 +243,7 @@ target_link_libraries(bitcoin_crypto
+   PRIVATE
+     core_interface
+     bitcoin_mldsa44
+-    bitcoin_slhdsa128s
++    ${slhdsa128s_library}
+ )
  
+ if(HAVE_SSE41)
 diff --git a/src/qt/main.cpp b/src/qt/main.cpp
 index 422cf7f..ae3d8fa 100644
 --- a/src/qt/main.cpp

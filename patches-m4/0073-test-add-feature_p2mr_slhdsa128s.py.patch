@@ -1,4 +1,4 @@
-From 5b492ac562cc6de25af6a99ae9508b2c27be5dc8 Mon Sep 17 00:00:00 2001
+From c5474a3a926e6b711a6c20543ae29774c88d26d1 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 73/77] test: add feature_p2mr_slhdsa128s.py
@@ -9,7 +9,8 @@ output that disables elliptic curve checks in leaf version 0xe0 from
 height 150:
 
 - the startup log, getdeploymentinfo, and -signetslhdsa128s refused on
-  regtest and on the Ark-0 signet;
+  regtest, on the Ark-0 signet, given twice, and with a height beyond
+  int32;
 - the mempool refuses a valid SLH1 spend while the next block is below
   the height, on both nodes, and takes it from the block before; a block
   below the height takes invalid signatures in leaf versions 0xc0 and
@@ -23,6 +24,8 @@ height 150:
 - after activation, SLH1 with hash type 0x83 and in leaf version 0xe0,
   whose elliptic curve checks are disabled, relays and confirms; each of
   the four new script errors is refused in the mempool and in a block;
+  a 521-byte first chunk is refused by the standard node's policy, by the
+  other node's script check and in a block (PUSH_SIZE);
 - checks whose budget is used up exactly pass in a block, one unit short
   fail; their number and the padding follow from the validation weight;
 - policy: non-template leaves, a leaf at depth zero, an extra stack
@@ -33,17 +36,17 @@ height 150:
 It makes ten SLH-DSA signatures in Python and derives the invalid
 witnesses from them.
 ---
- test/functional/feature_p2mr_slhdsa128s.py | 501 +++++++++++++++++++++
+ test/functional/feature_p2mr_slhdsa128s.py | 516 +++++++++++++++++++++
  test/functional/test_runner.py             |   1 +
- 2 files changed, 502 insertions(+)
+ 2 files changed, 517 insertions(+)
  create mode 100644 test/functional/feature_p2mr_slhdsa128s.py
 
 diff --git a/test/functional/feature_p2mr_slhdsa128s.py b/test/functional/feature_p2mr_slhdsa128s.py
 new file mode 100644
-index 0000000..e471632
+index 0000000..e1a75ee
 --- /dev/null
 +++ b/test/functional/feature_p2mr_slhdsa128s.py
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,516 @@
 +#!/usr/bin/env python3
 +# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
@@ -174,6 +177,7 @@ index 0000000..e471632
 +ERR_HASHTYPE = "Invalid SLH-DSA-SHA2-128s signature hash type"
 +ERR_PUBKEY_SIZE = "Invalid SLH-DSA-SHA2-128s public key size"
 +ERR_WEIGHT = "Too much signature validation relative to witness weight"
++ERR_PUSH_SIZE = "Push value size limit exceeded"
 +
 +
 +def slh_witness(tree, leaf_name="slh", *, hash_type=SIGHASH_DEFAULT):
@@ -381,6 +385,12 @@ index 0000000..e471632
 +        self.nodes[1].assert_start_raises_init_error(
 +            ["-regtest=0", "-signet", f"-signetchallenge={ARK0_CHALLENGE}", "-signetslhdsa128s=10"],
 +            "Error: -signetslhdsa128s cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        self.log.info("-signetslhdsa128s given twice, or with a height beyond int32, is refused")
++        signet = ["-regtest=0", "-signet", "-signetchallenge=51"]
++        self.nodes[1].assert_start_raises_init_error(signet + ["-signetslhdsa128s=10", "-signetslhdsa128s=20"],
++                                                     "Error: -signetslhdsa128s cannot be multiple values.")
++        self.nodes[1].assert_start_raises_init_error(signet + ["-signetslhdsa128s=2147483648"],
++                                                     "Error: -signetslhdsa128s must be a height, not '2147483648'.")
 +        self.start_node(1, self.extra_args[1])
 +        self.connect_nodes(0, 1)
 +
@@ -491,6 +501,14 @@ index 0000000..e471632
 +        short_519 = with_stack(good, 0, [chunks[0][:519]] + chunks[1:] + rest)
 +        self.assert_mempool_rejects(short_519, NONSTANDARD_WITNESS, "a 519-byte first signature chunk")
 +        self.assert_block_rejects(short_519, ERR_SIG_SIZE, "a 519-byte first signature chunk")
++        # A 521-byte chunk is over the 520-byte element limit of consensus: a standard node refuses it
++        # by policy before it runs the script, a node with -acceptnonstdtxn=1 runs it and stops at the
++        # element, as does a block.
++        long_521 = with_stack(good, 0, [chunks[0] + b"\x00"] + chunks[1:] + rest)
++        assert_equal(len(long_521.wit.vtxinwit[0].scriptWitness.stack[0]), 521)
++        self.assert_mempool_rejects(long_521, NONSTANDARD_WITNESS, "a 521-byte first signature chunk")
++        self.assert_mempool_rejects(long_521, f"mempool-script-verify-flag-failed ({ERR_PUSH_SIZE})", "a 521-byte first signature chunk", node=1)
++        self.assert_block_rejects(long_521, ERR_PUSH_SIZE, "a 521-byte first signature chunk")
 +        for utxo, tree, note in ((key31, TREE_KEY31, "a 31-byte public key"), (key33, TREE_KEY33, "a 33-byte public key")):
 +            tx = self.spend([(utxo, unsigned_witness(tree, JUNK_CHUNKS))])
 +            self.assert_mempool_rejects(tx, NONSTANDARD_WITNESS, note)

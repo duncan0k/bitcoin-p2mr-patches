@@ -1,4 +1,4 @@
-From e8f8dc91c5631aaf854feeb0eb30787439ce90e8 Mon Sep 17 00:00:00 2001
+From 26ac1a63ab4d570070747829688263e742cb5c92 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 69/77] consensus: deploy OP_CHECKSLHDSA128S, on Ark-0 from
@@ -11,8 +11,11 @@ on blocks at or above its height where P2MR is active too.
   ARK0_SLHDSA128S_HEIGHT: 32000. It covers this opcode only. A
   static_assert keeps it above the height of the P2MR tripwire rules
   (30000), since leaf version 0xe0 must execute before the opcode can run
-  in it. Once a build carrying it has left the network's own nodes, the
-  height does not change.
+  in it; with it, static_asserts keep the order of all Ark-0 heights:
+  OP_CHECKMLDSA44 (8600) < the ML-DSA-44 block signature (20000) < the
+  tripwire leaves (30000) < OP_CHECKSLHDSA128S (32000). Once a build
+  carrying it has left the network's own nodes, the height does not
+  change.
 - Another custom signet gets the rules from -signetslhdsa128s=<height>,
   which requires -signetchallenge and which Ark-0 refuses. A node refuses
   to start with it on any other chain, whatever its value.
@@ -30,11 +33,11 @@ logs "P2MR SLH-DSA-SHA2-128s rules active from height N (leaf versions
  src/deploymentinfo.cpp            |  4 ++++
  src/init.cpp                      |  6 ++++++
  src/kernel/chainparams.cpp        | 16 ++++++++++++++++
- src/kernel/chainparams.h          | 20 ++++++++++++++++++++
+ src/kernel/chainparams.h          | 24 ++++++++++++++++++++++++
  src/rpc/blockchain.cpp            |  1 +
  src/validation.cpp                |  6 ++++++
  test/functional/rpc_blockchain.py |  3 ++-
- 10 files changed, 90 insertions(+), 5 deletions(-)
+ 10 files changed, 94 insertions(+), 5 deletions(-)
 
 diff --git a/src/chainparams.cpp b/src/chainparams.cpp
 index 35114b2..9d0c10c 100644
@@ -106,7 +109,7 @@ index 38c27d1..61e5716 100644
  
  static std::unique_ptr<CBaseChainParams> globalChainBaseParams;
 diff --git a/src/consensus/params.h b/src/consensus/params.h
-index c9dbe0e..ccf4cc7 100644
+index c9dbe0e..b5762fd 100644
 --- a/src/consensus/params.h
 +++ b/src/consensus/params.h
 @@ -34,8 +34,9 @@ enum BuriedDeployment : int16_t {
@@ -125,8 +128,8 @@ index c9dbe0e..ccf4cc7 100644
       * and regtest. */
      int P2MRTripwireHeight;
 +    /** Block height at which OP_CHECKSLHDSA128S executes in P2MR leaves (doc/p2mr-slhdsa128s.md).
-+     * std::numeric_limits<int>::max() on every chain but the Ark-0 signet (where it is not set
-+     * yet, so never), a custom signet given -signetslhdsa128s, and regtest. */
++     * std::numeric_limits<int>::max() on every chain but the Ark-0 signet (from
++     * ARK0_SLHDSA128S_HEIGHT, 32000), a custom signet given -signetslhdsa128s, and regtest. */
 +    int P2MRSLHDSA128SHeight;
      /** Don't warn about unknown BIP 9 activations below this height.
       * This prevents us from warning about the CSV and segwit activations. */
@@ -242,10 +245,10 @@ index 74626fc..4cfddec 100644
          }
          // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index bcdd31f..b32534f 100644
+index bcdd31f..1af63cf 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
-@@ -59,6 +59,20 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
+@@ -59,6 +59,24 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
  // Leaf version 0xe0 runs OP_CHECKMLDSA44, which has to be active before the leaves are.
  static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
  
@@ -262,11 +265,15 @@ index bcdd31f..b32534f 100644
 +inline constexpr int ARK0_SLHDSA128S_HEIGHT{32000};
 +// Leaf version 0xe0 must execute before this opcode can run in it: the tripwire height comes first.
 +static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT);
++// The order of the Ark-0 heights: OP_CHECKMLDSA44, the ML-DSA-44 block signature, the tripwire leaves,
++// OP_CHECKSLHDSA128S.
++static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT);
++static_assert(ARK0_PQ_BLOCK_HEIGHT < ARK0_TRIPWIRE_HEIGHT);
 +
  /** Height of the block that created both tripwire outputs of the Ark-0 signet. */
  inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
  // An output counts as present only when it was created below the height of the rules.
-@@ -210,6 +224,12 @@ public:
+@@ -210,6 +228,12 @@ public:
           * below its height.
           */
          std::optional<TripwireOptions> tripwire{};
