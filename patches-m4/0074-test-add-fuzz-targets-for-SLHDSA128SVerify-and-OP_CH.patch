@@ -1,4 +1,4 @@
-From 49b47a80e26ba114bff02b02dbe313ad7fac07d7 Mon Sep 17 00:00:00 2001
+From c672f039d1e66bdf4e50b9cbb7fa42ec74e7b2ef Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 74/77] test: add fuzz targets for SLHDSA128SVerify and

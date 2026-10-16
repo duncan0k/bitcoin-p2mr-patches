@@ -10,30 +10,36 @@ filled to the maximum block weight, every input of which uses up its validation 
   schnorr           inputs that each check one Schnorr signature many times (OP_DUP ... OP_CHECKSIGVERIFY),
                     the most checks per unit of budget: the reference;
   mixed             a third of the weight each of SLH-DSA, ML-DSA-44 and Schnorr inputs of that kind;
-  slh-invalid-last  the slh block with the signature of its last input made invalid: the time to reject.
+  slh-invalid-last  the slh block with the signature of its last input made invalid: the time to reject;
+  slh-invalid-tail  inputs that each first perform all their valid SLH-DSA checks and then, as the last
+                    check of the same script, one invalid SLH-DSA check.
 
 Every block is connected by a fresh node with -maxsigcachesize=0 through `submitblock`, never through
 the mempool, with -par=1 and with the default -par, in two builds:
 
   release  a normal bitcoind built from the series (--bitcoind-release): real verification;
-  hook     bitcoind_m4_measure (build.sh) with the worst-case hook on (SLH_WORST=1): every SLH-DSA check
-           takes the slowest path of the verification; any signature of the right length passes, so
-           slh-invalid-last is measured in the release build only.
+  hook     the timing build of bitcoind_m4_measure (build.sh, build-node/, no counters) with the
+           worst-case hook on (SLH_WORST=1): every SLH-DSA check takes the slowest path of the
+           verification; any signature of the right length passes, so the invalid kinds are measured
+           in the release build only.
 
-bitcoind_m4_measure also counts, per block, the complete SLH-DSA verifications and the SHA-256
-compressions of the vendored library: in the hook runs, and in one run per block with the hook off
-(-par=1, not timed) for the real path. The counters are plain counters, exact when one thread checks
-the scripts, so the figures come from -par=1 runs; there the verifications counted must equal the
-checks planned.
+The counts (complete SLH-DSA verifications, SHA-256 compressions of the vendored library) come only
+from the counting build of bitcoind_m4_measure (build-count/, --bitcoind-count), which checks scripts in
+one thread so that its counters are exact, and which is never timed: once per block with the hook off
+(the real path) and once per valid block with the hook on. The verifications counted must equal the
+checks planned (for the invalid kinds, up to and including the failing check).
 
 Gate: for each build and -par, the maximum connect time of every block kind is at most the median
 connect time of the schnorr block of the same build and -par. Connect time is the time `submitblock`
 takes, which is also what a rejected block can be measured by; the -debug=bench "Connect block" time
-of accepted blocks is reported next to it.
+of accepted blocks is reported next to it. The gate needs the whole matrix: every block kind, both
+builds, both -par settings and the reference, with --rounds (at least 1) samples each; anything less
+prints INCOMPLETE and exits with 2.
 
 Usage:
   python3 wholeblock.py --core <patched tree> --bitcoind-release <bitcoind> \\
-      --bitcoind-measure <build-node>/bin/bitcoind_m4_measure --workdir <new directory> [--rounds 5]
+      --bitcoind-measure <work>/build-node/bin/bitcoind_m4_measure \\
+      --bitcoind-count <work>/build-count/bin/bitcoind_m4_measure --workdir <new directory> [--rounds 5]
 """
 
 import argparse
@@ -49,15 +55,22 @@ import time
 from pathlib import Path
 
 
+ALL_KINDS = ["slh", "schnorr", "mixed", "slh-invalid-last", "slh-invalid-tail"]
+INVALID_KINDS = {"slh-invalid-last", "slh-invalid-tail"}
+ALL_BUILDS = ["release", "hook"]
+ALL_PARS = ["1", "default"]
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--core", required=True, help="the patched Core tree (for test/functional/test_framework)")
     ap.add_argument("--bitcoind-release", required=True, help="a normal bitcoind built from the series")
-    ap.add_argument("--bitcoind-measure", required=True, help="bitcoind_m4_measure from build.sh")
+    ap.add_argument("--bitcoind-measure", required=True, help="bitcoind_m4_measure of build.sh's build-node/ (timing)")
+    ap.add_argument("--bitcoind-count", required=True, help="bitcoind_m4_measure of build.sh's build-count/ (counting)")
     ap.add_argument("--workdir", required=True, help="a new directory for node data directories and results")
     ap.add_argument("--rounds", type=int, default=5, help="fresh nodes per block, build and -par (default 5)")
     ap.add_argument("--par", default="1,default", help="-par settings, 'default' for none (default 1,default)")
-    ap.add_argument("--kinds", default="slh,schnorr,mixed,slh-invalid-last", help="block kinds")
+    ap.add_argument("--kinds", default=",".join(ALL_KINDS), help="block kinds (default all; fewer is INCOMPLETE)")
     ap.add_argument("--builds", default="release,hook", help="builds to time (default release,hook)")
     ap.add_argument("--slh-checks", type=int, default=100, help="SLH-DSA checks of a full input (default 100)")
     ap.add_argument("--mldsa-checks", type=int, default=1000, help="ML-DSA-44 checks of a full input (default 1000)")
@@ -194,6 +207,11 @@ KINDS = {
     "schnorr": Kind("schnorr", 50, [64],
                     lambda n: [OP_DUP, SCHNORR_PUB, OP_CHECKSIGVERIFY] * (n - 1) + [SCHNORR_PUB, OP_CHECKSIG]),
 }
+# Two signatures on the stack, the invalid one below the valid one: every check but the last copies the
+# valid one's sixteen chunks (OP_15 OP_PICK), the last copies the invalid one's (31 OP_PICK).
+KINDS["slh-tail"] = Kind("slh-tail", VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, ([520] * 15 + [56]) * 2,
+                         lambda n: ([OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]) * (n - 1)
+                         + [31, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S])
 assert sum(KINDS["slh"].sig_stack_sizes) == SLHDSA128S_SIGNATURE_SIZE
 assert sum(KINDS["mldsa"].sig_stack_sizes) == MLDSA44_SIGNATURE_SIZE
 
@@ -213,6 +231,11 @@ def spend_tx(kind, checks, utxo, sign=True):
         stack = [bytes(size) for size in kind.sig_stack_sizes]
     elif kind.name == "slh":
         stack = slhdsa128s_sig_chunks(slhdsa128s_sign_input(SLH_SEC, tx, spent, 0, leaf.script))
+    elif kind.name == "slh-tail":
+        valid = slhdsa128s_sig_chunks(slhdsa128s_sign_input(SLH_SEC, tx, spent, 0, leaf.script))
+        invalid = list(valid)
+        invalid[15] = invalid[15][:-1] + bytes([invalid[15][-1] ^ 1])
+        stack = invalid + valid
     elif kind.name == "mldsa":
         stack = mldsa44_sig_chunks(mldsa44_sign_input(MLDSA_SEC, tx, spent, 0, leaf.script))
     else:
@@ -255,7 +278,7 @@ def make_block(prev_hash, height, ntime, txs):
 
 
 class Node:
-    def __init__(self, binary, datadir, par, hook=None):
+    def __init__(self, binary, datadir, par, hook=None, counting=False):
         self.datadir = Path(datadir)
         self.datadir.mkdir(parents=True)
         self.port = 30000 + (os.getpid() % 2000) * 2
@@ -267,7 +290,7 @@ class Node:
         env = dict(os.environ)
         if hook is not None:
             env["SLH_WORST"] = "1" if hook else "0"
-        self.hook = hook
+        self.hook, self.counting = hook, counting
         self.proc = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         url = f"http://m:m@127.0.0.1:{self.port}"
         for _ in range(1200):
@@ -289,8 +312,12 @@ class Node:
         if self.hook is not None:
             if f"SLH worst-case hook: {1 if self.hook else 0}" not in stderr:
                 raise RuntimeError(f"the measurement node did not report the hook {'on' if self.hook else 'off'}: {stderr!r}")
-            m = re.search(r"counters: slh_verifications=(\d+) sha256_compressions=(\d+)", stderr)
-            counters = {"slh_verifications": int(m.group(1)), "sha256_compressions": int(m.group(2))}
+            build = "counting build" if self.counting else "timing build"
+            if build not in stderr:
+                raise RuntimeError(f"expected the {build} of bitcoind_m4_measure: {stderr!r}")
+            if self.counting:
+                m = re.search(r"counters: slh_verifications=(\d+) sha256_compressions=(\d+)", stderr)
+                counters = {"slh_verifications": int(m.group(1)), "sha256_compressions": int(m.group(2))}
         return counters
 
     def bench_connect_ms(self):
@@ -299,8 +326,8 @@ class Node:
         return connect[-1] if connect else None
 
 
-def run_block(binary, workdir, chain, block, par, hook, expect_valid):
-    node = Node(binary, workdir, par, hook)
+def run_block(binary, workdir, chain, block, par, hook, expect_valid, counting=False):
+    node = Node(binary, workdir, par, hook, counting)
     for b in chain:
         assert node.rpc.submitblock(b.serialize().hex()) is None
     tip = node.rpc.getbestblockhash()
@@ -317,20 +344,38 @@ def run_block(binary, workdir, chain, block, par, hook, expect_valid):
     return elapsed_ms, bench, counters
 
 
+def expected_cells(kinds, builds, pars):
+    """The (build, -par, block) cells a run of these settings times; the invalid kinds in release only."""
+    return [(b, p, k) for b in builds for p in pars for k in kinds if not (b == "hook" and k in INVALID_KINDS)]
+
+
 def main():
-    work = Path(ARGS.workdir)
-    work.mkdir(parents=False, exist_ok=False)
     kinds = ARGS.kinds.split(",")
     pars = ARGS.par.split(",")
     builds = ARGS.builds.split(",")
+    unknown = [k for k in kinds if k not in ALL_KINDS] + [b for b in builds if b not in ALL_BUILDS] + [p for p in pars if p not in ALL_PARS]
+    if unknown:
+        print(f"unknown kinds, builds or -par settings: {unknown}", file=sys.stderr)
+        return 2
+    # The gate needs the whole matrix with --rounds samples per cell; anything less cannot pass.
+    missing = sorted(set(expected_cells(ALL_KINDS, ALL_BUILDS, ALL_PARS)) - set(expected_cells(kinds, builds, pars)))
+    if ARGS.rounds < 1:
+        print(f"gate: INCOMPLETE (--rounds is {ARGS.rounds}; it must be at least 1)")
+        return 2
+    if missing:
+        print(f"note: this run leaves out {len(missing)} of the gate's cells, so its result will be INCOMPLETE", flush=True)
+    work = Path(ARGS.workdir)
+    work.mkdir(parents=False, exist_ok=False)
     full = {"slh": ARGS.slh_checks, "mldsa": ARGS.mldsa_checks, "schnorr": ARGS.schnorr_checks}
 
     # What a block with only its coinbase leaves of the maximum weight.
     empty = make_block("01" * 32, COINBASE_MATURITY + 3, 1, [])
     available = MAX_BLOCK_WEIGHT - empty.get_weight() - 4  # room for a larger transaction count
     plans = {}
-    for name in ("slh", "schnorr", "mixed"):
-        if name == "mixed":
+    for name in ("slh", "schnorr", "mixed", "slh-invalid-tail"):
+        if name == "slh-invalid-tail":
+            plans[name] = [("slh-tail", c) for c in plan(KINDS["slh-tail"], available, full["slh"])]
+        elif name == "mixed":
             third = available // 3
             p_slh = plan(KINDS["slh"], third, full["slh"])
             used = sum(KINDS["slh"].weight(c) for c in p_slh)
@@ -352,7 +397,7 @@ def main():
         prev = block.hash_hex
     fund = CTransaction()
     fund.vin = [CTxIn(COutPoint(chain[i].vtx[0].txid_int, 0), b"", 0xffffffff) for i in range(2)]
-    entries = [(name, kind, checks) for name in ("slh", "schnorr", "mixed") for kind, checks in plans[name]]
+    entries = [(name, kind, checks) for name in plans for kind, checks in plans[name]]
     value = (2 * chain[0].vtx[0].vout[0].nValue - 100_000) // len(entries)
     fund.vout = [CTxOut(value, KINDS[kind].tree(checks).scriptPubKey) for _, kind, checks in entries]
     height = COINBASE_MATURITY + 3
@@ -364,7 +409,7 @@ def main():
         outputs[name].append((COutPoint(fund.txid_int, i), value))
 
     blocks = {}
-    for name in ("slh", "schnorr", "mixed"):
+    for name in plans:
         txs = [spend_tx(KINDS[kind], checks, outputs[name][i]) for i, (kind, checks) in enumerate(plans[name])]
         blocks[name] = make_block(prev, height, t0 + height, txs)
     # slh-invalid-last: the slh block with one byte of its last input's signature changed (its last
@@ -379,51 +424,46 @@ def main():
     info = {}
     for name in kinds:
         block = blocks[name]
-        planned = {k: sum(c for kk, c in plans[name] if kk == k) for k in KINDS}
+        planned = {k: sum(c for kk, c in plans[name] if kk.split("-")[0] == k) for k in ("slh", "mldsa", "schnorr")}
         fill = (block.get_weight() - empty.get_weight()) / (MAX_BLOCK_WEIGHT - empty.get_weight())
         assert block.get_weight() <= MAX_BLOCK_WEIGHT
         assert fill >= ARGS.min_fill, (name, fill)
         info[name] = {"weight": block.get_weight(), "fill": fill, "inputs": len(block.vtx) - 1, "planned": planned}
         if name == "slh-invalid-last":
             info[name]["planned_slh_to_failure"] = planned["slh"] - plans[name][-1][1] + 1
+        if name == "slh-invalid-tail":
+            # Its inputs are checked in order with one script thread: the first one fails at its last check.
+            info[name]["planned_slh_to_failure"] = plans[name][0][1]
         print(f"block {name}: weight {block.get_weight()}, fill {fill:.4%}, {len(block.vtx) - 1} inputs, "
               f"checks planned {planned}", flush=True)
 
     runs = []
-    # The real path's counters: bitcoind_m4_measure with the hook off, -par=1, once per block.
+    # The counts, from the counting build only (one script thread, exact counters, never timed): the real
+    # path with the hook off for every block, the slowest path with the hook on for the valid blocks.
     for name in kinds:
-        valid = name != "slh-invalid-last"
-        _, _, counters = run_block(ARGS.bitcoind_measure, work / f"count-{name}", chain, blocks[name], "1", False, valid)
-        info[name]["counted_real"] = counters
-        print(f"counted, hook off, {name}: {counters}", flush=True)
-    for build in builds:
-        for name in kinds:
-            valid = name != "slh-invalid-last"
-            if build == "hook" and not valid:
-                continue
-            for par in pars:
-                for rnd in range(ARGS.rounds):
-                    binary = ARGS.bitcoind_release if build == "release" else ARGS.bitcoind_measure
-                    hook = None if build == "release" else True
-                    ms, bench, counters = run_block(binary, work / f"{build}-{name}-par{par}-r{rnd + 1}", chain, blocks[name], par, hook, valid)
-                    row = {"build": build, "block": name, "par": par, "round": rnd + 1, "connect_ms": ms,
-                           "bench_connect_ms": bench, **counters}
-                    runs.append(row)
-                    print(json.dumps(row), flush=True)
-
-    # Counted verifications against the plan.
-    for name in kinds:
+        valid = name not in INVALID_KINDS
         expected = info[name].get("planned_slh_to_failure", info[name]["planned"]["slh"])
-        counted = info[name]["counted_real"]["slh_verifications"]
-        assert counted == expected, (name, "hook off", counted, expected)
-        for row in runs:
-            if row["build"] == "hook" and row["block"] == name:
-                assert row["slh_verifications"] == expected or row["par"] != "1", (name, "hook", row)
+        for hook in (False, True) if valid else (False,):
+            _, _, counters = run_block(ARGS.bitcoind_count, work / f"count-{name}-hook{int(hook)}", chain, blocks[name],
+                                       "1", hook, valid, counting=True)
+            assert counters["slh_verifications"] == expected, (name, "hook" if hook else "real", counters, expected)
+            info[name]["counted_hook" if hook else "counted_real"] = counters
+            print(f"counted, hook {'on' if hook else 'off'}, {name}: {counters}", flush=True)
+    for build, par, name in expected_cells(kinds, builds, pars):
+        valid = name not in INVALID_KINDS
+        for rnd in range(ARGS.rounds):
+            binary = ARGS.bitcoind_release if build == "release" else ARGS.bitcoind_measure
+            hook = None if build == "release" else True
+            ms, bench, _ = run_block(binary, work / f"{build}-{name}-par{par}-r{rnd + 1}", chain, blocks[name], par, hook, valid)
+            row = {"build": build, "block": name, "par": par, "round": rnd + 1, "connect_ms": ms, "bench_connect_ms": bench}
+            runs.append(row)
+            print(json.dumps(row), flush=True)
 
     summary = []
     print("\nbuild | -par | block | weight | fill | inputs | checks SLH/ML-DSA/Schnorr planned | SLH counted (hook / real) | "
           "compressions per SLH check (hook / real) | connect ms median | max | bench median | max/schnorr median | gate")
     gate_ok = True
+    complete = not missing
     for build in builds:
         for par in pars:
             ref = [r["connect_ms"] for r in runs if r["build"] == build and r["par"] == par and r["block"] == "schnorr"]
@@ -432,37 +472,40 @@ def main():
                 rows = [r for r in runs if r["build"] == build and r["par"] == par and r["block"] == name]
                 if not rows:
                     continue
+                if len(rows) != ARGS.rounds or len(ref) != ARGS.rounds:
+                    complete = False
                 times = [r["connect_ms"] for r in rows]
                 benches = [r["bench_connect_ms"] for r in rows if r["bench_connect_ms"] is not None]
-                # The counters are plain counters, exact only when one thread checks the scripts: they
-                # come from the -par=1 runs of the same build and block.
-                single = [r for r in runs if r["build"] == build and r["par"] == "1" and r["block"] == name]
-                hook_counts = [r.get("slh_verifications") for r in single if "slh_verifications" in r]
-                hook_comp = [r["sha256_compressions"] / r["slh_verifications"] for r in single if r.get("slh_verifications")]
+                # The counts come from the counting build, the same for every -par.
+                hooked = info[name].get("counted_hook") if build == "hook" else None
                 real = info[name]["counted_real"]
-                real_comp = real["sha256_compressions"] / real["slh_verifications"] if real["slh_verifications"] else None
+                per_check = lambda c: c["sha256_compressions"] / c["slh_verifications"] if c and c["slh_verifications"] else None  # noqa: E731
                 ratio = max(times) / ref_median if ref_median else None
                 passed = None if name == "schnorr" or ratio is None else ratio <= 1
                 if passed is False:
                     gate_ok = False
                 p = info[name]["planned"]
                 entry = {"build": build, "par": par, "block": name, "weight": info[name]["weight"], "fill": info[name]["fill"],
-                         "inputs": info[name]["inputs"], "planned": p, "slh_counted_hook": hook_counts[0] if hook_counts else None,
-                         "slh_counted_real": real["slh_verifications"],
-                         "compressions_per_check_hook": statistics.median(hook_comp) if hook_comp else None,
-                         "compressions_per_check_real": real_comp, "connect_ms_median": statistics.median(times),
+                         "inputs": info[name]["inputs"], "planned": p, "slh_counted_hook": hooked["slh_verifications"] if hooked else None,
+                         "slh_counted_real": real["slh_verifications"], "sha256_compressions_real": real["sha256_compressions"],
+                         "compressions_per_check_hook": per_check(hooked),
+                         "compressions_per_check_real": per_check(real), "connect_ms_median": statistics.median(times),
                          "connect_ms_max": max(times), "bench_connect_ms_median": statistics.median(benches) if benches else None,
                          "ratio_max_to_schnorr_median": ratio, "gate_pass": passed}
                 summary.append(entry)
                 fmt = lambda x, f="{:.1f}": "-" if x is None else f.format(x)  # noqa: E731
                 print(f"{build} | {par} | {name} | {entry['weight']} | {entry['fill']:.4%} | {entry['inputs']} | "
                       f"{p['slh']}/{p['mldsa']}/{p['schnorr']} | {fmt(entry['slh_counted_hook'], '{}')} / {real['slh_verifications']} | "
-                      f"{fmt(entry['compressions_per_check_hook'])} / {fmt(real_comp)} | {entry['connect_ms_median']:.1f} | "
+                      f"{fmt(entry['compressions_per_check_hook'])} / {fmt(entry['compressions_per_check_real'])} | {entry['connect_ms_median']:.1f} | "
                       f"{entry['connect_ms_max']:.1f} | {fmt(entry['bench_connect_ms_median'])} | {fmt(ratio, '{:.3f}')} | "
                       f"{'-' if passed is None else ('pass' if passed else 'FAIL')}")
-    (work / "results.json").write_text(json.dumps({"blocks": info, "runs": runs, "summary": summary}, indent=1))
-    print(f"\ngate (every block kind's maximum <= the schnorr median, per build and -par): {'PASS' if gate_ok else 'FAIL'}")
-    return 0 if gate_ok else 1
+    verdict = "FAIL" if not gate_ok else ("PASS" if complete else "INCOMPLETE")
+    (work / "results.json").write_text(json.dumps({"blocks": info, "runs": runs, "summary": summary, "rounds": ARGS.rounds,
+                                                   "missing_cells": missing, "gate": verdict}, indent=1))
+    print(f"\ngate (every block kind's maximum <= the schnorr median, per build and -par): {verdict}")
+    if missing:
+        print("INCOMPLETE: not measured: " + ", ".join(f"{b}/-par={p}/{k}" for b, p, k in missing))
+    return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[verdict]
 
 
 if __name__ == "__main__":

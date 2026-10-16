@@ -1,4 +1,4 @@
-From c5474a3a926e6b711a6c20543ae29774c88d26d1 Mon Sep 17 00:00:00 2001
+From e5509c1a1e6c05676fb46e325709321ec9ad6138 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
 Subject: [PATCH 73/77] test: add feature_p2mr_slhdsa128s.py

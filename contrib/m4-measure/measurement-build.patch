@@ -1,8 +1,8 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6109639..5f17023 100644
+index 6109639..8e921a7 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -184,6 +184,73 @@ endif()
+@@ -184,6 +184,86 @@ endif()
  option(BUILD_BENCH "Build bench_bitcoin executable." OFF)
  option(BUILD_FUZZ_BINARY "Build fuzz binary." OFF)
  option(BUILD_FOR_FUZZING "Build for fuzzing. Enabling this will disable all other targets and override BUILD_FUZZ_BINARY." OFF)
@@ -20,6 +20,10 @@ index 6109639..5f17023 100644
 +option(SLH_MEASURE_NODE "With SLH_MEASURE_WORST: the measurement-only node bitcoind_m4_measure of the whole-block script." OFF)
 +if(SLH_MEASURE_NODE AND NOT SLH_MEASURE_WORST)
 +  message(FATAL_ERROR "SLH_MEASURE_NODE needs SLH_MEASURE_WORST.")
++endif()
++option(SLH_MEASURE_COUNT "With SLH_MEASURE_NODE: the counting build of bitcoind_m4_measure (counters, -par=1, never timed)." OFF)
++if(SLH_MEASURE_COUNT AND NOT SLH_MEASURE_NODE)
++  message(FATAL_ERROR "SLH_MEASURE_COUNT needs SLH_MEASURE_NODE.")
 +endif()
 +if(SLH_MEASURE_WORST)
 +  if(NOT BUILD_BENCH AND NOT SLH_MEASURE_NODE)
@@ -72,11 +76,20 @@ index 6109639..5f17023 100644
 +  set(SLH_MEASURE_ALLOWED_TARGETS bench_bitcoin bitcoind_m4_measure)
 +  cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL slh_measure_check_targets)
 +  add_compile_definitions(SLH_MEASURE_WORST)
++  if(SLH_MEASURE_NODE)
++    # The node's measurement configuration: init.cpp and bitcoind.cpp take the measurement-only node's
++    # rules (regtest only, no P2P).
++    add_compile_definitions(SLH_MEASURE_NODE)
++  endif()
++  if(SLH_MEASURE_COUNT)
++    # The counting build: counters in the measurement library, and one script thread (-par=1).
++    add_compile_definitions(SLH_MEASURE_COUNT)
++  endif()
 +endif()
  
  option(INSTALL_MAN "Install man pages." ON)
  
-@@ -427,7 +494,8 @@ endif()
+@@ -427,7 +507,8 @@ endif()
  include(AddBoostIfNeeded)
  add_boost_if_needed()
  
@@ -134,29 +147,30 @@ index 9c228e2..640390e 100644
 +  install_binary_component(bench_bitcoin INTERNAL)
 +endif()
 diff --git a/src/bench/bench_bitcoin.cpp b/src/bench/bench_bitcoin.cpp
-index 987523a..6bd0a5c 100644
+index 987523a..b280a27 100644
 --- a/src/bench/bench_bitcoin.cpp
 +++ b/src/bench/bench_bitcoin.cpp
-@@ -10,6 +10,14 @@
+@@ -10,6 +10,13 @@
  #include <util/string.h>
  #include <test/util/setup_common.h>
  
++#ifdef SLH_MEASURE_WORST
 +#include <iostream>
 +#include <string>
 +
-+#ifndef SLH_MEASURE_WORST
-+#error "this bench_bitcoin.cpp is the measurement-only one of contrib/m4-measure; configure with -DSLH_MEASURE_WORST=ON"
++extern "C" int slh_measure_worst; // MEASUREMENT ONLY (contrib/m4-measure)
 +#endif
-+extern "C" int slh_measure_worst; // MEASUREMENT ONLY
 +
  #include <chrono>
  #include <cstdint>
  #include <cstdlib>
-@@ -64,7 +72,19 @@ int main(int argc, char** argv)
+@@ -64,7 +71,23 @@ int main(int argc, char** argv)
  {
      ArgsManager argsman;
      SetupBenchArgs(argsman);
--    SHA256AutoDetect();
++#ifndef SLH_MEASURE_WORST
+     SHA256AutoDetect();
++#else
 +    {
 +        // MEASUREMENT ONLY: BENCH_SHA256=standard|sse4|sse4_avx2 picks Core's SHA-256; SLH_WORST=1
 +        // turns on the worst-case hook of the vendored SLH-DSA code.
@@ -170,14 +184,171 @@ index 987523a..6bd0a5c 100644
 +        if (worst && std::string{worst} == "1") slh_measure_worst = 1;
 +        std::cerr << "SLH worst-case hook: " << slh_measure_worst << std::endl;
 +    }
++#endif
      std::string error;
      if (!argsman.ParseParameters(argc, argv, error)) {
          tfm::format(std::cerr, "Error parsing command line arguments: %s\n", error);
+diff --git a/src/bench/m4_samples.h b/src/bench/m4_samples.h
+new file mode 100644
+index 0000000..9add331
+--- /dev/null
++++ b/src/bench/m4_samples.h
+@@ -0,0 +1,82 @@
++// Copyright (c) 2026 duncan0k
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_BENCH_M4_SAMPLES_H
++#define BITCOIN_BENCH_M4_SAMPLES_H
++
++// Measurement build only (contrib/m4-measure): the wall time and the thread CPU time of every single
++// check of a whole-path benchmark, written to <SLH_SAMPLES_DIR>/<name>.csv when the benchmark ends,
++// if that variable is set. The CPU time (CLOCK_THREAD_CPUTIME_ID) leaves out the time the thread did
++// not run, so a sample whose wall time exceeds it was preempted or stalled by the host.
++
++#ifndef SLH_MEASURE_WORST
++#error "bench/m4_samples.h is for the measurement build only"
++#endif
++
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <string>
++#include <vector>
++
++class M4Samples
++{
++    std::string m_name;
++    std::vector<int64_t> m_wall, m_cpu;
++    int64_t m_wall0{0}, m_cpu0{0};
++    bool m_on{false};
++
++    static int64_t Cpu()
++    {
++        timespec ts;
++        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
++        return int64_t{ts.tv_sec} * 1'000'000'000 + ts.tv_nsec;
++    }
++    static int64_t Wall()
++    {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++
++public:
++    M4Samples(std::string name, bool measuring) : m_name{std::move(name)}, m_on{measuring && std::getenv("SLH_SAMPLES_DIR") != nullptr}
++    {
++        if (m_on) {
++            m_wall.reserve(20'000);
++            m_cpu.reserve(20'000);
++        }
++    }
++    void Start()
++    {
++        if (!m_on) return;
++        m_cpu0 = Cpu();
++        m_wall0 = Wall();
++    }
++    void Stop()
++    {
++        if (!m_on) return;
++        const int64_t wall{Wall()};
++        const int64_t cpu{Cpu()};
++        m_wall.push_back(wall - m_wall0);
++        m_cpu.push_back(cpu - m_cpu0);
++    }
++    ~M4Samples()
++    {
++        if (!m_on) return;
++        const std::string path{std::string{std::getenv("SLH_SAMPLES_DIR")} + "/" + m_name + ".csv"};
++        if (FILE* f{std::fopen(path.c_str(), "w")}) {
++            std::fprintf(f, "wall_ns,cpu_ns\n");
++            for (size_t i = 0; i < m_wall.size(); ++i) {
++                std::fprintf(f, "%lld,%lld\n", static_cast<long long>(m_wall[i]), static_cast<long long>(m_cpu[i]));
++            }
++            std::fclose(f);
++        } else {
++            std::fprintf(stderr, "cannot write %s\n", path.c_str());
++            std::abort();
++        }
++    }
++};
++
++#endif // BITCOIN_BENCH_M4_SAMPLES_H
+diff --git a/src/bench/mldsa44.cpp b/src/bench/mldsa44.cpp
+index 9b56c56..999af4d 100644
+--- a/src/bench/mldsa44.cpp
++++ b/src/bench/mldsa44.cpp
+@@ -3,6 +3,9 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <bench/bench.h>
++#ifdef SLH_MEASURE_WORST
++#include <bench/m4_samples.h>
++#endif
+ #include <bench/data/p2mr_mldsa44_spends.raw.h>
+ #include <crypto/mldsa44.h>
+ #include <key.h>
+@@ -105,10 +108,19 @@ void VerifyScriptP2MR(benchmark::Bench& bench, bool mldsa44)
+     // bench_bitcoin -sanity-check runs one epoch without output; keep that.
+     if (bench.output() != nullptr) bench.epochs(10'000).epochIterations(1);
+     size_t next{0};
++#ifdef SLH_MEASURE_WORST
++    M4Samples samples{(mldsa44 ? "VerifyScriptP2MRMLDSA44" : "VerifyScriptP2MRSchnorr"), bench.output() != nullptr};
++#endif
+     bench.unit("verification").run([&] {
+         Spend& spend{spends[next++ % spends.size()]};
++#ifdef SLH_MEASURE_WORST
++        samples.Start();
++#endif
+         const CachingTransactionSignatureChecker checker{&spend.tx, 0, spend.spent.nValue, /*storeIn=*/false, signature_cache, spend.txdata};
+         const bool ok{VerifyScript(CScript{}, spend.spent.scriptPubKey, &spend.tx.vin[0].scriptWitness, flags, checker)};
++#ifdef SLH_MEASURE_WORST
++        samples.Stop();
++#endif
+         assert(ok);
+     });
+ }
+diff --git a/src/bench/slhdsa128s.cpp b/src/bench/slhdsa128s.cpp
+index b7612cf..8c8358e 100644
+--- a/src/bench/slhdsa128s.cpp
++++ b/src/bench/slhdsa128s.cpp
+@@ -3,6 +3,9 @@
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
+ #include <bench/bench.h>
++#ifdef SLH_MEASURE_WORST
++#include <bench/m4_samples.h>
++#endif
+ #include <crypto/slhdsa128s.h>
+ #include <hash.h>
+ #include <primitives/transaction.h>
+@@ -103,10 +106,19 @@ static void VerifyScriptP2MRSLHDSA128S(benchmark::Bench& bench)
+                                         SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_SLHDSA128S};
+     if (measuring) bench.epochs(10'000).epochIterations(1);
+     size_t next{0};
++#ifdef SLH_MEASURE_WORST
++    M4Samples samples{"VerifyScriptP2MRSLHDSA128S", measuring};
++#endif
+     bench.unit("verification").run([&] {
+         Spend& spend{spends[next++ % spends.size()]};
++#ifdef SLH_MEASURE_WORST
++        samples.Start();
++#endif
+         const CachingTransactionSignatureChecker checker{&spend.tx, 0, spend.spent.nValue, /*storeIn=*/false, signature_cache, spend.txdata};
+         const bool ok{VerifyScript(CScript{}, spend.spent.scriptPubKey, &spend.tx.vin[0].scriptWitness, flags, checker)};
++#ifdef SLH_MEASURE_WORST
++        samples.Stop();
++#endif
+         assert(ok);
+     });
+ }
 diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
-index 323e757..0da0c4d 100644
+index 323e757..07a3a65 100644
 --- a/src/bitcoind.cpp
 +++ b/src/bitcoind.cpp
-@@ -3,11 +3,27 @@
+@@ -3,11 +3,26 @@
  // Distributed under the MIT software license, see the accompanying
  // file COPYING or http://www.opensource.org/licenses/mit-license.php.
  
@@ -197,7 +368,6 @@ index 323e757..0da0c4d 100644
  #include <clientversion.h>
  #include <common/args.h>
 +#ifdef SLH_MEASURE_NODE
-+#include <net.h>
 +#include <util/chaintype.h>
 +#include <initializer_list>
 +#include <utility>
@@ -205,20 +375,20 @@ index 323e757..0da0c4d 100644
  #include <common/init.h>
  #include <common/system.h>
  #include <compat/compat.h>
-@@ -29,8 +45,12 @@
- #include <util/translation.h>
- 
+@@ -31,6 +46,12 @@
  #include <any>
+ #include <functional>
+ #include <optional>
++#ifdef SLH_MEASURE_NODE
 +#include <cstdint>
 +#include <cstdlib>
- #include <functional>
 +#include <iostream>
- #include <optional>
 +#include <string>
++#endif
  
  using node::NodeContext;
  
-@@ -129,6 +149,25 @@ static bool ParseArgs(NodeContext& node, int argc, char* argv[])
+@@ -129,6 +150,29 @@ static bool ParseArgs(NodeContext& node, int argc, char* argv[])
              return InitError(Untranslated(strprintf("Command line contains unexpected token '%s', see bitcoind -h for a list of options.", argv[i])));
          }
      }
@@ -240,18 +410,25 @@ index 323e757..0da0c4d 100644
 +             {"-onion", "127.0.0.1:1"}, {"-i2psam", ""}, {"-natpmp", "0"}}) {
 +        args.ForceSetArg(arg, value);
 +    }
++#ifdef SLH_MEASURE_COUNT
++    // The counting build: one script thread, so that its plain counters are exact and race-free.
++    args.ForceSetArg("-par", "1");
++#endif
 +#endif
      return true;
  }
  
-@@ -257,8 +296,24 @@ static bool AppInit(NodeContext& node)
+@@ -257,8 +301,32 @@ static bool AppInit(NodeContext& node)
      return fRet;
  }
  
 +#ifdef SLH_MEASURE_NODE
 +extern "C" int slh_measure_worst; // MEASUREMENT ONLY
-+// MEASUREMENT ONLY counters of the measurement library (src/crypto/CMakeLists.txt): complete SLH-DSA
-+// verifications, and the SHA-256 compressions of the vendored library.
++#endif
++#ifdef SLH_MEASURE_COUNT
++// MEASUREMENT ONLY counters of the counting build's measurement library (src/crypto/CMakeLists.txt):
++// complete SLH-DSA verifications, and the SHA-256 compressions of the vendored library. The counting
++// build checks scripts in one thread (-par=1), so nothing else writes them concurrently.
 +extern "C" uint64_t slh_measure_verifications;
 +extern "C" uint64_t sha2_256_compress_count;
 +#endif
@@ -263,57 +440,61 @@ index 323e757..0da0c4d 100644
 +        // MEASUREMENT ONLY: SLH_WORST=1 turns on the worst-case hook of the vendored SLH-DSA code.
 +        const char* worst{std::getenv("SLH_WORST")};
 +        if (worst && std::string{worst} == "1") slh_measure_worst = 1;
-+        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4-measure), not for any network; SLH worst-case hook: " << slh_measure_worst << std::endl;
++#ifdef SLH_MEASURE_COUNT
++        const char* build{"counting build, -par=1, not for timing"};
++#else
++        const char* build{"timing build, no counters"};
++#endif
++        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4-measure, " << build << "), not for any network; SLH worst-case hook: " << slh_measure_worst << std::endl;
 +    }
 +#endif
      NodeContext node;
      int exit_status;
      std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
-@@ -280,11 +335,26 @@ MAIN_FUNCTION
-     if (ProcessInitCommands(*init, args)) return EXIT_SUCCESS;
- 
-     // Start application
-+#ifdef SLH_MEASURE_NODE
-+    // MEASUREMENT ONLY: no P2P at all. With the network inactive and nothing to listen on or connect
-+    // to, nothing has connected yet; interrupting the connection manager's network threads now also
-+    // makes it refuse every later connection, setnetworkactive and addnode included, until shutdown.
-+    const bool started{AppInit(node)};
-+    if (started && node.connman) node.connman->Interrupt();
-+    if (!started || !Assert(node.shutdown_signal)->wait()) {
-+        node.exit_status = EXIT_FAILURE;
-+    }
-+#else
-     if (!AppInit(node) || !Assert(node.shutdown_signal)->wait()) {
-         node.exit_status = EXIT_FAILURE;
-     }
-+#endif
+@@ -286,5 +354,9 @@ MAIN_FUNCTION
      Interrupt(node);
      Shutdown(node);
  
-+#ifdef SLH_MEASURE_NODE
++#ifdef SLH_MEASURE_COUNT
 +    std::cerr << "MEASUREMENT-ONLY NODE counters: slh_verifications=" << slh_measure_verifications
 +              << " sha256_compressions=" << sha2_256_compress_count << std::endl;
 +#endif
      return node.exit_status;
  }
 diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
-index 6b533b6..b75e4b7 100644
+index 6b533b6..2a2a320 100644
 --- a/src/crypto/CMakeLists.txt
 +++ b/src/crypto/CMakeLists.txt
-@@ -141,6 +141,82 @@ else()
+@@ -141,6 +141,108 @@ else()
    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -Wformat -Wformat-security)
  endif()
  
 +# MEASUREMENT ONLY (contrib/m4-measure, measurement-build.patch): the measurement variant of the
 +# library, for the measurement configuration's executables (bench_bitcoin, bitcoind_m4_measure) only.
-+# It is built from copies that CMake generates here from the unmodified vendored files: slh_dsa.c
-+# with the worst-case hook (switch slh_measure_worst) and a counter of complete verifications
-+# (slh_measure_verifications), each inserted by an exact replacement that must match once, and
-+# sha2_256.c with the library's own SHA-256 compression counter (SLH_EXPERIMENTAL, for that copy only).
-+# bitcoin_slhdsa128s itself still compiles the vendored files as they are, so no compile flag
++# It is built from a copy that CMake generates here from the unmodified vendored slh_dsa.c, with the
++# worst-case hook (switch slh_measure_worst) inserted by exact replacements that must each match once.
++# In the counting build (SLH_MEASURE_COUNT, one script thread, never timed) it also counts complete
++# verifications and, in a copy of sha2_256.c, SHA-256 compressions; the builds that are timed have no
++# counters. bitcoin_slhdsa128s itself still compiles the vendored files as they are, so no compile flag
 +# (-DSLH_MEASURE_WORST in APPEND_CFLAGS, say) puts the hook into it.
 +if(SLH_MEASURE_WORST)
 +  set(slh_measure_dir ${CMAKE_CURRENT_BINARY_DIR}/slhdsa128s_measure)
++  # The generated copies follow the vendored files: CMake configures again when one changes, and the
++  # files must be the ones the hook was written for. Any other content stops the configuration, so that
++  # an update of the vendored library forces a review of the hook and of these hashes.
++  set(slh_measure_pinned
++    slh_dsa.c  fbbf5c4ed4ea70bf9d90c1de4ddb168d5671e94621a708f110f57a81de0a5613
++    sha2_256.c b1b74abe3d4b6b925ca4ce3ded43a5f2188f0f16a41f8ae91c93de95fc0fa07b
++  )
++  while(slh_measure_pinned)
++    list(POP_FRONT slh_measure_pinned file expected)
++    set(path ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/${file})
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${path})
++    file(SHA256 ${path} actual)
++    if(NOT actual STREQUAL expected)
++      message(FATAL_ERROR "measurement build: the vendored ${file} is not the one the measurement hook was written for (SHA-256 ${actual}, expected ${expected}). Review the hook in measurement-build.patch against the new file, then update the pinned hash.")
++    endif()
++  endwhile()
 +  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/slh_dsa.c slh_measure_source)
 +  function(slh_measure_replace old new)
 +    string(FIND "${slh_measure_source}" "${old}" first)
@@ -330,10 +511,8 @@ index 6b533b6..b75e4b7 100644
 +/* MEASUREMENT ONLY: generated by src/crypto/CMakeLists.txt from the vendored slh_dsa.c for the
 +   measurement build of contrib/m4-measure. When slh_measure_worst is set, every WOTS+ message
 +   digit is taken as zero and the checksum computed from that, so that every chain runs 510 steps
-+   per layer, and the hypertree check is judged valid. slh_measure_verifications counts the
-+   complete verifications. */
++   per layer, and the hypertree check is judged valid. */
 +int slh_measure_worst = 0;
-+uint64_t slh_measure_verifications = 0;
 +]=])
 +  slh_measure_replace([=[  size_t tmp_sz;
 +
@@ -350,18 +529,30 @@ index 6b533b6..b75e4b7 100644
 +    wots_csum(vm, m, prm);
 +  }
 +]=])
-+  slh_measure_replace([=[  return memcmp(node, var->pk_root, prm->n) == 0;
++  if(SLH_MEASURE_COUNT)
++    # The counting build only (one script thread, never timed): a counter of complete verifications
++    # here, and the library's own SHA-256 compression counter in its copy of sha2_256.c.
++    slh_measure_replace([=[  return memcmp(node, var->pk_root, prm->n) == 0;
 +]=] [=[  slh_measure_verifications++;
 +  if (slh_measure_worst) return 1;
 +  return memcmp(node, var->pk_root, prm->n) == 0;
 +]=])
++    string(PREPEND slh_measure_source "#include <stdint.h>\nuint64_t slh_measure_verifications = 0; /* MEASUREMENT ONLY, counting build */\n")
++    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/sha2_256.c ${slh_measure_dir}/sha2_256_measure.c COPYONLY)
++    set_source_files_properties(${slh_measure_dir}/sha2_256_measure.c PROPERTIES COMPILE_DEFINITIONS SLH_EXPERIMENTAL)
++    set(slh_measure_sha2_256 ${slh_measure_dir}/sha2_256_measure.c)
++  else()
++    slh_measure_replace([=[  return memcmp(node, var->pk_root, prm->n) == 0;
++]=] [=[  if (slh_measure_worst) return 1;
++  return memcmp(node, var->pk_root, prm->n) == 0;
++]=])
++    set(slh_measure_sha2_256 slhdsa128s/sha2_256.c)
++  endif()
 +  file(WRITE ${slh_measure_dir}/slh_dsa_measure.c.new "${slh_measure_source}")
 +  configure_file(${slh_measure_dir}/slh_dsa_measure.c.new ${slh_measure_dir}/slh_dsa_measure.c COPYONLY)
-+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/slhdsa128s/sha2_256.c ${slh_measure_dir}/sha2_256_measure.c COPYONLY)
-+  set_source_files_properties(${slh_measure_dir}/sha2_256_measure.c PROPERTIES COMPILE_DEFINITIONS SLH_EXPERIMENTAL)
 +  add_library(bitcoin_slhdsa128s_measure STATIC EXCLUDE_FROM_ALL
 +    ${slh_measure_dir}/slh_dsa_measure.c
-+    ${slh_measure_dir}/sha2_256_measure.c
++    ${slh_measure_sha2_256}
 +    slhdsa128s/sha2_512.c
 +    slhdsa128s/slh_sha2.c
 +  )
@@ -383,7 +574,7 @@ index 6b533b6..b75e4b7 100644
  add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    aes.cpp
    chacha20.cpp
-@@ -167,7 +243,7 @@ target_link_libraries(bitcoin_crypto
+@@ -167,7 +269,7 @@ target_link_libraries(bitcoin_crypto
    PRIVATE
      core_interface
      bitcoin_mldsa44
@@ -392,6 +583,49 @@ index 6b533b6..b75e4b7 100644
  )
  
  if(HAVE_SSE41)
+diff --git a/src/init.cpp b/src/init.cpp
+index 13f54fa..61cc88b 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -105,6 +105,10 @@
+ #include <set>
+ #include <string>
+ #include <thread>
++#ifdef SLH_MEASURE_NODE
++#include <chrono>
++#include <cstdlib>
++#endif
+ #include <vector>
+ 
+ #ifndef WIN32
+@@ -2303,6 +2307,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+     if (!node.connman->Start(scheduler, connOptions)) {
+         return false;
+     }
++#ifdef SLH_MEASURE_NODE
++    // MEASUREMENT ONLY (contrib/m4-measure, bitcoind_m4_measure): no P2P at all. Interrupting the
++    // connection manager here, before RPC leaves its warm-up, stops its network threads and makes it
++    // refuse every connection (setnetworkactive and addnode included) before any RPC can be served.
++    node.connman->Interrupt();
++    LogInfo("MEASUREMENT-ONLY NODE: connection manager interrupted before RPC warm-up ends; no P2P");
++#endif
+ 
+     // ********************************************************* Step 13: finished
+ 
+@@ -2311,6 +2322,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+     // that the RPC's view of the best block is valid and consistent with
+     // ChainstateManager's active tip.
+     SetRPCWarmupFinished();
++#ifdef SLH_MEASURE_NODE
++    // MEASUREMENT ONLY, for testing the above: SLH_MEASURE_TEST_DELAY_MS holds the main thread here, with
++    // RPC already served, so a test can try to open a connection in that window.
++    if (const char* delay{std::getenv("SLH_MEASURE_TEST_DELAY_MS")}) {
++        std::this_thread::sleep_for(std::chrono::milliseconds{std::atoi(delay)});
++    }
++#endif
+ 
+     uiInterface.InitMessage(_("Done loading"));
+ 
 diff --git a/src/qt/main.cpp b/src/qt/main.cpp
 index 422cf7f..ae3d8fa 100644
 --- a/src/qt/main.cpp

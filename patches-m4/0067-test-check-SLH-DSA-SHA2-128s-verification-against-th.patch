@@ -1,4 +1,4 @@
-From 0371f8db068883a61a9b9208c1c9f1652e18731b Mon Sep 17 00:00:00 2001
+From b8fb3bff5cc2a03f7552a827c6979b7453cdbd00 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:45 +0000
 Subject: [PATCH 67/77] test: check SLH-DSA-SHA2-128s verification against the

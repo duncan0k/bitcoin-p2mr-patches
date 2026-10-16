@@ -1,4 +1,4 @@
-From dd57b3c1d6445e347a3213a3f5c772303679ad65 Mon Sep 17 00:00:00 2001
+From 27de5bd356b29176a16b86096c8a8927f05c6250 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 11:40:07 +0000
 Subject: [PATCH 66/77] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
@@ -43,6 +43,9 @@ into src/crypto/slhdsa128s/.
   _M_ARM64), stops the build for any other compiler without them or with
   only some of them, and checks them against CMAKE_C_BYTE_ORDER, which
   must equal CMAKE_CXX_BYTE_ORDER. The vendored files stay unmodified.
+  The wrapper includes only slh_dsa.h, which needs no byte order, so it
+  has no check of its own: a compiler without those macros (MSVC) no
+  longer stops there.
 - src/crypto/slhdsa128s.h exposes one function, SLHDSA128SVerify:
   slh_verify of FIPS 205, the external interface of pure SLH-DSA with a
   context string, over a 32-byte message. It is not HashSLH-DSA and not
@@ -59,7 +62,7 @@ src/crypto/slhdsa128s/README.md records where every file came from, with
 its SHA-256.
 ---
  src/crypto/CMakeLists.txt          | 122 +++++
- src/crypto/slhdsa128s.cpp          |  44 ++
+ src/crypto/slhdsa128s.cpp          |  42 ++
  src/crypto/slhdsa128s.h            |  44 ++
  src/crypto/slhdsa128s/LICENSE      | 248 ++++++++++
  src/crypto/slhdsa128s/README.md    |  82 ++++
@@ -76,7 +79,7 @@ its SHA-256.
  src/crypto/slhdsa128s/slh_sys.h    |  40 ++
  src/crypto/slhdsa128s/slh_var.h    |  61 +++
  src/crypto/slhdsa128s_byte_order.h |  43 ++
- 18 files changed, 3444 insertions(+)
+ 18 files changed, 3442 insertions(+)
  create mode 100644 src/crypto/slhdsa128s.cpp
  create mode 100644 src/crypto/slhdsa128s.h
  create mode 100644 src/crypto/slhdsa128s/LICENSE
@@ -244,10 +247,10 @@ index e1ae782..6b533b6 100644
  if(HAVE_SSE41)
 diff --git a/src/crypto/slhdsa128s.cpp b/src/crypto/slhdsa128s.cpp
 new file mode 100644
-index 0000000..1a03d51
+index 0000000..6c42690
 --- /dev/null
 +++ b/src/crypto/slhdsa128s.cpp
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,42 @@
 +// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -258,11 +261,9 @@ index 0000000..1a03d51
 +
 +#include <atomic>
 +
-+// The vendored code picks its byte order from these two macros, which GCC and Clang define. A
-+// compiler without them would make it take a little-endian machine for a big-endian one.
-+#if !defined(__BYTE_ORDER__) || !defined(__ORDER_BIG_ENDIAN__)
-+#error "slhdsa-c needs __BYTE_ORDER__ and __ORDER_BIG_ENDIAN__"
-+#endif
++// The byte order of the vendored code is checked where that code is compiled, in its own C files
++// (slhdsa128s_byte_order.h); this file includes only slh_dsa.h, which declares the functions with
++// stddef.h and stdint.h types and does not depend on it.
 +
 +namespace {
 +std::atomic<uint64_t> g_library_calls{0};

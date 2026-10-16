@@ -1,4 +1,4 @@
-From d1e67d12335b224c35a057be1f6e5199aea61776 Mon Sep 17 00:00:00 2001
+From d649ffebf0e03516f0e0c0312a9b3946e1b1b376 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:47 +0000
 Subject: [PATCH 77/77] doc: describe OP_CHECKSLHDSA128S

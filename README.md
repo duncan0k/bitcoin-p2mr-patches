@@ -481,10 +481,11 @@ check) / median(Schnorr check)`, measured over the whole path of a check with a 
 SHA extensions: on a cloud virtual machine (4 vCPU Intel Xeon at 2.8 GHz, no SHA extensions, GCC 13.3)
 it asked for 2,550 to 3,658. 5,000 leaves a margin of at least 1.36 times for weaker hardware, and stays
 below 8,022, the budget of a single-signature spend, so a single SLH1 spend and one check per signature
-in any script fit. On a second machine, an AMD EPYC (Zen 2) virtual server with 8 vCPUs, the raw result
-(11,878 to 12,506) is dominated by host stalls of about 10 ms every 90 ms or so, which hit about 1.2 % of
-the 1-ms SLH-DSA samples but only about 0.06 % of the 54-us Schnorr samples; without the stalled samples
-the condition asks for 1,682 to 1,953 there, and passes. The deciding test is the whole-block gate of
+in any script fit. On a second machine, an AMD EPYC-Rome (Zen 2) virtual server (12 vCPUs, measured in a
+container limited to 8 CPUs), the first runs of the condition recorded wall times only, and their raw
+result (11,878 to 12,506) comes from a tail of about 1.2 % of the slowest-path SLH-DSA samples that took
+more than five times their median, which those runs cannot attribute; the runs with thread CPU times and
+steal time are reported in `contrib/m4-measure/README.md`. The deciding test is the whole-block gate of
 `contrib/m4-measure/` (blocks filled to the maximum weight with SLH-DSA, mixed and invalid-signature
 checks against one full of Schnorr checks, in the release build and with the worst-case hook).
 
@@ -516,10 +517,12 @@ each without a finding, after earlier runs of 10 minutes each. Before that, the 
 the patches do not touch), and seven compiler configurations, among them `CC=clang CXX=g++` and
 `-D_FORTIFY_SOURCE=2 -Werror` in `CMAKE_C_FLAGS`, give the vendored C files `_FORTIFY_SOURCE` 3 like
 Core's C++; the byte order of those files is checked at compile time (a C compiler without the byte order
-macros gets them on MSVC's little-endian targets and stops otherwise). A node on the Ark-0 signet logs
+macros gets them on MSVC's little-endian targets and stops otherwise; the C++ wrapper includes only the
+library's header, which needs no byte order, and has no check of its own). A node on the Ark-0 signet logs
 `P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)` and `getdeploymentinfo`
-shows `p2mr_slhdsa128s` as buried at height 32000. The whole-block gate passed on that machine in a smoke
-run (two rounds per block, build and `-par`); it is to be run on a quiet machine before the release.
+shows `p2mr_slhdsa128s` as buried at height 32000. The whole-block gate passed on that machine over its whole
+matrix (five block kinds, two builds, both `-par` settings, two rounds each); it is to be run on a quiet
+machine before the release.
 
 The measurement needs a hook in the library that makes verification walk its slowest path. That hook
 and the scripts are in `contrib/m4-measure/`, as a patch applied on top of the series in a separate
@@ -544,7 +547,7 @@ The series is exported from the Core tree, where the twelve M4-S commits sit on 
 sets as `git am` applies them; `dde712f` is the last commit of `patches-m3/` there:
 
 ```bash
-git format-patch --start-number 66 dde712f..d1e67d1 -o patches-m4
+git format-patch --start-number 66 dde712f..d649ffe -o patches-m4
 (cd patches-m4 && sha256sum -b *.patch) > SHA256SUMS-m4
 ```
 

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Build the measurement-only binaries of M4-S (README.md): bench_bitcoin, and the measurement-only node
-# bitcoind_m4_measure of the whole-block script. Neither is a node for any network, and neither can be
-# installed.
+# bitcoind_m4_measure of the whole-block script, in a timing build (no counters) and a counting build
+# (counters, one script thread). None is a node for any network, and none can be installed.
 #
 # Usage: bash build.sh <core-tree> <work-dir>
 #   <core-tree>  a Bitcoin Core v31.1 tree with every patch set up to patches-m4/ applied (as apply.sh
 #                and contrib/k3s do it); it is not modified
-#   <work-dir>   a new directory: a copy of the tree with measurement-build.patch applied, and two build
-#                directories, build/ (bench_bitcoin) and build-node/ (bitcoind_m4_measure)
+#   <work-dir>   a new directory: a copy of the tree with measurement-build.patch applied, and three build
+#                directories: build/ (bench_bitcoin), build-node/ (bitcoind_m4_measure, timing) and
+#                build-count/ (bitcoind_m4_measure, counting)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$1"; WORK="$2"
@@ -32,18 +33,23 @@ cmake -S "$WORK" -B "$WORK/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=ON -D
 refuse_node_targets "$WORK/build"
 cmake --build "$WORK/build" -j"$(nproc)" --target bench_bitcoin
 echo "built $WORK/build/bin/bench_bitcoin"
-# A separate build directory for the measurement-only node: no wallet, no bench, no install rule.
-# shellcheck disable=SC2086
-cmake -S "$WORK" -B "$WORK/build-node" -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=OFF -DENABLE_WALLET=OFF $OFF \
-      -DSLH_MEASURE_WORST=ON -DSLH_MEASURE_NODE=ON
-refuse_node_targets "$WORK/build-node"
-cmake --build "$WORK/build-node" -j"$(nproc)" --target bitcoind_m4_measure
-# The node refuses every chain but regtest: check it on mainnet before anything else uses it.
-mkdir -p "$WORK/build-node/guard-check"
-if timeout 60 "$WORK/build-node/bin/bitcoind_m4_measure" -chain=main -datadir="$WORK/build-node/guard-check" \
-     > "$WORK/build-node/guard-check.log" 2>&1 \
-   || ! grep -q "runs on regtest only" "$WORK/build-node/guard-check.log"; then
-  echo "bitcoind_m4_measure did not refuse mainnet as expected; refusing to continue" >&2
-  exit 1
-fi
-echo "built $WORK/build-node/bin/bitcoind_m4_measure (refuses mainnet: checked)"
+# Separate build directories for the measurement-only node: no wallet, no bench, no install rule. The
+# timing build has no counters; the counting build has them and checks scripts in one thread.
+build_node() {
+  # shellcheck disable=SC2086
+  cmake -S "$WORK" -B "$WORK/$1" -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=OFF -DENABLE_WALLET=OFF $OFF \
+        -DSLH_MEASURE_WORST=ON -DSLH_MEASURE_NODE=ON "$2"
+  refuse_node_targets "$WORK/$1"
+  cmake --build "$WORK/$1" -j"$(nproc)" --target bitcoind_m4_measure
+  # The node refuses every chain but regtest: check it on mainnet before anything else uses it.
+  mkdir -p "$WORK/$1/guard-check"
+  if timeout 60 "$WORK/$1/bin/bitcoind_m4_measure" -chain=main -datadir="$WORK/$1/guard-check" \
+       > "$WORK/$1/guard-check.log" 2>&1 \
+     || ! grep -q "runs on regtest only" "$WORK/$1/guard-check.log"; then
+    echo "$1: bitcoind_m4_measure did not refuse mainnet as expected; refusing to continue" >&2
+    exit 1
+  fi
+  echo "built $WORK/$1/bin/bitcoind_m4_measure (refuses mainnet: checked)"
+}
+build_node build-node -DSLH_MEASURE_COUNT=OFF
+build_node build-count -DSLH_MEASURE_COUNT=ON
