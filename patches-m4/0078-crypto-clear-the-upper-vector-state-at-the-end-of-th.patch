@@ -1,0 +1,47 @@
+From 55b5f562830bb0e1cd68ba590364a7ca38ef0b39 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Mon, 19 Oct 2026 19:00:04 +0000
+Subject: [PATCH 78/78] crypto: clear the upper vector state at the end of the
+ AVX2 8-way SHA-256
+
+sha256d64_avx2::Transform_8way works on 256-bit registers and returned
+through a tail call into its helper Write8, which takes a 256-bit
+argument; GCC emitted no vzeroupper on that path, so the function left
+the upper halves of the vector registers dirty. On CPUs that penalize
+legacy (non-VEX) SSE instructions while the upper state is dirty,
+legacy SSE code that runs later in the same thread can be slowed. On
+one host the vendored SLH-DSA verification, compiled without AVX, ran
+2 to 2.9 times slower after the AVX2 code had run in its thread.
+
+A node runs this code only where it selects the AVX2 8-way SHA-256
+(CPUs with AVX2 and without SHA extensions), for SHA256D64, Merkle roots
+among its uses, and once in the self-test at startup.
+
+Transform_8way now ends with _mm256_zeroupper(). Its output is
+unchanged. It was found while measuring the validation weight of
+OP_CHECKSLHDSA128S: the benchmark that enables this code showed the
+slowdown, and a vzeroupper before the verification removed it.
+---
+ src/crypto/sha256_avx2.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/crypto/sha256_avx2.cpp b/src/crypto/sha256_avx2.cpp
+index bfa54af..8cf17b8 100644
+--- a/src/crypto/sha256_avx2.cpp
++++ b/src/crypto/sha256_avx2.cpp
+@@ -322,6 +322,12 @@ void Transform_8way(unsigned char* out, const unsigned char* in)
+     Write8(out, 20, Add(f, K(0x9b05688cul)));
+     Write8(out, 24, Add(g, K(0x1f83d9abul)));
+     Write8(out, 28, Add(h, K(0x5be0cd19ul)));
++
++    // This function works on 256-bit registers and used to return through a tail call into Write8,
++    // which takes a 256-bit argument, so no vzeroupper ran and the upper halves stayed dirty, which
++    // can slow legacy SSE code that runs later in the same thread on some CPUs. Clear them before
++    // returning.
++    _mm256_zeroupper();
+ }
+ 
+ }
+-- 
+2.49.0.windows.1
+

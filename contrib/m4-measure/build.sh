@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the measurement-only binaries of M4-S (README.md): bench_bitcoin, and the measurement-only node
-# bitcoind_m4_measure of the whole-block script, in a timing build (no counters) and a counting build
+# bitcoind_m4_measure of the whole-block script, in a timing build (no measurement counters) and a counting build
 # (counters, one script thread). None is a node for any network, and none can be installed.
 #
 # Usage: bash build.sh <core-tree> <work-dir>
@@ -34,7 +34,8 @@ refuse_node_targets "$WORK/build"
 cmake --build "$WORK/build" -j"$(nproc)" --target bench_bitcoin
 echo "built $WORK/build/bin/bench_bitcoin"
 # Separate build directories for the measurement-only node: no wallet, no bench, no install rule. The
-# timing build has no counters; the counting build has them and checks scripts in one thread.
+# timing build has no measurement counters (the wrapper's atomic call counter is in every build); the
+# counting build has them and checks scripts in one thread.
 build_node() {
   # shellcheck disable=SC2086
   cmake -S "$WORK" -B "$WORK/$1" -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCH=OFF -DENABLE_WALLET=OFF $OFF \

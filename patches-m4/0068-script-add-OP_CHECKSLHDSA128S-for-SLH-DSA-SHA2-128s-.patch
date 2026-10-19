@@ -1,7 +1,7 @@
-From ea123d39e378f07e5c6f6ed38100df1e7e8210f3 Mon Sep 17 00:00:00 2001
+From cbb53aca2edc2c2a9045fbed65566c5d5639ed7f Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
-Subject: [PATCH 68/77] script: add OP_CHECKSLHDSA128S for SLH-DSA-SHA2-128s
+Subject: [PATCH 68/78] script: add OP_CHECKSLHDSA128S for SLH-DSA-SHA2-128s
  checks in P2MR leaves
 
 Byte 0xf1, OP_SUCCESS241 in BIP 342, executes as OP_CHECKSLHDSA128S in a

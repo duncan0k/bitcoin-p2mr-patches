@@ -1,7 +1,7 @@
-From 256eff604294a50ce25603e26cfcde4473bab3ab Mon Sep 17 00:00:00 2001
+From cbc52e87b8da0baa03a59769df4ba7ad14d15834 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
-Subject: [PATCH 69/77] consensus: deploy OP_CHECKSLHDSA128S, on Ark-0 from
+Subject: [PATCH 69/78] consensus: deploy OP_CHECKSLHDSA128S, on Ark-0 from
  height 32000
 
 A buried deployment, p2mr_slhdsa128s, sets SCRIPT_VERIFY_P2MR_SLHDSA128S
@@ -22,28 +22,55 @@ on blocks at or above its height where P2MR is active too.
 - Regtest activates them at genesis unless
   -testactivationheight=p2mr_slhdsa128s@N says otherwise.
 - Mainnet, testnet3, testnet4 and the default signet never activate them.
+- The default signet's challenge given explicitly is still that network
+  (the same genesis block and message start), so with it
+  -signetslhdsa128s is refused, and so are the older options that change
+  the rules of a custom signet and had the same gap: -signetmldsa44,
+  -signettripwire, -signetpqblock and -signetpowtargetspacing. One check,
+  next to the parsing of -signetchallenge, compares its bytes with the
+  default signet's challenge, a constant kernel/chainparams.cpp shares
+  with the default signet's parameters. With that challenge P2MR stays
+  disabled too, as on the default signet: the line from the P2MR patches
+  that turned it on for any explicit challenge now leaves it out.
 
 getdeploymentinfo reports the deployment, and a node where it is enabled
 logs "P2MR SLH-DSA-SHA2-128s rules active from height N (leaf versions
 0xc0, 0xe0)" at startup.
 ---
- src/chainparams.cpp               | 27 +++++++++++++++++++++++++--
+ src/chainparams.cpp               | 37 +++++++++++++++++++++++++++++--
  src/chainparamsbase.cpp           |  3 ++-
- src/consensus/params.h            |  9 ++++++++-
+ src/consensus/params.h            |  9 +++++++-
  src/deploymentinfo.cpp            |  4 ++++
- src/init.cpp                      |  6 ++++++
- src/kernel/chainparams.cpp        | 16 ++++++++++++++++
- src/kernel/chainparams.h          | 24 ++++++++++++++++++++++++
+ src/init.cpp                      |  6 +++++
+ src/kernel/chainparams.cpp        | 32 +++++++++++++++++++++++---
+ src/kernel/chainparams.h          | 25 +++++++++++++++++++++
  src/rpc/blockchain.cpp            |  1 +
- src/validation.cpp                |  6 ++++++
+ src/validation.cpp                |  6 +++++
  test/functional/rpc_blockchain.py |  3 ++-
- 10 files changed, 94 insertions(+), 5 deletions(-)
+ 10 files changed, 118 insertions(+), 8 deletions(-)
 
 diff --git a/src/chainparams.cpp b/src/chainparams.cpp
-index 35114b2..9d0c10c 100644
+index 35114b2..febcbb0 100644
 --- a/src/chainparams.cpp
 +++ b/src/chainparams.cpp
-@@ -156,6 +156,26 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+@@ -79,6 +79,16 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.challenge.emplace(*val);
+     }
++    // The default signet's challenge, given explicitly, is still the public default signet (the same
++    // genesis block and message start): none of the options that change the rules of a custom signet
++    // may change its rules.
++    if (options.challenge && IsDefaultSignetChallenge(*options.challenge)) {
++        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire"}) {
++            if (!args.GetArgs(arg).empty()) {
++                throw std::runtime_error(strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", arg));
++            }
++        }
++    }
+     if (!args.GetArgs("-signetpowtargetspacing").empty()) {
+         const auto values = args.GetArgs("-signetpowtargetspacing");
+         if (values.size() != 1) {
+@@ -156,6 +166,26 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
          }
          options.mldsa44_height = *height;
      }
@@ -70,7 +97,7 @@ index 35114b2..9d0c10c 100644
      if (auto tripwire{ReadTripwireArg(args)}) {
          if (!options.challenge) {
              throw std::runtime_error("-signettripwire requires -signetchallenge.");
-@@ -264,11 +284,14 @@ const CChainParams &Params() {
+@@ -264,11 +294,14 @@ const CChainParams &Params() {
  
  std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
  {
@@ -183,10 +210,33 @@ index c348446..13f54fa 100644
      // Warn if unrecognized section name are present in the config file.
      bilingual_str warnings;
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index 74626fc..4cfddec 100644
+index 74626fc..c17f3b4 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
-@@ -199,6 +199,7 @@ public:
+@@ -40,6 +40,10 @@
+ 
+ using namespace util::hex_literals;
+ 
++//! The challenge of the default (public) signet. Given explicitly with -signetchallenge, it is still
++//! that network: the same genesis block and message start.
++static constexpr auto DEFAULT_SIGNET_CHALLENGE{"512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"_hex_u8};
++
+ //! The signet challenge of Ark-0, the network ARK0_MLDSA44_HEIGHT is for.
+ static constexpr auto ARK0_SIGNET_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"_hex_u8};
+ 
+@@ -116,6 +120,11 @@ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
+     return std::ranges::equal(challenge, ARK0_SIGNET_CHALLENGE);
+ }
+ 
++bool IsDefaultSignetChallenge(std::span<const uint8_t> challenge)
++{
++    return std::ranges::equal(challenge, DEFAULT_SIGNET_CHALLENGE);
++}
++
+ //! The P2MR tripwire rules as a node logs them at startup, so that the nodes of one network can
+ //! compare them (doc/p2mr-tripwire.md): the height, and each tripwire outpoint, with the label of
+ //! one the code fixes and the SHA256 of its key unless the key is the BIP-341 NUMS point.
+@@ -199,6 +208,7 @@ public:
          consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on mainnet
          consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
          consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
@@ -194,7 +244,7 @@ index 74626fc..4cfddec 100644
          consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
          consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
          consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-@@ -333,6 +334,7 @@ public:
+@@ -333,6 +343,7 @@ public:
          consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet3
          consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
          consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
@@ -202,7 +252,7 @@ index 74626fc..4cfddec 100644
          consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
          consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
          consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-@@ -443,6 +445,7 @@ public:
+@@ -443,6 +454,7 @@ public:
          consensus.P2MRHeight = std::numeric_limits<int>::max(); // P2MR (BIP360) never activates on testnet4
          consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
          consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
@@ -210,7 +260,28 @@ index 74626fc..4cfddec 100644
          consensus.MinBIP9WarningHeight = 0;
          consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
          consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-@@ -607,6 +610,15 @@ public:
+@@ -552,7 +564,7 @@ public:
+         vSeeds.clear();
+ 
+         if (!options.challenge) {
+-            bin = "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"_hex_v_u8;
++            bin.assign(DEFAULT_SIGNET_CHALLENGE.begin(), DEFAULT_SIGNET_CHALLENGE.end());
+             vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_signet), std::end(chainparams_seed_signet));
+             vSeeds.emplace_back("seed.signet.bitcoin.sprovoost.nl.");
+             vSeeds.emplace_back("seed.signet.achownodes.xyz."); // Ava Chow, only supports x1, x5, x9, x49, x809, x849, xd, x400, x404, x408, x448, xc08, xc48, x40c
+@@ -596,8 +608,9 @@ public:
+         consensus.CSVHeight = 1;
+         consensus.SegwitHeight = 1;
+         // P2MR (BIP360) is only activated on custom signets, i.e. when the operator supplies their
+-        // own challenge. The default (public) signet keeps it disabled.
+-        consensus.P2MRHeight = options.challenge ? 1 : std::numeric_limits<int>::max();
++        // own challenge. The default (public) signet keeps it disabled, its challenge given
++        // explicitly included.
++        consensus.P2MRHeight = options.challenge && !IsDefaultSignetChallenge(*options.challenge) ? 1 : std::numeric_limits<int>::max();
+         // OP_CHECKMLDSA44 in P2MR leaves (doc/p2mr-mldsa44.md): on the Ark-0 signet from the height
+         // this code fixes for that network, on another custom signet only from the height
+         // -signetmldsa44 gives. ReadSigNetArgs refuses the option on Ark-0.
+@@ -607,6 +620,15 @@ public:
          } else {
              consensus.P2MRMLDSA44Height = std::ranges::equal(bin, ARK0_SIGNET_CHALLENGE) ? ARK0_MLDSA44_HEIGHT : std::numeric_limits<int>::max();
          }
@@ -226,7 +297,7 @@ index 74626fc..4cfddec 100644
          // Leaf version 0xe0 and its tripwire outputs (doc/p2mr-tripwire.md): on the Ark-0 signet as
          // this code fixes them, on another custom signet only as -signettripwire gives them, which
          // ReadSigNetArgs refuses on Ark-0 and accepts only above the height of OP_CHECKMLDSA44.
-@@ -747,6 +759,7 @@ public:
+@@ -747,6 +769,7 @@ public:
          consensus.P2MRHeight = 0;   // Always active unless overridden
          consensus.P2MRMLDSA44Height = 0; // Always active unless overridden
          consensus.P2MRTripwireHeight = 0; // Always active unless overridden, without tripwire outputs
@@ -234,7 +305,7 @@ index 74626fc..4cfddec 100644
          consensus.MinBIP9WarningHeight = 0;
          consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
          consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
-@@ -807,6 +820,9 @@ public:
+@@ -807,6 +830,9 @@ public:
              case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_TRIPWIRE:
                  consensus.P2MRTripwireHeight = int{height};
                  break;
@@ -245,10 +316,10 @@ index 74626fc..4cfddec 100644
          }
          // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index bcdd31f..1af63cf 100644
+index bcdd31f..81ffd31 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
-@@ -59,6 +59,24 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
+@@ -59,6 +59,23 @@ inline constexpr int ARK0_TRIPWIRE_HEIGHT{30000};
  // Leaf version 0xe0 runs OP_CHECKMLDSA44, which has to be active before the leaves are.
  static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
  
@@ -257,10 +328,9 @@ index bcdd31f..1af63cf 100644
 + * versions 0xc0 and 0xe0 (doc/p2mr-slhdsa128s.md). Like the heights above, a rule of that
 + * network, fixed here rather than given by an option.
 + *
-+ * Set at the release of this rule, together with the final VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
-+ * about a week of blocks above the chain then. It covers this opcode only; other rules come with
-+ * heights of their own. Once set, it does not change after a build carrying it has left the
-+ * network's own nodes.
++ * 32000 is the height chosen for M4-S and fixed in the code. It covers this opcode only; other
++ * rules come with heights of their own. Once set, it does not change after a build carrying it has
++ * left the network's own nodes.
 + */
 +inline constexpr int ARK0_SLHDSA128S_HEIGHT{32000};
 +// Leaf version 0xe0 must execute before this opcode can run in it: the tripwire height comes first.
@@ -273,7 +343,16 @@ index bcdd31f..1af63cf 100644
  /** Height of the block that created both tripwire outputs of the Ark-0 signet. */
  inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
  // An output counts as present only when it was created below the height of the rules.
-@@ -210,6 +228,12 @@ public:
+@@ -66,6 +83,8 @@ static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_CREATION_HEIGHT);
+ 
+ /** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
++/** Whether a signet challenge is the default (public) signet's, whose rules this code fixes too. */
++bool IsDefaultSignetChallenge(std::span<const uint8_t> challenge);
+ 
+ struct AssumeutxoHash : public BaseHash<uint256> {
+     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+@@ -210,6 +229,12 @@ public:
           * below its height.
           */
          std::optional<TripwireOptions> tripwire{};

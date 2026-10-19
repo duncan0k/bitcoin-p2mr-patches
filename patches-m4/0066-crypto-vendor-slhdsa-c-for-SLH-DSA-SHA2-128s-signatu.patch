@@ -1,7 +1,7 @@
-From 27de5bd356b29176a16b86096c8a8927f05c6250 Mon Sep 17 00:00:00 2001
+From 06aaab97eb11f334b5fde2479f378aa4023b3d49 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 11:40:07 +0000
-Subject: [PATCH 66/77] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
+Subject: [PATCH 66/78] crypto: vendor slhdsa-c for SLH-DSA-SHA2-128s signature
  verification
 
 Ark-0's M4-S adds an experimental tapscript opcode inside P2MR leaves that
@@ -57,6 +57,13 @@ into src/crypto/slhdsa128s/.
   library, and lets measurements count complete verifications.
 - Key generation and signing stay in slh_dsa.c, which is not modified;
   only the unit tests and benchmarks call them.
+- bitcoinkernel takes the objects of bitcoin_crypto, and objects do not
+  carry their target's link dependencies, so it also takes the objects
+  of the two vendored libraries bitcoin_crypto links: bitcoin_slhdsa128s,
+  and bitcoin_mldsa44, whose objects it had lacked since the ML-DSA-44
+  patches. The static library is then self-contained, libbitcoinkernel.pc
+  needs nothing new, and the vendored code keeps its own compile options,
+  forced include and hidden visibility.
 
 src/crypto/slhdsa128s/README.md records where every file came from, with
 its SHA-256.
@@ -79,7 +86,8 @@ its SHA-256.
  src/crypto/slhdsa128s/slh_sys.h    |  40 ++
  src/crypto/slhdsa128s/slh_var.h    |  61 +++
  src/crypto/slhdsa128s_byte_order.h |  43 ++
- 18 files changed, 3442 insertions(+)
+ src/kernel/CMakeLists.txt          |   4 +
+ 19 files changed, 3446 insertions(+)
  create mode 100644 src/crypto/slhdsa128s.cpp
  create mode 100644 src/crypto/slhdsa128s.h
  create mode 100644 src/crypto/slhdsa128s/LICENSE
@@ -3667,6 +3675,21 @@ index 0000000..afc34b8
 +#endif
 +
 +#endif /* BITCOIN_CRYPTO_SLHDSA128S_BYTE_ORDER_H */
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 244f009..01e2de7 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -80,6 +80,10 @@ add_library(bitcoinkernel
+   ../versionbits.cpp
+   $<TARGET_OBJECTS:bitcoin_clientversion>
+   $<TARGET_OBJECTS:bitcoin_crypto>
++  # The vendored post-quantum libraries bitcoin_crypto links: objects do not carry their target's
++  # link dependencies, so theirs are taken the same way. Each keeps its own compile options.
++  $<TARGET_OBJECTS:bitcoin_mldsa44>
++  $<TARGET_OBJECTS:bitcoin_slhdsa128s>
+   $<TARGET_OBJECTS:leveldb>
+   $<TARGET_OBJECTS:crc32c>
+ )
 -- 
 2.49.0.windows.1
 

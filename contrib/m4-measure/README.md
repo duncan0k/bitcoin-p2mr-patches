@@ -10,31 +10,59 @@ How `VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK` (C) of `OP_CHECKSLHDSA128S` is meas
   where 50 is the validation weight of a Schnorr check (BIP 342) and 1.25 a margin;
 - the whole-block gate: blocks filled to the maximum weight with inputs that use up their validation
   budget on SLH-DSA checks, on ML-DSA-44, SLH-DSA and Schnorr checks together, and on SLH-DSA checks that
-  end in an invalid signature, each connected no slower than the median of a block that uses its weight up
-  on Schnorr checks, the most checks per unit of budget.
+  end in an invalid signature, spread over many inputs or all in one, each connected no slower than the
+  median of a block of the same layout that uses its weight up on Schnorr checks, the most checks per unit
+  of budget.
 
 The series (`patches-m4/`) sets C = 5,000. Results so far:
 
-- a cloud virtual machine (4 vCPU Intel Xeon at 2.8 GHz, no SHA extensions, GCC 13.3, three runs per
-  SHA-256 implementation of Core): the single-check condition asks for 2,550 to 3,658. 5,000 is at least
-  1.36 times the highest. One round with CPU times on the same machine had steal time in every run, so the
-  CPU bound gates there: 2,999 to 3,092 on the worst path (wall bound 3,093 to 3,364), 1,768 to 2,145 on
-  the release path. Its whole-block gate, over the whole matrix with two rounds, passes: the largest
-  ratio is 0.778 (`mixed`, hook build, default `-par`);
+- a cloud virtual machine (4 vCPUs, guest kernel with steal time accounting, GCC 13.3):
+  - on an Intel Xeon at 2.8 GHz without SHA extensions, the single-check condition, first runs (three per
+    SHA-256 implementation of Core, an earlier kit, wall time only): 2,550 to 3,658; 5,000 is at least
+    1.36 times the highest. The whole-block gate there, the whole matrix with two rounds, passes: the
+    largest ratio is 0.715 (`mixed`, hook build, default `-par`); the one-input SLH-DSA kinds take 0.167
+    to 0.276 of `schnorr-one`;
+  - with the current kit and patch 0078 (two rounds, continuous and paused), after the machine had moved
+    to an Intel Xeon at 2.1 GHz with AVX-512 and SHA extensions: every run accepted, the largest CPU time
+    over wall time -0.2 to -0.3 us; steal time on the pinned CPU in every run, so the CPU bound gates. The
+    paused runs ask for 2,199 to 2,554 on the worst path and 1,620 to 1,623 on the release path with
+    `standard`, and 2,185 to 2,296 and 956 to 1,688 with `sse4_avx2`; the continuous runs 2,048 to 2,769
+    and 888 to 1,536. Library-level `VerifySLHDSA128S`: 0.48 to 0.59 ms with every setting. Without 0078
+    the vendored library ran 2 to 2.9 times slower on that host in a process that had enabled Core's AVX2
+    SHA-256: that code left the upper halves of the vector registers dirty, which slows the library's
+    SSE code there. A node on that host uses the SHA extensions and never runs it, and the whole-block
+    gate there (release `bitcoind`, two rounds) passes, each SLH-DSA block taking 0.89 to 1.30 times the
+    share of its Schnorr block it took on the 2.8 GHz host.
 - a second machine, an AMD EPYC-Rome (Zen 2) virtual server: `lscpu` shows 12 vCPUs, and the
   measurements ran in a container limited to 8 CPUs. Its CPUs have SHA extensions (`sha_ni`), which
   change neither side of the single-check condition: the vendored SLH-DSA library never uses them, and
   the measurement build of `bench_bitcoin` forces Core's SHA-256 to `standard` or `sse4_avx2`. In the
-  whole-block gate the node's own SHA-256 does use them, which makes the Schnorr reference block faster
+  whole-block gate the node's own SHA-256 does use them, which makes the Schnorr reference blocks faster
   and so the gate's ratios conservative.
-  - Single-check condition, first runs (wall time only, no CPU times recorded): worst-path SLH-DSA
-    checks take 1.03–1.06 ms (median), Schnorr checks about 54 us; the raw worst-path p99 is about
-    10.7 ms, and the raw condition asks for 11,878 to 12,506 (release path: 1,092 to 1,535). About
-    1.2 % of the worst-path SLH-DSA samples took more than 5 times their median, against about 0.07 %
-    of the Schnorr samples. Those runs cannot tell whether the slow samples were preemption or slow
-    checks; `analyze.py --filter-factor 5` gives 1,682 to 1,953 without them, a diagnostic figure that
-    gates nothing. The runs with CPU times are below: [DE1]
-  - Whole-block gate: [DE1]
+  - Its guest kernel (6.12) has neither `CONFIG_PARAVIRT_TIME_ACCOUNTING` nor
+    `CONFIG_IRQ_TIME_ACCOUNTING`: time the host takes is charged to the running thread, so thread CPU
+    time cannot show it, and `/proc/stat` steal shows only a small part of it.
+  - The host caps a busy vCPU: a loop of 1 ms iterations of integer work, pinned to one CPU, lost about
+    10 ms in every 100 ms (slow iterations 98.7 to 101.4 ms apart, each about 9.7 ms longer in wall and
+    in CPU time alike), on two different CPUs. The loss went away when the loop slept about a fifth of
+    the time (2 ms per 8 ms, 5 ms per 20 ms), and came back, more rarely, with 50 ms stretches of work: a
+    cap of about 90 % of each 100 ms per vCPU. The continuous and paused runs of `measure.sh` show the
+    same with the kit's own code.
+  - Single-check condition, an earlier run with continuous runs only (three per SHA-256 implementation,
+    kit of round 6): slow samples every 99.5 to 99.8 ms, 9.7 to 10.2 ms longer, 0.0100 per ms of run for
+    Schnorr, release-path and worst-path checks alike; the raw worst-path p99 of about 10.7 ms is the
+    host's 10 ms, not the check, which does the same 3,894 compressions every time. Raw bounds 11,653 to
+    12,701 on the worst path, wall and CPU alike (release path: 1,197 to 1,442).
+  - Single-check condition with the current kit (three rounds, pinned to CPU 11, continuous and paused):
+    every run accepted, the largest CPU time over wall time -0.7 us in all 24 runs. The paused runs,
+    which gate, ask for 1,829 to 2,289 on the worst path and 1,008 to 1,173 on the release path (six
+    runs each, the CPU bound gating in every run); the continuous runs, reported, 11,980 to 12,720 and
+    1,060 to 1,598. Library medians over the six runs: `VerifySLHDSA128S` 570.8 to 678.8 us,
+    `VerifyMLDSA44` 103.5 to 110.3 us, `VerifySchnorrBIP340` 54.4 to 62.2 us.
+  - Whole-block gate (the kit of round 8, `--rounds 5`, the complete matrix of 26 cells): passes, the
+    largest ratio 0.710 (hook build, default `-par`, `mixed`); counts as expected (`slh` and `slh-one`
+    799 with the hook on and off, `slh-invalid-last` 701, `slh-invalid-tail` 100, `slh-invalid-tail-one`
+    799; 3,894.0 compressions per check with the hook, 2,214.0 to 2,304.0 real).
 
 **Nothing here is part of the series, and nothing applies it**: not `apply.sh`, not `contrib/k3s`, not any
 node build. Every change the patch makes to a source file is under `SLH_MEASURE_WORST` or one of the other
@@ -75,10 +103,14 @@ adds.
   `setnetworkactive true` with `addnode` included. (`SLH_MEASURE_TEST_DELAY_MS`, read by this node only,
   holds its startup for that many milliseconds right after RPC leaves its warm-up, so that a test can try
   to connect in that window.)
-- **Counting and timing are separate builds.** The counters are plain variables, so they are compiled only
-  into the counting build (`SLH_MEASURE_COUNT`), which forces `-par=1`: one thread checks scripts, nothing
-  else writes the counters, and the counts are exact. That build is never timed. The timing builds
-  (`bench_bitcoin`, and `bitcoind_m4_measure` without `SLH_MEASURE_COUNT`) have no counters.
+- **Counting and timing are separate builds.** The measurement counters (complete verifications, SHA-256
+  compressions) are plain variables, so they are compiled only into the counting build
+  (`SLH_MEASURE_COUNT`), which forces `-par=1`: one thread checks scripts, nothing else writes them, and
+  the counts are exact. The counting build's blocks go through the same submission as the others, but
+  their times are discarded and never reach the gate. The timing builds (`bench_bitcoin`, and
+  `bitcoind_m4_measure` without `SLH_MEASURE_COUNT`) have no measurement counters; the wrapper's own atomic
+  count of library calls (`g_library_calls`), which the tests use, is in every build, production
+  included.
 
 ## Files
 
@@ -93,8 +125,11 @@ adds.
     through `SHA256AutoDetect(sha256_implementation::...)`, never SHA-NI) and `SLH_WORST=1` (the hook);
     otherwise `SHA256AutoDetect()` as without the patch;
   - in `src/bench/m4_samples.h` and the two whole-path benchmarks, in a measurement configuration only:
-    with `SLH_SAMPLES_DIR` set, the wall time (`steady_clock`) and the thread CPU time
-    (`CLOCK_THREAD_CPUTIME_ID`) of every single check, written to `<SLH_SAMPLES_DIR>/<benchmark>.csv`;
+    with `SLH_SAMPLES_DIR` set, the wall time (`CLOCK_MONOTONIC`) and the thread CPU time
+    (`CLOCK_THREAD_CPUTIME_ID`) of every single check, written to `<SLH_SAMPLES_DIR>/<benchmark>.csv`, every
+    clock read checked (a failed read stops the measurement with an error); and with `SLH_PAUSE=<B>,<P>`,
+    a sleep of P ms whenever the timed checks since the last pause add up to B ms, outside every sample's
+    timing;
   - in `src/bitcoind.cpp` and `src/init.cpp`, for `bitcoind_m4_measure` only: `SLH_WORST=1`, a banner on
     standard error that names the build (counting or timing), the regtest-only and no-P2P rules, and in
     the counting build `-par=1` and, on exit, the counters (complete SLH-DSA verifications, SHA-256
@@ -104,35 +139,63 @@ adds.
   `build-count/` (`bitcoind_m4_measure`, counting), without wallet for the node, each with every other
   executable turned off; it stops if a cache shows a node or GUI target enabled, and checks that both
   nodes refuse mainnet.
-- `measure.sh <bench_bitcoin> <out-dir> [rounds] [cpu]`: the runs of the single-check condition:
+- `measure.sh <bench_bitcoin> <out-dir> [rounds] [cpu]` (Linux): the runs of the single-check condition:
   `VerifyScriptP2MRSchnorr` and `VerifyScriptP2MRSLHDSA128S` (the whole path of a check as a block
   validates it, 10,000 single checks per run) for both SHA-256 implementations, real signatures and the
-  worst case, pinned to one CPU, with every sample's wall and CPU time in `samples-<run>/`, and the
-  `/proc/stat` CPU lines (steal time included) of all CPUs and of the pinned one, where readable, before
-  and after each run in `stat-<run>.txt`; then the library-level `Verify*` benchmarks.
+  worst case, pinned to one CPU, each run twice, continuously (`cont`) and paused (`pause`, 5 ms per 20 ms
+  of timed checks), with every sample's wall and CPU time in `samples-<run>/`, and the `/proc/stat` CPU
+  lines (steal time included) of all CPUs and of the pinned one, where readable, before and after each run
+  in `stat-<run>.txt`; then the library-level `Verify*` benchmarks.
 - `analyze.py <out-dir>`: per run, for Schnorr and SLH-DSA, the median and p99 of the wall times and of the
-  CPU times, the preempted share of each distribution, the steal time during the run, and the bound
-  `62.5 x p99(SLH) / median(Schnorr)` from the wall times and from the CPU times, to six decimals, with the
-  C each asks for (its ceiling) and which of the two gates (below). With `--filter-factor F` it also
-  reports each run filtered (diagnostic only), without the samples that took more than F times the median
-  of their distribution; the filtered figures gate nothing. Runs without per-sample files are reported
-  from the benchmark's JSON output, wall times only.
+  CPU times, the preempted share of each distribution, the steal time during the run, the largest excess
+  of a CPU time over its wall time, and the bound `62.5 x p99(SLH) / median(Schnorr)` from the wall times
+  and from the CPU times, to six decimals, with the C each asks for (its ceiling) and which of the two
+  gates (below); then the range of the gating C over the paused runs, which gate, and over the continuous
+  runs, which are reported. It rejects a run, and exits with 1, if a wall sample is not positive, a CPU
+  sample is not positive, or a CPU sample exceeds its wall time by more than 5 us plus 0.1 % of its wall
+  time (`--cpu-tolerance-us`, `--cpu-tolerance-fraction`): a clock that cannot be trusted. The harness
+  reads the wall clock first and last, so the CPU interval lies inside the wall interval and time charged
+  to the thread between two reads shows in the wall time only, as preemption; a CPU time can then exceed
+  its wall time only by the difference between the two clocks, and `CLOCK_MONOTONIC` is slewed by NTP by
+  at most 500 ppm while the thread CPU clock is not: the default allows twice that slew and 5 us for the
+  reads. The largest excess printed is a fraction of a microsecond below zero. With `--filter-factor F` it also reports each run filtered (diagnostic only), without the
+  samples that took more than F times the median of their distribution; the filtered figures gate nothing.
+  Runs without per-sample files are reported from the benchmark's JSON output, wall times only. By
+  default it also checks that the output is complete: for both SHA-256 settings and both paths, a
+  continuous and a paused run for every round, each with 10,000 samples of both checks (`--samples`);
+  otherwise it prints `INCOMPLETE` and exits with 2, as `wholeblock.py` does (no runs, continuous runs
+  only, a setting or a path missing, a run without its pair). `--summary-only` skips that check.
 - `wholeblock.py`: the whole-block gate, below.
 - `wots_bound.py`: the numerical check of the bound argument below.
+- `m2_bound.py <out-dir of measure.sh> <results.json of wholeblock.py>`: the estimate, with a margin, of what
+  regtest leaves out, below.
 
 ## Which single-check bound gates
 
-A sample is preempted if its wall time exceeds its thread CPU time by more than 1 ms, or is more than
-twice it (`--preempt-ms`, `--preempt-ratio`): for part of the check, the thread did not run. The wall
-bound gates a run where its samples show no preemption: at most 0.1 % (`--max-preempted`) of the samples
-of each distribution preempted, and no steal time during the run. Otherwise the CPU bound gates, and it is
-reported with the preempted shares and the steal time. Thread CPU time does not count the time the thread
-waited for a CPU; whether it counts time the host took from the virtual CPU depends on the guest kernel
-accounting steal time, which is why steal is recorded and a run with steal never lets the wall bound gate
-by default. The raw samples are always kept, and the gating figure is always reported next to the raw wall
-bound.
+`measure.sh` runs every run twice: continuously, and paused, sleeping 5 ms whenever the timed checks since
+the last pause add up to 20 ms. **The paused runs gate**; the continuous runs are reported next to them.
+A virtual CPU that is busy without a break can lose time to the host at a fixed period (the second machine
+below loses about 10 ms in every 100 ms), and a short check meets such a loss about once per period, in
+proportion to its length: a 1 ms check about once in 100, which puts its p99 on the host's 10 ms, while a
+55 us Schnorr check is hardly ever hit. Idling about a fifth of the time stays clear of such a cap. Such
+sustained-load effects (a host cap, thermal limits) slow SLH-DSA and Schnorr checks alike; the whole-block
+gate runs without pauses and measures them on both sides of its comparison. The pause costs the gate
+little: only the first sample after a pause can find a colder cache, 1 in 20 to 1 in 33 SLH-DSA samples,
+which can only raise their p99, and about 1 in 360 Schnorr samples, which leaves the median alone.
 
-## Why the hook path is the worst case
+Within a run, a sample is preempted if its wall time exceeds its thread CPU time by more than 1 ms, or is
+more than twice it (`--preempt-ms`, `--preempt-ratio`): for part of the check, the thread did not run. The
+CPU bound gates only on evidence of preemption: more than 0.1 % (`--max-preempted`) of either
+distribution's samples preempted, or steal time on the pinned CPU during the run (on all CPUs if the run
+was not pinned; steal on other CPUs only does not count). Otherwise the wall bound gates; where the run's
+`/proc/stat` log is missing, cannot be read or lacks the pinned CPU's line, and no sample was preempted,
+the wall bound gates and the run is marked `steal unknown`. Thread CPU time leaves out the time the thread waited for a CPU, but whether it leaves out
+time the host took from the virtual CPU depends on the guest kernel: with steal time accounting
+(`CONFIG_PARAVIRT_TIME_ACCOUNTING`) the host's time shows as steal; without it, it is charged to the
+running thread and shows in neither. The raw samples are always kept, and the gating figure is always
+reported next to the raw wall bound.
+
+## What the hook path bounds: work
 
 In each of the 7 hypertree layers the verifier completes 35 WOTS+ chains (w = 16): 32 message chains, the
 chain of digit m_i running 15 - m_i steps, and 3 checksum chains. The checksum x = sum(15 - m_i), with
@@ -142,23 +205,48 @@ sum of the hex digits of x. A layer thus runs
 
     steps(x) = x + 45 - ds(x)
 
-chain steps. As x grows by 1, ds(x) grows by at most 1, so steps(x) never decreases as x grows, and its
-maximum is steps(480) = 480 + 45 - (1 + 14 + 0) = 510, reached only at x = 480 (`wots_bound.py` checks
-every x). Everything else a verification does, the message hash, FORS and the authentication paths, the
-compression of each WOTS+ public key, is the same work for every signature. The hook takes every message
-digit as zero, so x = 480 in every layer: its path, 3,894 SHA-256 compressions per verification as counted
-(7 x 510 = 3,570 of them chain steps), bounds every signature. And a rejected block does at most the work
-of the all-valid block with the same checks, since a check stops no later than its valid twin and the
-block stops at its first failure: so the hook build's `slh` block bounds the invalid kinds, which differ
-from it only in what the final comparison of the root finds.
+chain steps over its 35 chains. As x grows by 1, ds(x) grows by at most 1, so steps(x) never decreases as
+x grows, and its maximum is steps(480) = 480 + 45 - (1 + 14 + 0) = 510, reached only at x = 480
+(`wots_bound.py` checks every x). Everything else a verification does, the message hash, FORS and the
+authentication paths, the compression of each WOTS+ public key, is the same work for every signature. The
+hook takes every message digit as zero, so x = 480 in every layer: its path, 3,894 SHA-256 compressions per
+verification as counted (7 x 510 = 3,570 of them chain steps), bounds the work of every check. And a
+rejected block does at most the work of the all-valid block with the same checks, since a check stops no
+later than its valid twin and the block stops at its first failure: the hook build's all-valid blocks
+bound the total work of the invalid kinds of the same layout.
+
+That is a bound on work, per check and per block. A block's wall time also depends on how its checks are
+split among inputs: one input's script is one job of the check queue, run by one thread, so on a node that
+checks in parallel the slowest layout puts every check in one input. The slowest Schnorr block for such a
+node is one input too, so that is the reference for that layout, and the gate compares each layout with
+the Schnorr block of the same layout: `slh-one` and `slh-invalid-tail-one` with `schnorr-one`, the spread
+kinds with `schnorr`. On such a node a single-input SLH-DSA block can take longer to connect than the
+spread `schnorr` block, which several threads check together. 799 worst-path checks in one thread take
+about 1.1 s: on the first machine above (4 vCPUs) the hook build's `slh-one` block took up to 1,167 ms at
+the default `-par`, within 1 % of the spread `schnorr` block's median of 1,183 ms, and 0.28 of the
+`schnorr-one` block's 4,234 ms; on a machine with more cores, or with SHA extensions for Core's own
+SHA-256, the spread `schnorr` block connects faster (about 900 ms on the second machine) and the
+single-input SLH-DSA block takes longer than it: on the second machine, with the hook at the default
+`-par`, `slh-one` took up to 1,088.5 ms, about 1.16 times the spread `schnorr` block's median of
+937.2 ms, and 0.229 of the `schnorr-one` block's median of 4,753.4 ms. That is not the comparison:
+the spread `schnorr` block is not the slowest Schnorr block such a node can be given, and the same layout
+put to Schnorr checks takes longer still. The invalid kinds are compared within their own layout too.
+
+One verification uses about 9 KB of stack: measured at 8,956 bytes, thread start and libc included, by a
+verification of a valid and of a changed signature in a thread whose 64 KiB stack was filled with a
+pattern; it passes in a 16 KiB stack too. GCC's `-fstack-usage` gives the vendored library's 57 functions
+21,264 bytes of frames in all, a bound on any call chain since none of them recurses: GCC's call graph
+(`-fcallgraph-info`) has no cycle, and the indirect calls go to the hash functions of `slh_sha2.c`, which
+call only SHA-2 code.
 
 ## Whole-block gate (`wholeblock.py`)
 
 It builds the chain in Python with the functional test framework of the patched tree (blocks paying to
-`OP_TRUE`, one block funding an output for every input to come) and five blocks, each filled to the
-maximum block weight: full inputs first, then smaller ones for the rest. It asserts that every block fills
-at least 99.5 % of what its coinbase leaves, and that every input's budget (witness size + 50) is used up
-by its checks to within one check's cost.
+`OP_TRUE`, one block funding an output for every input to come) and eight blocks, each filled to the
+maximum block weight: full inputs first, then smaller ones for the rest, or a single input. It asserts that
+every block fills at least 99.5 % of what its coinbase leaves, and that every input's budget (witness size
++ 50) is used up by its checks to within one check's cost. The sizes of a leaf and its spend are computed
+from the lengths of the leaf's parts, so that a single input of about 80,000 checks is built only once.
 
 - `slh`: inputs that each check one valid SLH-DSA-SHA2-128s signature many times (copies of its sixteen
   chunks taken with `OP_PICK`; 100 checks for a full input), padded to their budget;
@@ -172,39 +260,60 @@ by its checks to within one check's cost.
   byte of its last chunk changed), perform all their valid checks first and then, as the last check of the
   same script, one check of the invalid signature; 100 checks for a full input, 99 valid and the last one
   invalid. Whatever input a script thread takes first, it does all of that input's valid checks before it
-  fails.
+  fails;
+- `slh-one`, `slh-invalid-tail-one`, `schnorr-one`: the same as `slh`, `slh-invalid-tail` and `schnorr`
+  with all of the block's checks in one input (799 SLH-DSA checks, 798 valid and the last invalid, about
+  80,000 Schnorr checks), which one thread checks whatever `-par` is.
 
 Each block is connected by a fresh node (`-regtest -maxsigcachesize=0 -debug=bench`, no P2P) through
 `submitblock`, never through the mempool, `--rounds` times for `-par=1` and for the default `-par`, in two
 builds: the release build, a normal `bitcoind` built from the series (`--bitcoind-release`), with real
 signatures and real verification; and the hook build, the timing build of `bitcoind_m4_measure`
-(`--bitcoind-measure`, `build-node/`) with the hook on, where every SLH-DSA check takes the slowest path
-(the invalid kinds are measured in the release build only, as under the hook every signature of the right
-length passes).
+(`--bitcoind-measure`, `build-node/`) with the hook on, where every SLH-DSA check takes the slowest path:
+`slh`, `schnorr`, `mixed`, `slh-one` and `schnorr-one` (the invalid kinds are measured in the release
+build only, as under the hook every signature of the right length passes).
 
-The counts come only from the counting build (`--bitcoind-count`, `build-count/`, one script thread, never
-timed): once per block with the hook off, the real path, and once per valid block with the hook on. The
-script asserts that the verifications counted equal the checks planned, for the invalid kinds up to and
-including the failing check: for `slh-invalid-last` every check of the first seven inputs and the first
-of the last, for `slh-invalid-tail` all the checks of its first input. It reports the SHA-256
-compressions per SLH-DSA check (hook / real: 3,894 / about 2,200).
+The counts come only from the counting build (`--bitcoind-count`, `build-count/`, one script thread, its
+times discarded): once per block with the hook off, the real path, and once per hook-build kind with the
+hook on. The script asserts that the verifications counted equal the checks planned, for the invalid kinds
+up to and including the failing check: for `slh-invalid-last` every check of the first seven inputs and
+the first of the last, for `slh-invalid-tail` all the checks of its first input, for
+`slh-invalid-tail-one` all of its checks. It reports the SHA-256 compressions per SLH-DSA check (hook /
+real: 3,894 / about 2,200).
 
 Connect time is the time `submitblock` takes, the one measure a rejected block has too; the `-debug=bench`
 "Connect block" time of accepted blocks is reported next to it. Per build and `-par`, the script prints for
 each block: weight, fill, inputs, checks planned per kind, SLH-DSA verifications counted (hook / real),
-SHA-256 compressions per SLH-DSA check (hook / real), connect time median and maximum, and the ratio of the
-maximum to the median of the `schnorr` block of the same build and `-par`. **The gate passes when every
-ratio is at most 1 and the matrix is complete**: every block kind, both builds, both `-par` settings and
-the reference, each with `--rounds` samples (at least 1). A run with fewer kinds, builds or `-par` settings
-prints `INCOMPLETE` and exits with 2, as does `--rounds 0`; a failing ratio prints `FAIL` and exits with 1.
-Every run goes to `results.json`.
+SHA-256 compressions per SLH-DSA check (hook / real), connect time median and maximum, its reference
+(`schnorr-one` for the one-input kinds, `schnorr` for the others) and the ratio of the maximum to the
+reference's median, of the same build and `-par`. **The gate passes when every ratio is at most 1 and the
+matrix is complete**: 26 cells (8 kinds in the release build and 5 in the hook build, each with both `-par`
+settings), each with `--rounds` samples, at least 2. A run with fewer kinds, builds or `-par` settings
+prints `INCOMPLETE` and exits with 2, as do `--rounds 0` and `--rounds 1` (a trial run); a failing ratio
+prints `FAIL` and exits with 1. Every run goes to `results.json`.
 
-Regtest blocks differ from Ark-0 blocks from height 20000 in what the block signature adds, and the gate
-does not measure that. Bounded: one ML-DSA-44 verification (about 0.1 ms; `VerifyMLDSA44` in the
-library-level benchmarks), one rebuild of the Merkle root without the signature (tens of hashes for blocks
-of 9 to 41 transactions), and about 2.4 KB of non-witness data in the coinbase, which every block kind
-would give up in weight alike (about 0.24 % of its checks). Together that is well under 1 ms per block,
-against blocks that take 300 to 5,000 ms to connect.
+## What regtest leaves out
+
+An Ark-0 block differs from the gate's regtest blocks in what its signet block solution and, from height
+20000, its ML-DSA-44 block signature add. `m2_bound.py` estimates that from measured figures with a
+margin of 10. It is an estimate under stated assumptions (the model below of what regtest leaves out, and
+a coinbase of at most 3,000 bytes), not a mathematical bound on time:
+
+- one ML-DSA-44 verification, taken as the highest median of the library-level `VerifyMLDSA44` over the
+  runs, and one signature check of the block solution, taken as the highest median of
+  `VerifySchnorrBIP340` (libsecp256k1 verifies ECDSA and Schnorr signatures at about the same cost);
+- the hashing: each of the two computes a modified Merkle root over the block's transactions, with the
+  coinbase (assumed at most 3,000 bytes with the signature push) hashed again, plus a few tagged hashes:
+  378 SHA-256 compressions for the largest block, 41 transactions, each taken as the time of a
+  worst-path SLH-DSA check divided by its 3,894 compressions, which is more than a compression costs;
+- about 2.4 KB of non-witness coinbase data (12,000 WU with the margin of 3,000 bytes), which leaves every
+  block kind, the references included, about 0.3 % fewer checks.
+
+The script adds the estimate to the maximum of every gated block kind, nothing to the references, and shrinks
+the references by the coinbase's weight while leaving the SLH-DSA blocks as they are, and prints the
+largest ratio. On the first machine: 10 x (0.116 ms + 0.048 ms + 378 x 0.28 us) = 2.7 ms per block,
+and the largest ratio goes from 0.715 to 0.720. On the second machine: 10 x (0.110 ms + 0.062 ms + 378 x
+0.28 us) = 2.8 ms per block, and the largest ratio goes from 0.710 to 0.715.
 
 ## How to use it
 
@@ -227,6 +336,8 @@ python3 contrib/m4-measure/wholeblock.py --core /tmp/m4-measure \
     --bitcoind-measure /tmp/m4-measure/build-node/bin/bitcoind_m4_measure \
     --bitcoind-count /tmp/m4-measure/build-count/bin/bitcoind_m4_measure \
     --workdir /tmp/m4-blocks --rounds 10
+# what regtest leaves out
+python3 contrib/m4-measure/m2_bound.py /tmp/m4-out /tmp/m4-blocks/results.json
 ```
 
 In a container limited to fewer CPUs than the host has, pin `measure.sh` to a CPU the container may use

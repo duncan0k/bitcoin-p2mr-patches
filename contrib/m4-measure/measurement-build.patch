@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6109639..8e921a7 100644
+index 6109639..034b3b2 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -184,6 +184,86 @@ endif()
@@ -21,7 +21,7 @@ index 6109639..8e921a7 100644
 +if(SLH_MEASURE_NODE AND NOT SLH_MEASURE_WORST)
 +  message(FATAL_ERROR "SLH_MEASURE_NODE needs SLH_MEASURE_WORST.")
 +endif()
-+option(SLH_MEASURE_COUNT "With SLH_MEASURE_NODE: the counting build of bitcoind_m4_measure (counters, -par=1, never timed)." OFF)
++option(SLH_MEASURE_COUNT "With SLH_MEASURE_NODE: the counting build of bitcoind_m4_measure (measurement counters, -par=1; its times are discarded and never reach the gate)." OFF)
 +if(SLH_MEASURE_COUNT AND NOT SLH_MEASURE_NODE)
 +  message(FATAL_ERROR "SLH_MEASURE_COUNT needs SLH_MEASURE_NODE.")
 +endif()
@@ -190,10 +190,10 @@ index 987523a..b280a27 100644
          tfm::format(std::cerr, "Error parsing command line arguments: %s\n", error);
 diff --git a/src/bench/m4_samples.h b/src/bench/m4_samples.h
 new file mode 100644
-index 0000000..9add331
+index 0000000..4b5a9d6
 --- /dev/null
 +++ b/src/bench/m4_samples.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,114 @@
 +// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -203,8 +203,17 @@ index 0000000..9add331
 +
 +// Measurement build only (contrib/m4-measure): the wall time and the thread CPU time of every single
 +// check of a whole-path benchmark, written to <SLH_SAMPLES_DIR>/<name>.csv when the benchmark ends,
-+// if that variable is set. The CPU time (CLOCK_THREAD_CPUTIME_ID) leaves out the time the thread did
-+// not run, so a sample whose wall time exceeds it was preempted or stalled by the host.
++// if that variable is set. The CPU time (CLOCK_THREAD_CPUTIME_ID) leaves out the time the thread waited
++// for a CPU, so a sample whose wall time exceeds it was preempted. The reads nest the CPU interval inside
++// the wall interval (Start reads the wall clock first, Stop reads it last), so time charged to the thread
++// between two reads shows in the wall time only, as preemption, and a CPU time above the wall time can
++// only come from a clock that cannot be trusted.
++//
++// SLH_PAUSE=<B>,<P> (milliseconds, with SLH_SAMPLES_DIR) makes the benchmark sleep P ms whenever the
++// wall time of its timed checks since the last pause adds up to B ms. The sleep is outside every
++// sample's timing (but inside nanobench's own, so only the per-sample files are meaningful then).
++//
++// A clock that cannot be read stops the measurement with an error.
 +
 +#ifndef SLH_MEASURE_WORST
 +#error "bench/m4_samples.h is for the measurement build only"
@@ -216,6 +225,7 @@ index 0000000..9add331
 +#include <cstdlib>
 +#include <ctime>
 +#include <string>
++#include <thread>
 +#include <vector>
 +
 +class M4Samples
@@ -224,54 +234,76 @@ index 0000000..9add331
 +    std::vector<int64_t> m_wall, m_cpu;
 +    int64_t m_wall0{0}, m_cpu0{0};
 +    bool m_on{false};
++    int64_t m_pause_every_ns{0}, m_pause_ns{0}, m_busy_ns{0};
++    uint64_t m_pauses{0};
 +
-+    static int64_t Cpu()
++    [[noreturn]] static void Fail(const std::string& what)
 +    {
-+        timespec ts;
-+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
++        std::fprintf(stderr, "measurement stopped: %s\n", what.c_str());
++        std::abort();
++    }
++    static int64_t Read(clockid_t clock, const char* name)
++    {
++        timespec ts{};
++        if (clock_gettime(clock, &ts) != 0) Fail(std::string{"clock_gettime("} + name + ") failed");
 +        return int64_t{ts.tv_sec} * 1'000'000'000 + ts.tv_nsec;
 +    }
-+    static int64_t Wall()
-+    {
-+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-+    }
++    static int64_t Cpu() { return Read(CLOCK_THREAD_CPUTIME_ID, "CLOCK_THREAD_CPUTIME_ID"); }
++    static int64_t Wall() { return Read(CLOCK_MONOTONIC, "CLOCK_MONOTONIC"); }
 +
 +public:
 +    M4Samples(std::string name, bool measuring) : m_name{std::move(name)}, m_on{measuring && std::getenv("SLH_SAMPLES_DIR") != nullptr}
 +    {
-+        if (m_on) {
-+            m_wall.reserve(20'000);
-+            m_cpu.reserve(20'000);
++        if (!m_on) return;
++        m_wall.reserve(20'000);
++        m_cpu.reserve(20'000);
++        if (const char* pause{std::getenv("SLH_PAUSE")}) {
++            long every{0}, sleep{0};
++            if (std::sscanf(pause, "%ld,%ld", &every, &sleep) != 2 || every <= 0 || sleep <= 0) {
++                Fail("SLH_PAUSE must be <B>,<P> in milliseconds, both positive");
++            }
++            m_pause_every_ns = int64_t{every} * 1'000'000;
++            m_pause_ns = int64_t{sleep} * 1'000'000;
 +        }
++        // Both clocks are read once before the first check, so that one that cannot be read stops the
++        // measurement before it starts.
++        Cpu();
++        Wall();
 +    }
 +    void Start()
 +    {
 +        if (!m_on) return;
-+        m_cpu0 = Cpu();
 +        m_wall0 = Wall();
++        m_cpu0 = Cpu();
 +    }
 +    void Stop()
 +    {
 +        if (!m_on) return;
-+        const int64_t wall{Wall()};
 +        const int64_t cpu{Cpu()};
++        const int64_t wall{Wall()};
 +        m_wall.push_back(wall - m_wall0);
 +        m_cpu.push_back(cpu - m_cpu0);
++        if (m_pause_every_ns) {
++            m_busy_ns += wall - m_wall0;
++            if (m_busy_ns >= m_pause_every_ns) {
++                std::this_thread::sleep_for(std::chrono::nanoseconds{m_pause_ns});
++                m_busy_ns = 0;
++                ++m_pauses;
++            }
++        }
 +    }
 +    ~M4Samples()
 +    {
 +        if (!m_on) return;
 +        const std::string path{std::string{std::getenv("SLH_SAMPLES_DIR")} + "/" + m_name + ".csv"};
-+        if (FILE* f{std::fopen(path.c_str(), "w")}) {
-+            std::fprintf(f, "wall_ns,cpu_ns\n");
-+            for (size_t i = 0; i < m_wall.size(); ++i) {
-+                std::fprintf(f, "%lld,%lld\n", static_cast<long long>(m_wall[i]), static_cast<long long>(m_cpu[i]));
-+            }
-+            std::fclose(f);
-+        } else {
-+            std::fprintf(stderr, "cannot write %s\n", path.c_str());
-+            std::abort();
++        FILE* f{std::fopen(path.c_str(), "w")};
++        if (!f) Fail("cannot write " + path);
++        std::fprintf(f, "wall_ns,cpu_ns\n");
++        for (size_t i = 0; i < m_wall.size(); ++i) {
++            std::fprintf(f, "%lld,%lld\n", static_cast<long long>(m_wall[i]), static_cast<long long>(m_cpu[i]));
 +        }
++        if (std::fclose(f) != 0) Fail("cannot write " + path);
++        if (m_pause_every_ns) std::fprintf(stderr, "%s: %llu pauses\n", m_name.c_str(), static_cast<unsigned long long>(m_pauses));
 +    }
 +};
 +
@@ -345,7 +377,7 @@ index b7612cf..8c8358e 100644
      });
  }
 diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
-index 323e757..07a3a65 100644
+index 323e757..0547349 100644
 --- a/src/bitcoind.cpp
 +++ b/src/bitcoind.cpp
 @@ -3,11 +3,26 @@
@@ -443,7 +475,7 @@ index 323e757..07a3a65 100644
 +#ifdef SLH_MEASURE_COUNT
 +        const char* build{"counting build, -par=1, not for timing"};
 +#else
-+        const char* build{"timing build, no counters"};
++        const char* build{"timing build, no measurement counters"};
 +#endif
 +        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4-measure, " << build << "), not for any network; SLH worst-case hook: " << slh_measure_worst << std::endl;
 +    }
@@ -462,10 +494,10 @@ index 323e757..07a3a65 100644
      return node.exit_status;
  }
 diff --git a/src/crypto/CMakeLists.txt b/src/crypto/CMakeLists.txt
-index 6b533b6..2a2a320 100644
+index 6b533b6..3174aa6 100644
 --- a/src/crypto/CMakeLists.txt
 +++ b/src/crypto/CMakeLists.txt
-@@ -141,6 +141,108 @@ else()
+@@ -141,6 +141,110 @@ else()
    slhdsa128s_try_add_c_options(bitcoin_slhdsa128s FALSE "${slhdsa128s_main}" -Wformat -Wformat-security)
  endif()
  
@@ -473,9 +505,10 @@ index 6b533b6..2a2a320 100644
 +# library, for the measurement configuration's executables (bench_bitcoin, bitcoind_m4_measure) only.
 +# It is built from a copy that CMake generates here from the unmodified vendored slh_dsa.c, with the
 +# worst-case hook (switch slh_measure_worst) inserted by exact replacements that must each match once.
-+# In the counting build (SLH_MEASURE_COUNT, one script thread, never timed) it also counts complete
-+# verifications and, in a copy of sha2_256.c, SHA-256 compressions; the builds that are timed have no
-+# counters. bitcoin_slhdsa128s itself still compiles the vendored files as they are, so no compile flag
++# In the counting build (SLH_MEASURE_COUNT, one script thread; its times are discarded and never
++# reach the gate) it also counts complete verifications and, in a copy of sha2_256.c, SHA-256
++# compressions; the builds that are timed have no measurement counters (the wrapper's atomic call
++# counter is in every build). bitcoin_slhdsa128s itself still compiles the vendored files as they are, so no compile flag
 +# (-DSLH_MEASURE_WORST in APPEND_CFLAGS, say) puts the hook into it.
 +if(SLH_MEASURE_WORST)
 +  set(slh_measure_dir ${CMAKE_CURRENT_BINARY_DIR}/slhdsa128s_measure)
@@ -510,8 +543,9 @@ index 6b533b6..2a2a320 100644
 +
 +/* MEASUREMENT ONLY: generated by src/crypto/CMakeLists.txt from the vendored slh_dsa.c for the
 +   measurement build of contrib/m4-measure. When slh_measure_worst is set, every WOTS+ message
-+   digit is taken as zero and the checksum computed from that, so that every chain runs 510 steps
-+   per layer, and the hypertree check is judged valid. */
++   digit is taken as zero and the checksum computed from that, so that the 35 chains of every layer
++   run 510 steps in all, the most any signature can ask for, and the hypertree check is judged
++   valid. */
 +int slh_measure_worst = 0;
 +]=])
 +  slh_measure_replace([=[  size_t tmp_sz;
@@ -530,8 +564,8 @@ index 6b533b6..2a2a320 100644
 +  }
 +]=])
 +  if(SLH_MEASURE_COUNT)
-+    # The counting build only (one script thread, never timed): a counter of complete verifications
-+    # here, and the library's own SHA-256 compression counter in its copy of sha2_256.c.
++    # The counting build only (one script thread; its times are discarded and never reach the gate):
++    # a counter of complete verifications here, and the library's own SHA-256 compression counter in its copy of sha2_256.c.
 +    slh_measure_replace([=[  return memcmp(node, var->pk_root, prm->n) == 0;
 +]=] [=[  slh_measure_verifications++;
 +  if (slh_measure_worst) return 1;
@@ -574,7 +608,7 @@ index 6b533b6..2a2a320 100644
  add_library(bitcoin_crypto STATIC EXCLUDE_FROM_ALL
    aes.cpp
    chacha20.cpp
-@@ -167,7 +269,7 @@ target_link_libraries(bitcoin_crypto
+@@ -167,7 +271,7 @@ target_link_libraries(bitcoin_crypto
    PRIVATE
      core_interface
      bitcoin_mldsa44

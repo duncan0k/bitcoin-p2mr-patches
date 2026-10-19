@@ -1,7 +1,7 @@
-From 1e83747821b748cf2f69fb9de7bc8bd0ef2c8e73 Mon Sep 17 00:00:00 2001
+From 555c50a1d091cc5a12773dadbd25776a01a6ba89 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
-Subject: [PATCH 71/77] test: sign and verify SLH-DSA-SHA2-128s in the
+Subject: [PATCH 71/78] test: sign and verify SLH-DSA-SHA2-128s in the
  functional test framework
 
 - test_framework/crypto/slhdsa128s.py implements SLH-DSA-SHA2-128s of

@@ -40,7 +40,7 @@ patches-m2/         6 further patches, the experimental M2 series and a later te
 patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
-patches-m4/         12 further patches, the experimental M4-S series, to be released, on Ark-0 from height 32000 (see below)
+patches-m4/         13 further patches, the experimental M4-S series, to be released, on Ark-0 from height 32000 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
@@ -54,7 +54,7 @@ contrib/k3s/        build, test and run the series inside a k3s cluster
 contrib/cross/      cross-compile the M3 node for macOS and Linux, as the witness program ships it
 contrib/windows/    cross-compile the M3 node for 64-bit Windows, as the witness program ships it
 contrib/m4-measure/ the measurement-only builds and scripts of the M4-S validation weight; never part of a node (see below)
-contrib/m4-crosscheck/ a known-answer check of the vendored SLH-DSA verifier across architectures (see below)
+contrib/m4-crosscheck/ a known-answer check of the vendored SLH-DSA verifier across architectures and against BoringSSL (see below)
 witness/            Ark0Witness, a small program for watching the M3 drill with a node of one's own
 ```
 
@@ -457,7 +457,7 @@ git format-patch --start-number 55 924e9f7..dde712f -o patches-m3
 
 ## Experimental M4-S series (`patches-m4/`)
 
-Twelve patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
+Thirteen patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
 `patches-m2/` and `patches-m3/`, in that order. **To be released.** On the Ark-0 signet the rules apply
 from **height 32000** (`ARK0_SLHDSA128S_HEIGHT`), and each check with a signature uses a validation
 weight of **5,000** (`VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK`); neither changes once the series is
@@ -478,16 +478,27 @@ is its specification.
 
 The validation weight follows from the single-check condition `C >= 1.25 x 50 x p99(worst-case SLH-DSA
 check) / median(Schnorr check)`, measured over the whole path of a check with a SHA-256 that uses no
-SHA extensions: on a cloud virtual machine (4 vCPU Intel Xeon at 2.8 GHz, no SHA extensions, GCC 13.3)
-it asked for 2,550 to 3,658. 5,000 leaves a margin of at least 1.36 times for weaker hardware, and stays
-below 8,022, the budget of a single-signature spend, so a single SLH1 spend and one check per signature
-in any script fit. On a second machine, an AMD EPYC-Rome (Zen 2) virtual server (12 vCPUs, measured in a
-container limited to 8 CPUs), the first runs of the condition recorded wall times only, and their raw
-result (11,878 to 12,506) comes from a tail of about 1.2 % of the slowest-path SLH-DSA samples that took
-more than five times their median, which those runs cannot attribute; the runs with thread CPU times and
-steal time are reported in `contrib/m4-measure/README.md`. The deciding test is the whole-block gate of
+SHA extensions. Its first runs, on a cloud virtual machine (4 vCPU Intel Xeon at 2.8 GHz, no SHA
+extensions, GCC 13.3, wall time only), asked for 2,550 to 3,658; 5,000 is at least 1.36 times the highest,
+and stays below 8,022, the budget of a single-signature spend, so a single SLH1 spend and one check per
+signature in any script fit. With the current kit (every run continuous and paused, the paused runs
+gating, wall and thread CPU time per sample) and patch 0078, on that virtual machine, by then on a
+2.1 GHz Xeon with AVX-512 and SHA extensions, the paused runs ask for 2,185 to 2,554 on the worst path
+(release path 956 to 1,688). On a second machine, an AMD EPYC-Rome (Zen 2) virtual server (12 vCPUs,
+measured in a container limited to 8 CPUs), the host takes about 10 ms of every 100 ms from a vCPU that is
+busy without a break, and its guest kernel charges that time to the running thread, so a 1 ms check meets
+it about once in 100: with the published kit, run continuously, the condition asks for 11,980 to 12,720
+there; the paused runs, which gate, ask for 1,829 to 2,289 (release path 1,008 to 1,173).
+`contrib/m4-measure/README.md` gives the figures. The other test is the whole-block gate of
 `contrib/m4-measure/` (blocks filled to the maximum weight with SLH-DSA, mixed and invalid-signature
-checks against one full of Schnorr checks, in the release build and with the worst-case hook).
+checks, spread over many inputs or all in one, against the Schnorr block of the same layout, in the
+release build and with the worst-case hook).
+
+The measurement found that Core's AVX2 8-way SHA-256 left the upper halves of the vector registers dirty,
+which slowed the vendored verifier 2 to 2.9 times on one host when that code had run in the same thread.
+A node runs that code only on CPUs with AVX2 and without SHA extensions. Patch 0078 clears the state; the
+first machine's figures above are with it, the second machine's without it (there the node uses the SHA
+extensions and never runs that code).
 
 | # | Commit | Content |
 |---|---|---|
@@ -503,14 +514,19 @@ checks against one full of Schnorr checks, in the release build and with the wor
 | 75 | bench: time SLH-DSA-SHA2-128s verification and the whole path of its check | `VerifySLHDSA128S`, `VerifyScriptP2MRSLHDSA128S` |
 | 76 | test: check OP_CHECKSLHDSA128S against the M4 vectors of p2mr-ts | the spend and construction vectors of the wallet side, pinned: signature messages for key_version 0, 1 and 2, signatures, witnesses through `VerifyScript`, keys, leaves, trees and addresses |
 | 77 | doc: describe OP_CHECKSLHDSA128S | `doc/p2mr-slhdsa128s.md` |
+| 78 | crypto: clear the upper vector state at the end of the AVX2 8-way SHA-256 | `_mm256_zeroupper()` at the end of `sha256d64_avx2::Transform_8way`, which returned through a tail call without it; the output is unchanged |
 
 It is a soft fork. A node built without `patches-m4/` accepts every block a node with it accepts; to it,
 `0xf1` stays `OP_SUCCESS241`. Bitcoin Core's wallet does not create or sign these leaves.
 
-Verified on 2026-10-16 on that cloud virtual machine (GCC 13.3 and clang 18), from a fresh checkout of
-v31.1 with all 77 patches applied as their `SHA256SUMS` files name them: the release build had no compiler
-warnings; `test_bitcoin` passed 780 of 786 test cases and one more with a warning, and skipped 5; the P2MR,
-signet and related functional scripts (16 runs) and `feature_p2mr_slhdsa128s.py` passed; in Core's own
+Verified on 2026-10-19 on that cloud virtual machine, from a fresh checkout of v31.1 with all 78 patches
+applied as their `SHA256SUMS` files name them: the release build had no compiler warnings, and
+`test_bitcoin` passed 781 of 787 test cases and one more with a warning, and skipped 5 (`crypto_tests`
+among them); a release `bitcoind` starts and logs its SHA-256 implementation. Before 0078 (on 2026-10-16,
+GCC 13.3 and clang 18, with the first 77 patches; 0078 changes only `src/crypto/sha256_avx2.cpp`): the P2MR,
+signet and related functional scripts (16 runs) and `feature_p2mr_slhdsa128s.py` passed; the kernel library
+(`-DBUILD_KERNEL_LIB=ON -DBUILD_UTIL_CHAINSTATE=ON`), shared and static, built with `test_kernel` and
+`bitcoin-chainstate`, and `test_kernel` passed; in Core's own
 fuzz build (`-DBUILD_FOR_FUZZING=ON -DSANITIZERS=fuzzer,address,undefined`) both fuzz targets ran a minute
 each without a finding, after earlier runs of 10 minutes each. Before that, the unit tests passed in a
 `-DSANITIZERS=address,undefined` build (but for `net_tests`, stopped by a UBSan report in upstream code
@@ -521,8 +537,9 @@ macros gets them on MSVC's little-endian targets and stops otherwise; the C++ wr
 library's header, which needs no byte order, and has no check of its own). A node on the Ark-0 signet logs
 `P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)` and `getdeploymentinfo`
 shows `p2mr_slhdsa128s` as buried at height 32000. The whole-block gate passed on that machine over its whole
-matrix (five block kinds, two builds, both `-par` settings, two rounds each); it is to be run on a quiet
-machine before the release.
+matrix (26 cells: eight block kinds, two builds, both `-par` settings, two rounds each), and on the second
+machine too, over the 26 cells in five rounds: the largest ratio there is 0.710 (0.715 with the estimate
+of what regtest leaves out).
 
 The measurement needs a hook in the library that makes verification walk its slowest path. That hook
 and the scripts are in `contrib/m4-measure/`, as a patch applied on top of the series in a separate
@@ -534,7 +551,9 @@ installed. Its README says how to repeat the measurements.
 vectors (the NIST ACVP sigVer vectors of SLH-DSA-SHA2-128s, the SLH-DSA signatures of the p2mr-ts vectors,
 a fixture, and one-bit-flipped copies of the valid signatures) gave the same results on x86-64 with GCC and
 Clang, on i386, and under qemu-user on aarch64, armhf and big-endian s390x, each at `-O0` and `-O3`, with and
-without UBSan, and no warning or UBSan report.
+without UBSan, and no warning or UBSan report. Its `run-boringssl.sh` runs the same vectors through BoringSSL
+instead (commit `437b75f3`, 2026-10-15): on x86-64, and on aarch64 under qemu-user, every result was the same
+as the vendored verifier's.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
@@ -543,11 +562,11 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
        ../bitcoin-p2mr-patches/patches-m4/*.patch
 ```
 
-The series is exported from the Core tree, where the twelve M4-S commits sit on the six earlier patch
+The series is exported from the Core tree, where the thirteen M4-S commits sit on the six earlier patch
 sets as `git am` applies them; `dde712f` is the last commit of `patches-m3/` there:
 
 ```bash
-git format-patch --start-number 66 dde712f..d649ffe -o patches-m4
+git format-patch --start-number 66 dde712f..55b5f56 -o patches-m4
 (cd patches-m4 && sha256sum -b *.patch) > SHA256SUMS-m4
 ```
 

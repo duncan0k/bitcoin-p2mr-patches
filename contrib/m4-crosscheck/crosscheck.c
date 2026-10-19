@@ -16,15 +16,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef M4CC_BORINGSSL
+/* Build against BoringSSL instead of the vendored files; see run-boringssl.sh. */
+#include <openssl/sha.h>
+#include <openssl/slhdsa.h>
+
+/* Not in the public headers, but exported by libcrypto: the internal interface (FIPS 205, Algorithm 19),
+ * reached through bssl_shim.cc because its header is C++. */
+int m4cc_bssl_verify_internal(const unsigned char *sig, size_t sig_len, const unsigned char *pk,
+                              const unsigned char *msg, size_t msg_len);
+#else
 #include "sha2_api.h"
 #include "slh_dsa.h"
+#endif
 
 #define PK_SIZE 32u
 #define SIG_SIZE 7856u
 #define MAX_CTX 255u
 
+#ifndef M4CC_BORINGSSL
 int m4cc_wrapper_verify(const unsigned char *pk, size_t pk_len, const unsigned char *msg, size_t msg_len,
                         const unsigned char *ctx, size_t ctx_len, const unsigned char *sig, size_t sig_len);
+#endif
 
 static unsigned char EMPTY[1] = {0};
 
@@ -45,14 +58,25 @@ static unsigned char *unhex(const char *s, size_t *len)
 static int verify(char kind, const unsigned char *pk, size_t pk_len, const unsigned char *msg, size_t msg_len,
                   const unsigned char *ctx, size_t ctx_len, const unsigned char *sig, size_t sig_len)
 {
+#ifndef M4CC_BORINGSSL
     if (kind == 'w') return m4cc_wrapper_verify(pk, pk_len, msg, msg_len, ctx, ctx_len, sig, sig_len);
+#endif
+    if (kind == 'w' && msg_len != 32) return 0;
     if (pk_len != PK_SIZE || sig_len != SIG_SIZE) return 0;
-    if (kind == 'e') {
+    if (kind == 'e' || kind == 'w') {
         if (ctx_len > MAX_CTX) return 0;
+#ifdef M4CC_BORINGSSL
+        return SLHDSA_SHA2_128S_verify(sig, sig_len, pk, msg_len ? msg : EMPTY, msg_len, ctx_len ? ctx : EMPTY, ctx_len) == 1;
+#else
         return slh_verify(msg_len ? msg : EMPTY, msg_len, sig, sig_len, ctx_len ? ctx : EMPTY, ctx_len, pk,
                           &slh_dsa_sha2_128s) == 1;
+#endif
     }
+#ifdef M4CC_BORINGSSL
+    return m4cc_bssl_verify_internal(sig, sig_len, pk, msg_len ? msg : EMPTY, msg_len);
+#else
     return slh_verify_internal(msg_len ? msg : EMPTY, msg_len, sig, sig_len, pk, &slh_dsa_sha2_128s) == 1;
+#endif
 }
 
 static unsigned char *g_out;
@@ -126,7 +150,11 @@ int main(int argc, char **argv)
     fclose(f);
 
     unsigned char md[32];
+#ifdef M4CC_BORINGSSL
+    SHA256(g_out, g_out_len, md);
+#else
     sha2_256(md, g_out, g_out_len);
+#endif
     printf("sha256 ");
     for (int i = 0; i < 32; ++i) printf("%02x", md[i]);
     printf(" vectors %u mismatches %u\n", g_count, g_mismatches);

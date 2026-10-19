@@ -1,7 +1,7 @@
-From d649ffebf0e03516f0e0c0312a9b3946e1b1b376 Mon Sep 17 00:00:00 2001
+From 895137bf7a7ad2d64e98c6dbe20636c507d104d3 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:47 +0000
-Subject: [PATCH 77/77] doc: describe OP_CHECKSLHDSA128S
+Subject: [PATCH 77/78] doc: describe OP_CHECKSLHDSA128S
 
 doc/p2mr-slhdsa128s.md is the specification of the opcode in this build:
 where it executes, the encoding and its one template, the order of the
@@ -9,17 +9,17 @@ checks, the verification library, the validation weight (5000) and how
 it was set, the activation (on Ark-0 from height 32000), the relay
 policy, what a wallet should do, and the tests.
 ---
- doc/p2mr-slhdsa128s.md | 242 +++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr-slhdsa128s.md | 243 +++++++++++++++++++++++++++++++++++++++++
  doc/p2mr.md            |  11 +-
- 2 files changed, 249 insertions(+), 4 deletions(-)
+ 2 files changed, 250 insertions(+), 4 deletions(-)
  create mode 100644 doc/p2mr-slhdsa128s.md
 
 diff --git a/doc/p2mr-slhdsa128s.md b/doc/p2mr-slhdsa128s.md
 new file mode 100644
-index 0000000..47f1509
+index 0000000..a57c088
 --- /dev/null
 +++ b/doc/p2mr-slhdsa128s.md
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,243 @@
 +# OP_CHECKSLHDSA128S: an experimental SLH-DSA-SHA2-128s check in P2MR leaves
 +
 +This build adds one opcode, `OP_CHECKSLHDSA128S`, that verifies an SLH-DSA-SHA2-128s signature
@@ -149,8 +149,9 @@ index 0000000..47f1509
 +- the single-check condition is `C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr
 +  check)`, both over the whole path of a check, measured with a SHA-256 that uses no SHA
 +  extensions;
-+- the worst case is that of the verification itself: every WOTS+ chain of every layer at its
-+  longest (510 steps), 3,894 SHA-256 compressions against about 2,194 on average. An honest
++- the worst case is that of the verification itself: the WOTS+ chains of every layer at their
++  longest together, up to 15 steps a chain but at most 510 over the 35 chains of a layer (the
++  checksum limits the sum), 3,894 SHA-256 compressions against about 2,194 on average. An honest
 +  signature cannot be pushed there, but the weight is set for it so that it does not depend on
 +  how much work an attacker spends grinding;
 +- it must stay below 8,022, the budget of a single-signature spend. At 5,000 a single SLH1 spend

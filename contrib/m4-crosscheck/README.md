@@ -40,3 +40,28 @@ non-zero if anything differs. A target whose tools are missing is reported as sk
 `apt-get install gcc-multilib g++-multilib clang libclang-rt-18-dev gcc-aarch64-linux-gnu
 g++-aarch64-linux-gnu gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf gcc-s390x-linux-gnu
 g++-s390x-linux-gnu qemu-user`.
+
+## BoringSSL as a third implementation
+
+`run-boringssl.sh` builds `crosscheck.c` a second time with `-DM4CC_BORINGSSL`, so that it verifies with
+BoringSSL instead of the vendored files, and compares the two programs line by line. The inputs, the
+output format and the length checks before each call (key 32 bytes, signature 7856 bytes, context at most
+255 bytes, and 32 bytes of message for the vectors that go through `SLHDSA128SVerify`) are the same.
+
+- BoringSSL is fetched at a pinned commit: `437b75f34c3899230cb3f3fcf05543cb104faf2b`, committed
+  2026-10-15, built as `libcrypto.a` in Release mode.
+- External (pure) vectors go through `SLHDSA_SHA2_128S_verify` of `<openssl/slhdsa.h>`.
+- Internal-interface vectors go through `BCM_slhdsa_sha2_128s_verify_internal`. It is declared in
+  BoringSSL's non-public `crypto/fipsmodule/bcm_interface.h` (C++, hence `bssl_shim.cc`) and exported by
+  `libcrypto.a`, so a build outside its tree can reach it.
+
+Result on x86-64 (gcc, `-O2`) and on aarch64 (cross gcc, `-O2`, qemu-user): 50 vectors per run, all as
+expected, with the same lines and the digest
+`ccabc7121df9e4bf66393ecea2426b2b947c7824667b1cd17f80c16391862848` for BoringSSL and for the vendored
+files, which is also the digest of every run of the matrix above.
+
+| Interface | Vectors | Of which bit-flipped copies |
+|---|---|---|
+| ACVP external (pure), any message length | 16 | 2 |
+| ACVP internal | 16 | 2 |
+| `SLHDSA128SVerify`-shaped (p2mr-ts signatures, fixture) | 18 | 9 |

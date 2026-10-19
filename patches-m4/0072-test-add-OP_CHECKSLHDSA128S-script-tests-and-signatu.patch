@@ -1,7 +1,7 @@
-From bbb9a43c06dbd152c4a116645668b3fa47a49498 Mon Sep 17 00:00:00 2001
+From caa3a7213d616f52aca2f0363ad815591c1d2a5c Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Thu, 15 Oct 2026 12:14:46 +0000
-Subject: [PATCH 72/77] test: add OP_CHECKSLHDSA128S script tests and signature
+Subject: [PATCH 72/78] test: add OP_CHECKSLHDSA128S script tests and signature
  message vectors
 
 The rows are written in C++, in p2mr_slhdsa128s_tests, and signed there
@@ -43,9 +43,9 @@ validation, which must agree.
 ---
  src/test/CMakeLists.txt                       |   2 +
  src/test/data/p2mr_slhdsa128s_sighash.json    | 145 +++
- src/test/p2mr_slhdsa128s_tests.cpp            | 853 ++++++++++++++++++
+ src/test/p2mr_slhdsa128s_tests.cpp            | 882 ++++++++++++++++++
  test/util/generate_p2mr_slhdsa128s_sighash.py | 100 ++
- 4 files changed, 1100 insertions(+)
+ 4 files changed, 1129 insertions(+)
  create mode 100644 src/test/data/p2mr_slhdsa128s_sighash.json
  create mode 100644 src/test/p2mr_slhdsa128s_tests.cpp
  create mode 100644 test/util/generate_p2mr_slhdsa128s_sighash.py
@@ -223,10 +223,10 @@ index 0000000..3d4d55c
 +]
 diff --git a/src/test/p2mr_slhdsa128s_tests.cpp b/src/test/p2mr_slhdsa128s_tests.cpp
 new file mode 100644
-index 0000000..cf7af49
+index 0000000..c03f97d
 --- /dev/null
 +++ b/src/test/p2mr_slhdsa128s_tests.cpp
-@@ -0,0 +1,853 @@
+@@ -0,0 +1,882 @@
 +// Copyright (c) 2026 duncan0k
 +// Distributed under the MIT software license, see the accompanying
 +// file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -563,6 +563,35 @@ index 0000000..cf7af49
 +        Fails(chain, {{"-signetslhdsa128s", "7"}}, "-signetslhdsa128s can only be used with signet.");
 +        Fails(chain, {{"-signetslhdsa128s", "garbage"}}, "-signetslhdsa128s can only be used with signet.");
 +    }
++}
++
++// The default signet's challenge, given explicitly, is still the public default signet: the same
++// genesis block and message start, and the same rules, P2MR disabled. None of the five options that
++// change the rules of a custom signet may be used with it, whatever its value; with any other challenge
++// they parse as before.
++BOOST_AUTO_TEST_CASE(default_signet_challenge)
++{
++    const std::string default_challenge{"512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"};
++    const auto default_signet{CChainParams::SigNet({})};
++    BOOST_CHECK(IsDefaultSignetChallenge(default_signet->GetConsensus().signet_challenge));
++    BOOST_CHECK_EQUAL(HexStr(default_signet->GetConsensus().signet_challenge), default_challenge);
++    BOOST_CHECK(!IsDefaultSignetChallenge(ParseHex(ARK0_CHALLENGE)));
++    BOOST_CHECK(!IsDefaultSignetChallenge(ParseHex("51")));
++    // Given explicitly, it gives the default signet's genesis block and message start.
++    const auto explicit_default{MakeParams(ChainType::SIGNET, {{"-signetchallenge", default_challenge}})};
++    BOOST_CHECK_EQUAL(explicit_default->GenesisBlock().GetHash(), default_signet->GenesisBlock().GetHash());
++    BOOST_CHECK(explicit_default->MessageStart() == default_signet->MessageStart());
++    BOOST_CHECK_EQUAL(explicit_default->GetConsensus().P2MRHeight, default_signet->GetConsensus().P2MRHeight);
++    BOOST_CHECK_EQUAL(explicit_default->GetConsensus().P2MRHeight, NEVER);
++    for (const char* option : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire"}) {
++        for (const char* value : {"7", "1@0000000000000000000000000000000000000000000000000000000000000001:0", "x"}) {
++            Fails(ChainType::SIGNET, {{"-signetchallenge", default_challenge}, {option, value}},
++                  strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", option));
++        }
++    }
++    BOOST_CHECK_EQUAL(explicit_default->GetConsensus().P2MRSLHDSA128SHeight, NEVER);
++    BOOST_CHECK_EQUAL(explicit_default->GetConsensus().P2MRMLDSA44Height, NEVER);
++    BOOST_CHECK_EQUAL(explicit_default->GetConsensus().P2MRTripwireHeight, NEVER);
 +}
 +
 +// The signature messages the functional test framework computes for key_version 2, next to the
