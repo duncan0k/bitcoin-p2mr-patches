@@ -496,7 +496,8 @@ release build and with the worst-case hook).
 
 The measurement found that Core's AVX2 8-way SHA-256 left the upper halves of the vector registers dirty,
 which slowed the vendored verifier 2 to 2.9 times on one host when that code had run in the same thread.
-A node runs that code only on CPUs with AVX2 and without SHA extensions. Patch 0078 clears the state; the
+A node runs that code only on CPUs with AVX2 and without SHA extensions, in a build with Core's SHA-NI code,
+as the default x86_64 build is. Patch 0078 clears the state; the
 first machine's figures above are with it, the second machine's without it (there the node uses the SHA
 extensions and never runs that code).
 
@@ -521,8 +522,8 @@ It is a soft fork. A node built without `patches-m4/` accepts every block a node
 
 Verified on 2026-10-19 on that cloud virtual machine, from a fresh checkout of v31.1 with all 78 patches
 applied as their `SHA256SUMS` files name them: the release build had no compiler warnings, and
-`test_bitcoin` passed 781 of 787 test cases and one more with a warning, and skipped 5 (`crypto_tests`
-among them); a release `bitcoind` starts and logs its SHA-256 implementation. Before 0078 (on 2026-10-16,
+`test_bitcoin` passed 781 of 787 test cases, `crypto_tests` among them, one more with a warning, and
+skipped 5; a release `bitcoind` starts and logs its SHA-256 implementation. Before 0078 (on 2026-10-16,
 GCC 13.3 and clang 18, with the first 77 patches; 0078 changes only `src/crypto/sha256_avx2.cpp`): the P2MR,
 signet and related functional scripts (16 runs) and `feature_p2mr_slhdsa128s.py` passed; the kernel library
 (`-DBUILD_KERNEL_LIB=ON -DBUILD_UTIL_CHAINSTATE=ON`), shared and static, built with `test_kernel` and

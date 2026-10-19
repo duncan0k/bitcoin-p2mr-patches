@@ -139,14 +139,17 @@ adds.
   `build-count/` (`bitcoind_m4_measure`, counting), without wallet for the node, each with every other
   executable turned off; it stops if a cache shows a node or GUI target enabled, and checks that both
   nodes refuse mainnet.
-- `measure.sh <bench_bitcoin> <out-dir> [rounds] [cpu]` (Linux): the runs of the single-check condition:
+- `measure.sh <bench_bitcoin> <out-dir> [rounds] [cpu]` (Linux; rounds a whole number, default 3; the gate
+  needs at least 2, and with 1 the script says before it starts that this is a trial the gate does not
+  accept, writes that round count into `plan.txt`, and `analyze.py` says `INCOMPLETE`): the runs of the
+  single-check condition:
   `VerifyScriptP2MRSchnorr` and `VerifyScriptP2MRSLHDSA128S` (the whole path of a check as a block
   validates it, 10,000 single checks per run) for both SHA-256 implementations, real signatures and the
   worst case, pinned to one CPU, each run twice, continuously (`cont`) and paused (`pause`, 5 ms per 20 ms
   of timed checks), with every sample's wall and CPU time in `samples-<run>/`, and the `/proc/stat` CPU
   lines (steal time included) of all CPUs and of the pinned one, where readable, before and after each run
   in `stat-<run>.txt`; then the library-level `Verify*` benchmarks.
-- `analyze.py <out-dir>`: per run, for Schnorr and SLH-DSA, the median and p99 of the wall times and of the
+- `analyze.py <out-dir> --rounds N`: per run, for Schnorr and SLH-DSA, the median and p99 of the wall times and of the
   CPU times, the preempted share of each distribution, the steal time during the run, the largest excess
   of a CPU time over its wall time, and the bound `62.5 x p99(SLH) / median(Schnorr)` from the wall times
   and from the CPU times, to six decimals, with the C each asks for (its ceiling) and which of the two
@@ -158,13 +161,31 @@ adds.
   to the thread between two reads shows in the wall time only, as preemption; a CPU time can then exceed
   its wall time only by the difference between the two clocks, and `CLOCK_MONOTONIC` is slewed by NTP by
   at most 500 ppm while the thread CPU clock is not: the default allows twice that slew and 5 us for the
-  reads. The largest excess printed is a fraction of a microsecond below zero. With `--filter-factor F` it also reports each run filtered (diagnostic only), without the
-  samples that took more than F times the median of their distribution; the filtered figures gate nothing.
-  Runs without per-sample files are reported from the benchmark's JSON output, wall times only. By
-  default it also checks that the output is complete: for both SHA-256 settings and both paths, a
-  continuous and a paused run for every round, each with 10,000 samples of both checks (`--samples`);
-  otherwise it prints `INCOMPLETE` and exits with 2, as `wholeblock.py` does (no runs, continuous runs
-  only, a setting or a path missing, a run without its pair). `--summary-only` skips that check.
+  reads. The largest excess printed is a fraction of a microsecond below zero. With `--filter-factor F`
+  it also reports each run filtered (diagnostic only), without the samples that took more than F times
+  the median of their distribution; the filtered figures gate nothing.
+  In gate mode (the default) the matrix is fixed in the code: both SHA-256 settings, both paths, both
+  modes and rounds 1 to N of `--rounds N`, required, with N >= 2; nothing in the out-dir can make it
+  smaller. Every run of it needs both per-sample CSV files with 10,000 samples each; missing or short
+  input is found before any statistic of that run is computed, and a run with only its JSON output does
+  not count. The `plan.txt` that `measure.sh` writes only cross-checks: if present, it must say exactly
+  that matrix and N, each key once, and nothing else. Anything less prints `INCOMPLETE` and exits with 2,
+  as `wholeblock.py` does; a clock fault still rejects the run (exit 1). `--summary-only` reads no plan,
+  needs no `--rounds` (and ignores one given) and checks no matrix: it reports every run it finds, under
+  its own file or directory name, from its per-sample files or, without them, from the benchmark's JSON
+  output (wall times only; older output names its runs without `-cont-`/`-pause-`); a run whose files
+  cannot be read is listed as unreadable (`SKIPPED`) and the others are still reported. Library-level
+  results that cannot be read are said so and not used: an optional input (the library results, and in
+  `--summary-only` a run's JSON) never changes the verdict, whatever fails while reading it. Each of the
+  six options with a fractional value (`--preempt-ms`, `--preempt-ratio`, `--max-preempted`, the two
+  CPU tolerances, `--filter-factor`) must be finite and in its range (the tolerances and preemption limits
+  not negative, `--filter-factor` above 0), or it is a usage error before any input is read; `--rounds` is
+  checked as above. Text taken from any input (names inside files, file names) is printed with backslash
+  escapes where the output cannot encode it, so no write can fail. Its exit codes are the
+  only three: 0, a
+  complete, accepted gate (or a summary without a rejected run); 1, a run rejected for a clock fault; 2,
+  `INCOMPLETE`, a wrong command line, or anything unexpected, which prints one line and never a
+  traceback.
 - `wholeblock.py`: the whole-block gate, below.
 - `wots_bound.py`: the numerical check of the bound argument below.
 - `m2_bound.py <out-dir of measure.sh> <results.json of wholeblock.py>`: the estimate, with a margin, of what
@@ -327,8 +348,10 @@ cmake --build /path/to/patched/core/build -j"$(nproc)" --target bitcoind
 # the measurement builds (bench_bitcoin, bitcoind_m4_measure timing and counting)
 bash contrib/m4-measure/build.sh /path/to/patched/core /tmp/m4-measure
 # single-check condition, with CPU times and steal; keep the whole output directory
+# (rounds: at least 2 for the gate; with 1 it says before it starts that this is a trial the gate does not
+# accept, and analyze.py says INCOMPLETE)
 bash contrib/m4-measure/measure.sh /tmp/m4-measure/build/bin/bench_bitcoin /tmp/m4-out 3 2
-python3 contrib/m4-measure/analyze.py /tmp/m4-out --filter-factor 5
+python3 contrib/m4-measure/analyze.py /tmp/m4-out --rounds 3 --filter-factor 5
 python3 contrib/m4-measure/wots_bound.py
 # whole-block gate
 python3 contrib/m4-measure/wholeblock.py --core /tmp/m4-measure \
