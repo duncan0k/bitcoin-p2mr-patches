@@ -63,6 +63,23 @@ The series (`patches-m4/`) sets C = 5,000. Results so far:
     largest ratio 0.710 (hook build, default `-par`, `mixed`); counts as expected (`slh` and `slh-one`
     799 with the hook on and off, `slh-invalid-last` 701, `slh-invalid-tail` 100, `slh-invalid-tail-one`
     799; 3,894.0 compressions per check with the hook, 2,214.0 to 2,304.0 real).
+- a third machine, a cloud virtual machine of the kind the first runs had (4 vCPUs, an Intel Xeon at
+  2.8 GHz without SHA extensions, guest kernel 6.18, GCC 13.3), with all 78 patches: a node there uses
+  Core's AVX2 8-way SHA-256 (`sse4(1way);sse41(4way);avx2(8way)`), the code patch 0078 changes.
+  - Single-check condition (two rounds, pinned to CPU 2, continuous and paused): five measurements, the
+    first two with the kit of round 9 and the last three with the current one, all five analysed with
+    the current one. Four were rejected, each for one Schnorr sample with a thread CPU time of 0 (wall
+    times 175 to 870 us); the rule was kept, so no run of a rejected measurement counts. In the accepted
+    one the paused runs ask for 2,741 to 3,219 on the worst path (`standard` 2,741 and 3,219,
+    `sse4_avx2` 2,960 and 2,922) and 1,774 to 1,946 on the release path, the continuous runs 2,062 to
+    2,983 and 1,187 to 1,725; steal time showed on the pinned CPU in every run, so the CPU bound gates.
+    5,000 is at least 1.55 times the highest. The other runs of the four rejected measurements ask for
+    no more than 3,355 (paused) and 3,426 (continuous). Library medians: `VerifySLHDSA128S` 632.6 to
+    832.4 us over the three settings, `VerifyMLDSA44` 105.4 to 135.1 us, `VerifySchnorrBIP340` 49.9 to
+    58.4 us.
+  - Whole-block gate (`--rounds 2`, the complete matrix of 26 cells): passes, the largest ratio 0.727
+    (hook build, `-par=1`, `mixed`), 0.729 with the M2 estimate; the one-input SLH-DSA kinds take 0.196
+    to 0.333 of `schnorr-one`.
 
 **Nothing here is part of the series, and nothing applies it**: not `apply.sh`, not `contrib/k3s`, not any
 node build. Every change the patch makes to a source file is under `SLH_MEASURE_WORST` or one of the other
@@ -330,11 +347,12 @@ a coinbase of at most 3,000 bytes), not a mathematical bound on time:
 - about 2.4 KB of non-witness coinbase data (12,000 WU with the margin of 3,000 bytes), which leaves every
   block kind, the references included, about 0.3 % fewer checks.
 
-The script adds the estimate to the maximum of every gated block kind, nothing to the references, and shrinks
-the references by the coinbase's weight while leaving the SLH-DSA blocks as they are, and prints the
-largest ratio. On the first machine: 10 x (0.116 ms + 0.048 ms + 378 x 0.28 us) = 2.7 ms per block,
+The script adds the estimate to the maximum of every gated block kind, nothing to the references, and
+shrinks the references by the coinbase's weight while leaving the SLH-DSA blocks as they are, and prints
+the largest ratio. On the first machine: 10 x (0.116 ms + 0.048 ms + 378 x 0.28 us) = 2.7 ms per block,
 and the largest ratio goes from 0.715 to 0.720. On the second machine: 10 x (0.110 ms + 0.062 ms + 378 x
-0.28 us) = 2.8 ms per block, and the largest ratio goes from 0.710 to 0.715.
+0.28 us) = 2.8 ms per block, and the largest ratio goes from 0.710 to 0.715. On the third machine: 10 x
+(0.111 ms + 0.053 ms + 378 x 0.32 us) = 2.9 ms per block, and the largest ratio goes from 0.727 to 0.729.
 
 ## How to use it
 

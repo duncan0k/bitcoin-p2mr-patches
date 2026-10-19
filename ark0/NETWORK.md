@@ -13,7 +13,10 @@ height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
 at height 20000 (M2)". Since 2026-10-12 they also carry the M3 series in
 `patches-m3/`, which from height 30000 runs P2MR leaves of version `0xe0`,
 whose elliptic curve signature checks stop working once one of two
-designated outputs is spent; see "Rule change at height 30000 (M3)".
+designated outputs is spent; see "Rule change at height 30000 (M3)". Since
+2026-10-19 they also carry the M4-S series in `patches-m4/`, which from
+height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
+change at height 32000 (M4-S)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -67,6 +70,10 @@ chain with a node of your own.
   announced time, as a drill. Leaves of version `0xc0`, and outputs without
   leaves of version `0xe0`, are unchanged. See "Rule change at height 30000
   (M3)" below.
+- **A third exception from height 32000 (M4-S).** From that height the nodes
+  built with `patches-m4/` also check a second post-quantum signature scheme,
+  SLH-DSA-SHA2-128s, in outputs that opt into it. Outputs that do not opt in
+  are unchanged. See "Rule change at height 32000 (M4-S)" below.
 
 ### What the evidence does not prove
 
@@ -394,6 +401,93 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   change.** The series is in `patches-m3/` (`README.md`, "Experimental M3
   series").
 
+## Rule change at height 32000 (M4-S)
+
+From height 32000 Ark-0 has one more experimental rule, called milestone
+M4-S here: a second post-quantum signature check in P2MR leaves,
+`OP_CHECKSLHDSA128S`, which verifies an SLH-DSA-SHA2-128s signature
+([FIPS 205](https://doi.org/10.6028/NIST.FIPS.205)). It sits next to M1's
+`OP_CHECKMLDSA44`, and the two rest on different assumptions: ML-DSA on the
+hardness of lattice problems, SLH-DSA on its hash function alone. The nodes
+built with `patches-m4/` enforce it, the operator's among them, and
+`doc/p2mr-slhdsa128s.md` in the patched tree specifies it. At about 870
+blocks a day, the rate of recent weeks, the chain reaches height 32000
+around 2026-10-24 23:40 UTC. It cannot do so before 2026-10-24 12:00 UTC,
+even if blocks came every 90 seconds, the producer's configured pause.
+
+In a P2MR leaf that is executed (leaf version `0xc0`, or `0xe0` from height
+30000, at depth one or more), byte `0xf1` becomes `OP_CHECKSLHDSA128S`. It
+takes seventeen stack elements: a 32-byte public key, which the one standard
+leaf script pushes itself, and a 7,856-byte signature in sixteen elements from
+the witness, fifteen of 520 bytes and one of 56 (57 with an explicit hash
+type), so that each signature has exactly one encoding. It checks the signature
+as pure SLH-DSA over the BIP-341 tapscript signature message computed with
+`key_version` 2, with the context string `P2MR/SLHDSA128S/EXP0`. A non-empty
+signature that does not verify makes the script fail, so a spend that carries
+one is invalid, and so is any block that contains it. Sixteen empty elements
+make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
+
+- **Below height 32000, and outside such leaves, nothing changes.** In
+  tapscript the byte is `OP_SUCCESS241`, which makes a script succeed
+  without running it. Until the rule applies, an output whose leaf uses the
+  opcode can be spent without the signature by anyone who knows that leaf
+  and its path in the tree. Nodes do not relay such spends, and no coins
+  should be paid to these leaves before then.
+- **Once the rule applies, one script with the opcode is relayed:** the public
+  key followed by `OP_CHECKSLHDSA128S`, 34 bytes, called SLH1. A spend through
+  it at depth one has a witness of 7,972 bytes. Other scripts with the opcode
+  are not relayed, but a block may still contain them, and some of them pass
+  without a valid signature by a committed key: with sixteen empty elements,
+  which push false and `OP_NOT` turns into true, or with a signature under a
+  key the spender chooses and puts in the witness. What M1 says about the tree
+  holds here too: an SLH1 leaf protects the spending path of its own output and
+  nothing more, so a wallet should put it next to an `OP_RETURN` leaf of the
+  same version, both at depth one.
+- **Each check costs 5,000 units of validation weight.** BIP 342 gives
+  every input a budget of its witness size plus 50, and a Schnorr check
+  takes 50 of it. A single SLH1 spend has a budget of 8,022, so its check
+  fits. The value rests on measurements, on three machines, of the slowest an
+  SLH-DSA-SHA2-128s verification can be made to run, compared with a Schnorr
+  check, with SHA-256 code that does not use the processor's SHA instructions
+  (`README.md`, "Experimental M4-S series").
+- **What it does not change.** Who produces blocks: the operator, as before.
+  M2's block signature, the tripwire rule of leaf version `0xe0` and its
+  drill, `OP_CHECKMLDSA44`, P2TR, witness v0 and legacy scripts are not
+  affected, and M3's disabled elliptic curve checks do not touch this opcode.
+- **What it shows is narrow.** A node with the rule refuses, at the block
+  level, any spend through an SLH1 leaf that lacks a valid SLH-DSA-SHA2-128s
+  signature under the leaf's key. SLH-DSA does not bind the message
+  (FIPS 205, section 11): the holder of a key can make one signature that is
+  valid for two messages, so a signature must never be taken as a
+  commitment to the message it signs. On a signet with a single block
+  signer, the rule says nothing about how miners or a wider network would
+  adopt it.
+- **Wallets.** Bitcoin Core's wallet does not make or sign SLH1 leaves, and
+  neither does the operator's web wallet yet. A wallet that does should hand
+  out such addresses only once the chain is six blocks past height 32000.
+- **What a node logs and reports.** A node built with `patches-m4/` logs
+  this line when it starts:
+
+  ```
+  P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)
+  ```
+
+  `bitcoin-cli getdeploymentinfo` lists `p2mr_slhdsa128s` as a buried
+  deployment with height 32000, and from that height `P2MR_SLHDSA128S`
+  among the script flags.
+- **It is a soft fork.** A node without `patches-m4/` treats the byte as
+  `OP_SUCCESS241`, accepts every block a node with it accepts and keeps
+  following the chain, but does not check these signatures and does not relay
+  spends that use the opcode: to such a node they are non-standard. A node that
+  accepted blocks at or above height 32000 before it upgraded has not checked
+  them; one start with `-reindex-chainstate` (`-reindex` on a pruned node)
+  checks them.
+- **It is not part of BIP-360**, which defines no post-quantum signature
+  check, and it is not a proposal for Bitcoin.
+- **The height and the validation weight are rules of this network and
+  will not change.** The series is in `patches-m4/` (`README.md`,
+  "Experimental M4-S series").
+
 ## Parameters
 
 | Parameter | Value |
@@ -415,6 +509,7 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
 | `OP_CHECKMLDSA44` (M1) | from height 8600, see "Rule change at height 8600 (M1)" |
 | ML-DSA-44 block signature (M2) | from height 20000, by the key whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, see "Rule change at height 20000 (M2)" |
 | Leaf version `0xe0` (M3) | executed from height 30000, with the tripwire outputs `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` and `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0`, see "Rule change at height 30000 (M3)" |
+| `OP_CHECKSLHDSA128S` (M4-S) | from height 32000, 5,000 units of validation weight per check, see "Rule change at height 32000 (M4-S)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -424,9 +519,9 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is one of four consensus changes on this
-network besides P2MR; the others are M1, M2 and M3 (the three "Rule change"
-sections above). Producing blocks faster than ten minutes is what a
+by the patch in `patches-spacing/`, is one of five consensus changes on this
+network besides P2MR; the others are M1, M2, M3 and M4-S (the four "Rule
+change" sections above). Producing blocks faster than ten minutes is what a
 signet is for: the signet solution decides who may produce a block, while
 proof of work still paces how fast, as the next paragraphs record.
 

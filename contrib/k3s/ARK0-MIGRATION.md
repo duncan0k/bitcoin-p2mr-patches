@@ -3030,3 +3030,123 @@ Below height 30000 the roll is fully reversible: stop the producer, set the two 
 producer. The external nodes get their `*.m2` binaries back, and the relay's configuration changes are
 undone in the same restart. From 30000 on, a node rolled back to the M2 build keeps following the
 chain but no longer runs leaves of version `0xe0` or checks the rule, so that is not a way back.
+
+## Executed on 2026-10-19 (M4-S roll)
+
+Both nodes moved onto one build that also carries `patches-m4/`: from height 32000, byte `0xf1` in an
+executed P2MR leaf is `OP_CHECKSLHDSA128S`, which checks an SLH-DSA-SHA2-128s signature
+(`ARK0_SLHDSA128S_HEIGHT` in the series, `ark0/NETWORK.md` "Rule change at height 32000 (M4-S)"). The
+producer, the observe job and the soak job kept their image: the series changes neither the coinbase
+nor the RPC calls they make. Carried out between 21:46 and 21:49 UTC, following "Rolling a workload
+onto a new build" and the maintenance sequence above, with `overlays/maintenance` and the base, as on
+this cluster since 2026-09-28. One script ran the steps: it stops at the first check that fails, and
+keeps the producer at zero until its last step. Its first run stopped at such a check: its wait for the
+producer's pod to go had ended early (a `grep -q` in a pipe under `pipefail` can end such a wait at
+once) while the pod was still shutting down. The second run, with that wait fixed, carried out the roll
+a minute later.
+
+### The builds
+
+| Run | Patch sets | Result |
+|---|---|---|
+| `de1-m4s9-1019` | `master m05 spacing m1 m2 m3 m4`, 78 commits, the existing clone | `series ok`; `test_bitcoin` 781 of 787 passed, 1 passed with warnings, 5 skipped; 12 functional scripts passed (`feature_p2mr`, `feature_p2mr_mldsa44`, `feature_p2mr_signet`, `feature_p2mr_slhdsa128s`, `feature_p2mr_tripwire`, `feature_signet_pqblock`, `feature_signet_pqblock_edges`, `p2p_segwit`, `wallet_p2mr`, `wallet_p2mr_multisig`, `wallet_p2mr_signet`, `wallet_p2mr_timelock`); the default functional suite with the extended tests passed, 281 tests, 17 skipped |
+| `m4s9-repro-cold-1019` | the same from a fresh clone with an empty compiler cache, its patch files identical to those published in this repository (2026-10-19) | checksums and `series ok`, 78 commits; `test_bitcoin` as above; `feature_p2mr_mldsa44`, `feature_p2mr_slhdsa128s`, `feature_p2mr_tripwire` and `feature_signet_pqblock` passed; none of the 497 compilations found in the cache; the five binaries are those of `de1-m4s9-1019`, byte for byte |
+
+`bitcoind` hashes to `e946c93594be27e8e2b7448e73c2a41625874aa963ccba5ec307444a13d3ed88`.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-91fe0361e1a2`, new | `sha256:fb069cf748cd63757a9715dba5910cf032ff982bf0b3e9c36cd63c15f8e17233` | `sha256:c706fd57d99762beaf6b60c702a71ad54a7ee6b33cbf8a5204bfbae85e6ce03e` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-0954c5cca219`, kept | `sha256:299cb73b8842da748b30881e53c798fa3bc4be70e04fac604e0307daafec9409` | `sha256:19e997f0d4affb24783c7b1f2c4a7fa75d75a794f35662ae8fe89cf93100df58` |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488`, kept | `sha256:f28a0a5ef4231e43be42e3b499af1ee9658fbd283b77212a51c4e0bb39f707d7` | both nodes' way back |
+
+The node image was built and imported for the release candidate as
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-rc1-91fe0361e1a2`. The tag above follows the
+`<series>-<head12>` rule of `kustomization.yaml`; it was added to the same manifest before the roll.
+
+### The sequence
+
+All times UTC.
+
+1. **Ahead of the stop.** No observe or soak run was in progress. M4-S needs no new setting on these
+   nodes, and the roll applied no ConfigMap.
+2. **21:46:22.** The producer scaled to zero. Its pod was still shutting down when the script's first
+   run checked, and that run stopped; before it went, the pod mined one more block, 27582, with the
+   header time 21:46:32. The second run started at 21:47:49 and found the pod gone at 21:47:50. The
+   frozen tip, on both nodes: 27582,
+   `000000e9f0e47b72dcd0b9bef246b5f238e91c3ac68684923e5f300d818c2cf3`, with the same `getchaintips`
+   (one `active`, five `invalid`) and the same `gettripwireinfo`.
+3. **21:47.** The two node tags in `kustomization.yaml` moved to the new build; the copy on the host is
+   this tree's file, checked by hash. `kubectl diff -k` of the maintenance overlay showed the two node
+   images and nothing else. A server-side dry run passed.
+4. **21:47:57.** The maintenance overlay applied. Both nodes were ready on the new image at 21:48:09.
+5. **Checks on the frozen tip**, both nodes: `imageID` equal to the new image's above; the startup line
+
+   ```
+   P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)
+   ```
+
+   with the tripwire, retarget, M2, P2MR and M1 lines as before and, on node A, `Config file arg:
+   [signet] blockreservedweight="16000"`; the frozen tip, and `getchaintips` and `gettripwireinfo` the
+   same as in step 2, byte for byte; `getdeploymentinfo` with `p2mr_slhdsa128s` buried at 32000, not
+   yet active.
+6. **21:48:16.** The base started the producer; its `kubectl diff -k` had been the producer's
+   `replicas` from 0 to 1, and the node pods did not roll again. Its first `getblocktemplate` could not
+   reach node A, as the network policy admits a new pod about a second late; the loop retried and mined
+   27583.
+7. **Checks after the roll.** The producer's `imageID` as before the roll. The observe run at 21:55:03
+   saw both nodes on 27586 and the three pods ready with no restarts. `render-config.sh --from-live`,
+   run after the roll with the copy of the template on the host, found no difference against the live
+   ConfigMap. That copy predates the move of the network's names to `ark0.si`: the live ConfigMap still
+   has both nodes add the public node under its earlier name, where this tree's template has
+   `node.ark0.si:38433`.
+
+### Before and after
+
+| | 21:47:50, producer at zero | 21:48:35, producer back | 22:14:55 |
+|---|---|---|---|
+| block count, both nodes | 27582 | 27583 | 27599 |
+| best hash, both | `000000e9f0e47b72…0d818c2cf3` | `0000001d513f6a9a…e2d51cf1d3e` | `0000018796af4641…04acdebfd0` |
+| connections, each node | 3 | 2 | 3 |
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 27582 | `000000e9f0e47b72dcd0b9bef246b5f238e91c3ac68684923e5f300d818c2cf3` | 21:46:32 | the frozen tip |
+| 27583 | `0000001d513f6a9a04c33b763ec3e9afb7dfa57e9f4d69f1f9e54e2d51cf1d3e` | 21:48:32 | the first block after the roll |
+| 27584 | `00000079d993a0d6d705916db907f4502337d21a82b461c7d256b0edc4d22879` | 21:50:04 | |
+
+Node B carried the same height and hash at every reading.
+
+### The soak
+
+The scheduled soak run of 22:07, the first after the roll, with both nodes on the new build:
+
+```
+2026-10-19T22:07:02Z | 15f5ab59c8e8d9975f1539152374f163d965010f2885cd016ff4fa7156b54822 | 756526981b7fea3924465b8732e3b2af2aabb68d8d80b20cec4e2f811c97f0e5 | 27595/27596 | ok (index 246, vsize 117, sig 64B, leaf 34B, control 33B, dims PASS)
+```
+
+### The two external nodes
+
+Both moved onto the `bitcoind` and `bitcoin-cli` of the release package `ark0-node-m4s`, checked against
+its `SHA256SUMS`; the M3 binaries are kept beside them as `*.m3`. The public node was restarted at
+21:54:18 and the relay at 21:55:55. Each logged the M4-S line above and listed `p2mr_slhdsa128s` in
+`getdeploymentinfo` as buried at 32000, and followed the tip: at 22:15 all four nodes held 27599,
+`0000018796af4641e0b8aa9a5278c74dab67c5ef7a75988d774c2b04acdebfd0`.
+
+### What this roll does not show yet
+
+The rule applies from height 32000. What to check then, on all four nodes: that `getdeploymentinfo`
+reports `p2mr_slhdsa128s` active, and, once a wallet makes SLH1 spends, that a spend through an SLH1
+leaf with a valid signature goes through and one with an invalid signature is refused, in the mempool
+and in blocks. No such spend has been made on Ark-0 yet.
+
+### Rolling back this roll
+
+Below height 32000 the roll is fully reversible: stop the producer, set the two node pins back to
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488`, apply the maintenance overlay, and start the
+producer. The external nodes get their `*.m3` binaries back. From 32000 on, a node rolled back to the M3
+build keeps following the chain but no longer checks the rule, so that is not a way back.

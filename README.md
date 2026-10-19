@@ -24,7 +24,7 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     height 30000, and the operator holds the key of one of its two such outputs and will spend it in
     an announced drill. Another custom signet gets it only if it sets `-signettripwire`. See
     "Experimental M3 series" below.
-  - The M4-S series in `patches-m4/`, to be released, adds an SLH-DSA-SHA2-128s signature check in
+  - The M4-S series in `patches-m4/` adds an SLH-DSA-SHA2-128s signature check in
     P2MR leaves, `OP_CHECKSLHDSA128S`. On Ark-0 it applies from height 32000, with a validation
     weight of 5,000 per check; both are fixed. Another custom signet gets it only if it sets
     `-signetslhdsa128s`. See "Experimental M4-S series" below.
@@ -40,7 +40,7 @@ patches-m2/         6 further patches, the experimental M2 series and a later te
 patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0's height and key
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
-patches-m4/         13 further patches, the experimental M4-S series, to be released, on Ark-0 from height 32000 (see below)
+patches-m4/         13 further patches, the experimental M4-S series, on Ark-0 from height 32000 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
@@ -114,9 +114,10 @@ validation only after activation.
 
 - No activation on mainnet or the public signet: this holds for everything in this repository. No
   post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum
-  signature checks are the experimental M1 and M2 series in `patches-m1/` and `patches-m2/`, which
-  Ark-0 activates from heights 8600 and 20000 (`ark0/NETWORK.md`); another custom signet can switch
-  M2 on with `-signetpqblock`, and M1 with `-signetmldsa44`, which `patches-m3/` adds.
+  signature checks are the experimental M1, M2 and M4-S series in `patches-m1/`, `patches-m2/` and
+  `patches-m4/`, which Ark-0 activates from heights 8600, 20000 and 32000 (`ark0/NETWORK.md`); another
+  custom signet can switch M2 on with `-signetpqblock`, M1 with `-signetmldsa44`, which `patches-m3/`
+  adds, and M4-S with `-signetslhdsa128s`.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
   is a separate series applying on top.
@@ -142,6 +143,12 @@ validation only after activation.
   for Bitcoin, and it does not mean that any elliptic curve key has been broken, or tell when one
   will be. It disables no elliptic curve check outside leaves of version `0xe0`: leaves of version
   `0xc0`, P2TR and the other output types are not affected.
+- Describe M4-S as: "an experimental SLH-DSA-SHA2-128s signature check in P2MR leaves, active on the
+  Ark-0 test signet from height 32000" (regtest activates it too, for tests, and another custom signet
+  can switch it on with `-signetslhdsa128s`). It is not part of BIP-360, it is not a proposal for
+  Bitcoin, and it does not make Ark-0 a quantum-resistant network: it checks SLH-DSA-SHA2-128s
+  signatures only in the P2MR leaves that use the opcode, and an SLH1 leaf protects the spending path
+  of its own output and nothing more.
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
 
@@ -197,11 +204,11 @@ outside it. From 2026-09-16 to 2026-09-25 the verifying node of the Ark-0 signet
 series while the block producing node ran the consensus series without it, so the two were continuously
 checked against each other on a live chain; a divergence would have been the finding. From 2026-09-22
 both also carried `patches-spacing/`, described below; from 2026-09-25 both ran one build of all four
-sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, and since 2026-10-12
-they run one of all six, `patches-m3/` included. A job every six hours funds a P2MR
-address from one node and spends it back from the other through the PSBT flow, asserting the witness
-dimensions each time. `contrib/k3s/ARK0-MIGRATION.md` records the 2026-09-25 roll, the build it came
-from, and the first round trip it produced.
+sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, from 2026-10-12
+one of all six, `patches-m3/` included, and since 2026-10-19 they run one of all seven, `patches-m4/`
+included. A job every six hours funds a P2MR address from one node and spends it back from the other
+through the PSBT flow, asserting the witness dimensions each time. `contrib/k3s/ARK0-MIGRATION.md`
+records the 2026-09-25 roll, the build it came from, and the first round trip it produced.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch
@@ -458,13 +465,12 @@ git format-patch --start-number 55 924e9f7..dde712f -o patches-m3
 ## Experimental M4-S series (`patches-m4/`)
 
 Thirteen patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
-`patches-m2/` and `patches-m3/`, in that order. **To be released.** On the Ark-0 signet the rules apply
-from **height 32000** (`ARK0_SLHDSA128S_HEIGHT`), and each check with a signature uses a validation
-weight of **5,000** (`VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK`); neither changes once the series is
-released. The height covers this opcode only: other rules of the network come with heights of their
-own. At the rate of about 870 blocks a day that the signet had when the height was set, block 32000 is
-expected around 2026-10-25 00:30 UTC; even at the block producer's maximum of 960 blocks a day it cannot
-come before 2026-10-24 04:00 UTC.
+`patches-m2/` and `patches-m3/`, in that order. On the Ark-0 signet the rules apply from **height 32000**
+(`ARK0_SLHDSA128S_HEIGHT`), and each check with a signature uses a validation weight of **5,000**
+(`VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK`); neither will change. The height covers this opcode only:
+other rules of the network come with heights of their own. At about 870 blocks a day, the rate of recent
+weeks, block 32000 is expected around 2026-10-24 23:40 UTC; even at the block producer's maximum of 960
+blocks a day it cannot come before 2026-10-24 12:00 UTC.
 
 They add `OP_CHECKSLHDSA128S` (byte `0xf1`, `OP_SUCCESS241`), an SLH-DSA-SHA2-128s (FIPS 205)
 signature check in P2MR leaves that are executed, of leaf version `0xc0` and, once it executes, `0xe0`.
@@ -476,30 +482,37 @@ relayed template is SLH1, `<pk> OP_CHECKSLHDSA128S`. Another custom signet activ
 not part of BIP-360, and it is not proposed for Bitcoin. `doc/p2mr-slhdsa128s.md`, added by the series,
 is its specification.
 
-The validation weight follows from the single-check condition `C >= 1.25 x 50 x p99(worst-case SLH-DSA
-check) / median(Schnorr check)`, measured over the whole path of a check with a SHA-256 that uses no
-SHA extensions. Its first runs, on a cloud virtual machine (4 vCPU Intel Xeon at 2.8 GHz, no SHA
-extensions, GCC 13.3, wall time only), asked for 2,550 to 3,658; 5,000 is at least 1.36 times the highest,
-and stays below 8,022, the budget of a single-signature spend, so a single SLH1 spend and one check per
-signature in any script fit. With the current kit (every run continuous and paused, the paused runs
-gating, wall and thread CPU time per sample) and patch 0078, on that virtual machine, by then on a
-2.1 GHz Xeon with AVX-512 and SHA extensions, the paused runs ask for 2,185 to 2,554 on the worst path
-(release path 956 to 1,688). On a second machine, an AMD EPYC-Rome (Zen 2) virtual server (12 vCPUs,
-measured in a container limited to 8 CPUs), the host takes about 10 ms of every 100 ms from a vCPU that is
-busy without a break, and its guest kernel charges that time to the running thread, so a 1 ms check meets
-it about once in 100: with the published kit, run continuously, the condition asks for 11,980 to 12,720
-there; the paused runs, which gate, ask for 1,829 to 2,289 (release path 1,008 to 1,173).
-`contrib/m4-measure/README.md` gives the figures. The other test is the whole-block gate of
-`contrib/m4-measure/` (blocks filled to the maximum weight with SLH-DSA, mixed and invalid-signature
-checks, spread over many inputs or all in one, against the Schnorr block of the same layout, in the
-release build and with the worst-case hook).
+The validation weight follows from the single-check condition
+`C >= 1.25 x 50 x p99(worst-case SLH-DSA check) / median(Schnorr check)`, measured over the whole path of
+a check with a SHA-256 that uses no SHA extensions. Its first runs, on a cloud virtual machine (4 vCPU
+Intel Xeon at 2.8 GHz, no SHA extensions, GCC 13.3, wall time only), asked for 2,550 to 3,658; 5,000 is
+at least 1.36 times the highest, and stays below 8,022, the budget of a single-signature spend, so a
+single SLH1 spend and one check per signature in any script fit. With the current kit (every run
+continuous and paused, the paused runs gating, wall and thread CPU time per sample) and patch 0078, on
+that virtual machine, by then on a 2.1 GHz Xeon with AVX-512 and SHA extensions, the paused runs ask for
+2,185 to 2,554 on the worst path (release path 956 to 1,688). On a second machine, an AMD EPYC-Rome (Zen
+2) virtual server (12 vCPUs, measured in a container limited to 8 CPUs), the host takes about 10 ms of
+every 100 ms from a vCPU that is busy without a break, and its guest kernel charges that time to the
+running thread, so a 1 ms check meets it about once in 100: with the published kit, run continuously, the
+condition asks for 11,980 to 12,720 there; the paused runs, which gate, ask for 1,829 to 2,289 (release
+path 1,008 to 1,173). A third machine is a cloud virtual machine of the kind the first runs had (4 vCPU
+Intel Xeon at 2.8 GHz, no SHA extensions), where a node runs Core's AVX2 8-way SHA-256. Of five
+measurements there with all 78 patches, one was accepted: its paused runs ask for 2,741 to 3,219 on the
+worst path (release path 1,774 to 1,946), so 5,000 is at least 1.55 times the highest. The other four
+were rejected, each for one Schnorr sample with a thread CPU time of 0, and their other paused runs ask
+for no more than 3,355. `contrib/m4-measure/README.md` gives the figures. The other test is the
+whole-block gate of `contrib/m4-measure/` (blocks filled to the maximum weight with SLH-DSA, mixed and
+invalid-signature checks, spread over many inputs or all in one, against the Schnorr block of the same
+layout, in the release build and with the worst-case hook).
 
 The measurement found that Core's AVX2 8-way SHA-256 left the upper halves of the vector registers dirty,
 which slowed the vendored verifier 2 to 2.9 times on one host when that code had run in the same thread.
-A node runs that code only on CPUs with AVX2 and without SHA extensions, in a build with Core's SHA-NI code,
-as the default x86_64 build is. Patch 0078 clears the state; the
-first machine's figures above are with it, the second machine's without it (there the node uses the SHA
-extensions and never runs that code).
+A node runs that code only on CPUs with AVX2 and without SHA extensions, in a build with Core's SHA-NI
+code, as the default x86_64 build is. Patch 0078 clears the state; the first machine's figures with the
+current kit and the third machine's are with it, the first runs and the second machine's figures without
+it (the host of the first runs showed no such slowdown, and on the second machine the node uses the SHA
+extensions and never runs that code). The third machine runs that code: with 0078 its paused worst-path
+runs ask for 2,922 to 2,960 with the `sse4_avx2` setting and 2,741 to 3,219 with the `standard` setting.
 
 | # | Commit | Content |
 |---|---|---|
@@ -520,7 +533,7 @@ extensions and never runs that code).
 It is a soft fork. A node built without `patches-m4/` accepts every block a node with it accepts; to it,
 `0xf1` stays `OP_SUCCESS241`. Bitcoin Core's wallet does not create or sign these leaves.
 
-Verified on 2026-10-19 on that cloud virtual machine, from a fresh checkout of v31.1 with all 78 patches
+Verified on 2026-10-19 on the first machine, from a fresh checkout of v31.1 with all 78 patches
 applied as their `SHA256SUMS` files name them: the release build had no compiler warnings, and
 `test_bitcoin` passed 781 of 787 test cases, `crypto_tests` among them, one more with a warning, and
 skipped 5; a release `bitcoind` starts and logs its SHA-256 implementation. Before 0078 (on 2026-10-16,
@@ -540,7 +553,30 @@ library's header, which needs no byte order, and has no check of its own). A nod
 shows `p2mr_slhdsa128s` as buried at height 32000. The whole-block gate passed on that machine over its whole
 matrix (26 cells: eight block kinds, two builds, both `-par` settings, two rounds each), and on the second
 machine too, over the 26 cells in five rounds: the largest ratio there is 0.710 (0.715 with the estimate
-of what regtest leaves out).
+of what regtest leaves out). On the third machine it passed over the 26 cells in two rounds, with the
+largest ratio 0.727 (0.729 with that estimate).
+
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes have run since 2026-10-19, which
+`contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 781 of 787 test cases and one more
+with a warning, and skipped 5; the P2MR and signet functional scripts and `p2p_segwit.py`, 12 in all,
+passed, `feature_p2mr_slhdsa128s.py` among them; and the default functional suite, with the extended
+tests, passed 281 and skipped 17. A second build, from a fresh clone with an empty compiler cache and
+the files in `patches-m4/` as published here, produced the same five binaries, byte for byte.
+
+Review status: Codex reviewed the series and its measurement kit in fourteen rounds. In rounds 1 to 4,
+on 2026-10-15, gpt-6.1-sol at maximum effort reviewed the development branch, with the validation
+weight left to measurement. Every round from 5 on had a review of its changes since the round before
+(gpt-6.1-sol, maximum effort). Rounds 5 to 9 also had two gates by gpt-6-astra (extra-high effort):
+one on the vendored library, its wrapper, the signature cache and the build, the other on the rule, its
+activation, policy, the tests and the measurements. Round 10 had the second gate again, on the third
+machine's data. The gates found that in a build compiling the C files with MSVC and the C++ with
+Clang, the vendored library would have taken its big-endian code on a little-endian machine and refused
+valid signatures; that the wrapper then kept a plain MSVC build from compiling; that the kernel library
+lacked the vendored objects; and that a node given the default signet's challenge explicitly could turn
+this rule on for the default signet (patch 69 now refuses this repository's signet options with that
+challenge, tested in 72 and 73). The series fixes each. Patch 78 came from the measurements, not from
+a review. The first gate passed the series in rounds 8 and 9, the second in round 10; rounds 10 to 14
+changed only the measurement kit, and the review of round 14 passed it with no new finding.
 
 The measurement needs a hook in the library that makes verification walk its slowest path. That hook
 and the scripts are in `contrib/m4-measure/`, as a patch applied on top of the series in a separate
@@ -573,7 +609,7 @@ git format-patch --start-number 66 dde712f..55b5f56 -o patches-m4
 
 ## Prebuilt node
 
-The release `ark0-node-m3` of this repository carries the build the Ark-0 nodes run, all six patch
+The release `ark0-node-m4s` of this repository carries the build the Ark-0 nodes run, all seven patch
 sets: the five binaries for x86_64 Linux in an archive, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
@@ -582,14 +618,14 @@ binaries need from the system.
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
-`patches-m3/` as published, produced the same five binaries byte for byte. That image comes from
+`patches-m4/` as published, produced the same five binaries byte for byte. That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
 (snapshot.ubuntu.com serves past ones). And the build path, `/work/src`, is part of the binaries, so a
 rebuild elsewhere has to use it too.
 
-The releases of the witness program (below) carry builds of the same code for its systems, inside its
+The releases of the witness program (below) carry builds of the M3 node for its systems, inside its
 archives and without the wallet, GUI, ZMQ, IPC and USDT: `bitcoind.exe` for 64-bit Windows; from
 `ark0-witness-0.2.0` on also `bitcoind` for macOS 14 and later, one universal file for Apple silicon and
 Intel, and `bitcoind` for 64-bit Linux with glibc 2.35 or later, on x86_64 and on aarch64. Each is Bitcoin
@@ -621,7 +657,7 @@ published builds.
 ## Witness program (`witness/`)
 
 Ark0Witness is a small program for Windows 10 and 11, macOS 14 and later and 64-bit Linux that runs the
-build of the node above for its system and shows, on a page served on 127.0.0.1 only, what that node
+M3 build of the node above for its system and shows, on a page served on 127.0.0.1 only, what that node
 reports during the M3 drill: how far it has synced, whether it is on Ark-0, block 30000 and the two
 tripwires, and whether elliptic curve signatures in leaves of version `0xe0` are still accepted. It can also
 have the node judge a raw transaction with `testmempoolaccept`; the transaction is never broadcast. The
