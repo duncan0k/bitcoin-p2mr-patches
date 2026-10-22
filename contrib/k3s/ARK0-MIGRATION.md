@@ -3150,3 +3150,57 @@ Below height 32000 the roll is fully reversible: stop the producer, set the two 
 `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-478595d27488`, apply the maintenance overlay, and start the
 producer. The external nodes get their `*.m3` binaries back. From 32000 on, a node rolled back to the M3
 build keeps following the chain but no longer checks the rule, so that is not a way back.
+
+## Height 30000: the rule applies (2026-10-22)
+
+From height 30000 a node built with `patches-m3/` executes P2MR leaves of version `0xe0`, and their
+elliptic curve signature checks work until a tripwire output is spent (`ark0/NETWORK.md` "Rule change
+at height 30000 (M3)"). The blocks around it, header times in UTC:
+
+| height | hash | header time | |
+|---|---|---|---|
+| 29999 | `00000076b13fd56651ad5a170a277a586ae2bfbfd6475d7b315cb66accbda511` | 15:15:22 | the last block below the rule |
+| 30000 | `000000dfab7651ab742cff238300b273dc72a070bf0b8dc3cab821fd15a6de3c` | 15:17:03 | the first block under it |
+| 30006 | `0000017d43f55b3a6a542849334035fd5c9530d62eeb1f71ce44bfbb0a4fb845` | 15:26:52 | |
+
+At 15:17:12 each of the four nodes the operator runs logged
+
+```
+P2MR tripwire rules active from height 30000, reached by block 000000dfab7651ab742cff238300b273dc72a070bf0b8dc3cab821fd15a6de3c: tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 unspent, 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 unspent; elliptic curve checks in leaf version 0xe0 are enabled for the next block
+```
+
+The monitor that reads the four nodes' tips every 30 minutes found all four at 30014 at 15:40, and
+reported the rule in force to the operator's alert channel. Between 16:38 and 16:40 all four were on
+the same tip at 30050, `00000046fa2dac83daca9005f65bc28ecdb1325dd869a107ba0de4c8ab894d89`, and gave
+the same answer to `gettripwireinfo`: height 30000, leaf version `e0`, both tripwire outputs
+`unspent`, and `ec_disabled_next_block` false. The explorer's network page showed the same.
+
+### Spends through leaves of version `0xe0`
+
+Between 16:45 and 17:00 the operator paid four outputs of 100,000 sats to one mixed address and spent
+two of them, one through each of its leaves. The address is template S3 of `doc/p2mr-tripwire.md`:
+the web wallet's mixed address for a seed kept for the drill (derivation version 1 of
+`ark0/WEB-WALLET.md`). Each transaction was accepted by `testmempoolaccept` on all four nodes before
+it was sent, and was found in the same block on all four. All three pay 10 sat/vB:
+
+| transaction | what it spends | vsize | fee | block |
+|---|---|---|---|---|
+| `0e4fe95eb985a7f8d1ccd61f584fce36fa7a73920db03fe4143ad7cf0bd8c5f6` | coins of a wallet on node A; it pays the mixed address at vouts 0 to 3 | 294 vB | 2,940 sats | 30058 |
+| `c5d2d4602b307cea359a8a16340c8f042cb5d5fe3b6140cc749af846ee13a4cd` | vout 0, through the Schnorr leaf | 129 vB | 1,290 sats | 30061 |
+| `b776a28fdde39b280aaf5cecbcd63bdba08a8d2f1479a3458ea64a9d6a37567b` | vout 1, through the ML-DSA-44 leaf | 1,044 vB | 10,440 sats | 30063 |
+
+The explorer's page for each of the two spends names its leaf `Tripwired leaf (leaf version 0xe0)`.
+
+Vout 2 has a spend through the Schnorr leaf that all four nodes accepted with `testmempoolaccept` at
+17:01, and again at 17:17. It was signed once and kept, and has not been sent. Once the drill's block
+is in the chain, every node with the rule should refuse that same transaction with `Elliptic curve
+signature checks are disabled in this leaf`; after the drill the operator will publish it, so that
+anyone running such a node can let it judge the transaction. The operator will not spend that output
+before 2026-11-30. Vout 3 is kept for after the drill: a spend of it through the Schnorr leaf should
+then be refused, in the mempool and in a block, and one through the ML-DSA-44 leaf should go through.
+
+The web wallet offers the mixed address as `ark0/NETWORK.md` describes: a new wallet made at about
+17:30, with the chain at 30082, showed it.
+
+What remains is the drill at 2026-10-30 08:00 UTC, and the checks listed under "What this roll does
+not show yet" in the M3 roll above.
