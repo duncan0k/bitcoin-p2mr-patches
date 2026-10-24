@@ -1,0 +1,804 @@
+From d171f09227f7dfe82002086729ea1d3b89052776 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:09 +0000
+Subject: [PATCH 80/88] script: add the P2MR rescue lane to leaf version 0xe0
+
+Once the tripwire disables elliptic curve checks in leaf version 0xe0,
+a leaf such as <P> OP_CHECKSIG has no valid witness left. The rescue
+lane (doc/p2mr-rescue.md, added later in this series) lets its owner
+spend it by proving knowledge of the seed behind the key instead of
+signing: in an executed leaf of version 0xe0, an OP_CHECKSIG,
+OP_CHECKSIGVERIFY or OP_CHECKSIGADD with a 32-byte key whose signature
+element is a rescue token, 0x03 || sid || pub, is checked with the proof
+in the input's annex, 0x50 || 0x01 || proof. This happens before the
+tripwire rule and whether elliptic curve checks are disabled or not, so
+that the new SCRIPT_VERIFY_P2MR_NO_RESCUE can be a restricting flag, as
+every other flag is: with it, a token is a signature like any other. No
+deployment lifts it yet.
+
+The rules, in their order, after the 50 units every non-empty signature
+pays and the key size:
+- R1, a token only when its structure is that of SPEC.md section 7.5
+  with a registered statement id (0x01), and never 64 or 65 bytes long,
+  so that no element a node with the tripwire rules takes as a valid
+  Schnorr signature is one;
+- R2, VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK, 100,000 and provisional
+  until measured, before any hashing or parsing of the annex;
+- R3, one rescue check per input, counted before the signature cache;
+- R4, the annex is exactly one rescue record for the statement, which
+  the P2MR branch now keeps as a span next to its hash;
+- R5, 0 < y < n and x(y*G) equals the key, either parity, with
+  libsecp256k1;
+- R6, the rescue signature message, a SIGHASH_ALL-type message without
+  sha_annex under the tag P2MR/Rescue/Sighash with key_version 3, the
+  network id, the statement id and SHA256(pub), failing after
+  MissingDataBehavior without the BIP 341 data;
+- R7, voleith_verify_s1 over m = sighash || network id ||
+  TaggedHash("P2MR/Rescue/Key", 0x00 || P), exactly 96 bytes;
+- R8, a pass is a valid signature: OP_CHECKSIG pushes 1.
+
+The network id comes with PrecomputedTransactionData; a transaction
+without one fails R7. P2MRRescueProofVerifications counts the proofs
+given to the library, for the tests of the signature cache. The caching checker keeps the result of R7 under
+a fifth salted hasher, padded with 'R', keyed by m || sid || pub ||
+proof. Four new script errors, P2MR_RESCUE_REPEAT, P2MR_RESCUE_ANNEX,
+P2MR_RESCUE_KEY and P2MR_RESCUE_PROOF, also in the error names of
+script_tests, and the flag name P2MR_NO_RESCUE, on bit 26; the
+formatscriptflags test takes its unknown bits from far above it.
+---
+ src/CMakeLists.txt          |   1 +
+ src/kernel/CMakeLists.txt   |   1 +
+ src/script/interpreter.cpp  | 122 +++++++++++++++++++++++++++++++++++-
+ src/script/interpreter.h    |  41 ++++++++++++
+ src/script/p2mr_rescue.cpp  | 121 +++++++++++++++++++++++++++++++++++
+ src/script/p2mr_rescue.h    |  94 +++++++++++++++++++++++++++
+ src/script/script.h         |   8 +++
+ src/script/script_error.cpp |   8 +++
+ src/script/script_error.h   |   7 +++
+ src/script/sigcache.cpp     |  26 +++++++-
+ src/script/sigcache.h       |   7 ++-
+ src/test/script_tests.cpp   |  12 +++-
+ 12 files changed, 441 insertions(+), 7 deletions(-)
+ create mode 100644 src/script/p2mr_rescue.cpp
+ create mode 100644 src/script/p2mr_rescue.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 29d402e..faf1e8e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -69,6 +69,7 @@ add_library(bitcoin_consensus STATIC EXCLUDE_FROM_ALL
+   primitives/transaction.cpp
+   pubkey.cpp
+   script/interpreter.cpp
++  script/p2mr_rescue.cpp
+   script/script.cpp
+   script/script_error.cpp
+   uint256.cpp
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 2f9b959..9d87d24 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -48,6 +48,7 @@ add_library(bitcoinkernel
+   ../random.cpp
+   ../randomenv.cpp
+   ../script/interpreter.cpp
++  ../script/p2mr_rescue.cpp
+   ../script/script.cpp
+   ../script/script_error.cpp
+   ../script/sigcache.cpp
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index 153578c..d9995ba 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -348,6 +348,26 @@ static bool EvalChecksigPreTapscript(const valtype& vchSig, const valtype& vchPu
+     return true;
+ }
+ 
++/** Rules R2 to R8 of a rescue check (doc/p2mr-rescue.md), after R1 has found a rescue token in place
++ *  of the signature of an elliptic curve check with a 32-byte key in an executed leaf of version 0xe0.
++ *  True means the check passes, as a valid signature does. */
++static bool EvalP2MRRescue(const valtype& token, const valtype& pubkey, ScriptExecutionData& execdata, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror)
++{
++    // R2: the rescue weight, on top of the 50 the signature was charged, before any hashing or
++    // parsing of the annex.
++    assert(execdata.m_validation_weight_left_init);
++    execdata.m_validation_weight_left -= VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK;
++    if (execdata.m_validation_weight_left < 0) {
++        return set_error(serror, SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
++    }
++    // R3: one rescue check per input, counted before the signature cache is looked at, so a cache
++    // hit counts too.
++    if (execdata.m_rescue_done) return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_REPEAT);
++    execdata.m_rescue_done = true;
++    // R4 to R7.
++    return checker.CheckP2MRRescue(token, pubkey, sigversion, execdata, serror);
++}
++
+ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, ScriptExecutionData& execdata, script_verify_flags flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
+ {
+     assert(sigversion == SigVersion::TAPSCRIPT);
+@@ -357,8 +377,11 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
+      *    upgradable public key versions precede other rules;
+      *    the script execution fails when using empty signature with invalid public key;
+      *    the script execution fails when using non-empty invalid signature;
++     *    in a tripwired P2MR leaf without SCRIPT_VERIFY_P2MR_NO_RESCUE, a rescue token in place of
++     *    a non-empty signature with a 32-byte public key is a rescue check, whether elliptic curve
++     *    checks are disabled or not;
+      *    in a tripwired P2MR leaf with SCRIPT_VERIFY_P2MR_EC_DISABLED, the script execution
+-     *    fails when using any non-empty signature with a 32-byte public key.
++     *    fails when using any other non-empty signature with a 32-byte public key.
+      */
+     success = !sig.empty();
+     if (success) {
+@@ -373,6 +396,12 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
+     if (pubkey.size() == 0) {
+         return set_error(serror, SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY);
+     } else if (pubkey.size() == 32) {
++        // R1: from the rescue lane's height on, a rescue token in place of the signature in leaf
++        // version 0xe0 is checked as a rescue, before the rule below (doc/p2mr-rescue.md). It passes
++        // as a valid signature does: `success` stays true.
++        if (success && execdata.m_tripwired_leaf && !(flags & SCRIPT_VERIFY_P2MR_NO_RESCUE) && IsP2MRRescueToken(sig)) {
++            return EvalP2MRRescue(sig, pubkey, execdata, checker, sigversion, serror);
++        }
+         // Once a tripwire output is missing, elliptic curve checks in leaf version 0xe0 fail rather
+         // than push false, whatever the signature, before it is looked at (doc/p2mr-tripwire.md).
+         if (success && execdata.m_tripwired_leaf && (flags & SCRIPT_VERIFY_P2MR_EC_DISABLED)) {
+@@ -1633,6 +1662,7 @@ template PrecomputedTransactionData::PrecomputedTransactionData(const CMutableTr
+ const HashWriter HASHER_TAPSIGHASH{TaggedHash("TapSighash")};
+ const HashWriter HASHER_TAPLEAF{TaggedHash("TapLeaf")};
+ const HashWriter HASHER_TAPBRANCH{TaggedHash("TapBranch")};
++const HashWriter HASHER_P2MR_RESCUE_SIGHASH{TaggedHash("P2MR/Rescue/Sighash")};
+ 
+ static bool HandleMissingData(MissingDataBehavior mdb)
+ {
+@@ -1736,6 +1766,48 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
+     return true;
+ }
+ 
++template<typename T>
++bool SignatureHashP2MRRescue(uint256& hash_out, const ScriptExecutionData& execdata, const T& tx_to, uint32_t in_pos, const PrecomputedTransactionData& cache, MissingDataBehavior mdb, const uint256& network_id, uint8_t sid, std::span<const unsigned char> pub)
++{
++    assert(in_pos < tx_to.vin.size());
++    if (!(cache.m_bip341_taproot_ready && cache.m_spent_outputs_ready)) {
++        return HandleMissingData(mdb);
++    }
++
++    HashWriter ss{HASHER_P2MR_RESCUE_SIGHASH};
++    // Epoch, and the hash type: SIGHASH_DEFAULT, the only one.
++    ss << uint8_t{0x00} << uint8_t{SIGHASH_DEFAULT};
++    // Every input and output (SIGHASH_ALL).
++    ss << tx_to.version;
++    ss << tx_to.nLockTime;
++    ss << cache.m_prevouts_single_hash;
++    ss << cache.m_spent_amounts_single_hash;
++    ss << cache.m_spent_scripts_single_hash;
++    ss << cache.m_sequences_single_hash;
++    ss << cache.m_outputs_single_hash;
++    // spend_type: ext_flag 1 (tapscript), and an annex, which a rescue check always has. Unlike
++    // BIP 341, sha_annex is not committed: the proof is in the annex.
++    assert(execdata.m_annex_init && execdata.m_annex_present);
++    ss << uint8_t{0x03};
++    ss << in_pos;
++    assert(execdata.m_tapleaf_hash_init);
++    ss << execdata.m_tapleaf_hash;
++    ss << P2MR_RESCUE_KEY_VERSION;
++    assert(execdata.m_codeseparator_pos_init);
++    ss << execdata.m_codeseparator_pos;
++    ss << network_id;
++    ss << sid;
++    uint256 pub_hash;
++    CSHA256().Write(pub.data(), pub.size()).Finalize(pub_hash.begin());
++    ss << pub_hash;
++
++    hash_out = ss.GetSHA256();
++    return true;
++}
++
++template bool SignatureHashP2MRRescue(uint256&, const ScriptExecutionData&, const CTransaction&, uint32_t, const PrecomputedTransactionData&, MissingDataBehavior, const uint256&, uint8_t, std::span<const unsigned char>);
++template bool SignatureHashP2MRRescue(uint256&, const ScriptExecutionData&, const CMutableTransaction&, uint32_t, const PrecomputedTransactionData&, MissingDataBehavior, const uint256&, uint8_t, std::span<const unsigned char>);
++
+ int SigHashCache::CacheIndex(int32_t hash_type) const noexcept
+ {
+     // Note that we do not distinguish between BASE and WITNESS_V0 to determine the cache index,
+@@ -1867,6 +1939,12 @@ bool GenericTransactionSignatureChecker<T>::VerifySLHDSA128SSignature(std::span<
+     return SLHDSA128SVerify(pubkey, MakeUCharSpan(sighash), MakeUCharSpan(SLHDSA128S_CONTEXT), sig);
+ }
+ 
++template <class T>
++bool GenericTransactionSignatureChecker<T>::VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof) const
++{
++    return ::VerifyP2MRRescueProof(token, m, proof);
++}
++
+ template <class T>
+ bool GenericTransactionSignatureChecker<T>::CheckECDSASignature(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const
+ {
+@@ -1968,6 +2046,45 @@ bool GenericTransactionSignatureChecker<T>::CheckSLHDSA128SSignature(std::span<c
+     return true;
+ }
+ 
++template <class T>
++bool GenericTransactionSignatureChecker<T>::CheckP2MRRescue(std::span<const unsigned char> token_in, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror) const
++{
++    assert(sigversion == SigVersion::TAPSCRIPT);
++    // EvalChecksigTapscript only calls this for a well-formed token and a 32-byte key.
++    assert(pubkey.size() == 32);
++    const std::optional<P2MRRescueToken> token{ParseP2MRRescueToken(token_in)};
++    assert(token);
++    // R4: the annex is exactly one rescue record for the token's statement.
++    assert(execdata.m_annex_init);
++    if (!execdata.m_annex_present || !IsP2MRRescueAnnex(execdata.m_annex, token->sid)) {
++        return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_ANNEX);
++    }
++    // R5: y belongs to the key of the check.
++    if (!CheckP2MRRescueKey(token->y, pubkey)) return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_KEY);
++    // R6: the rescue signature message, which needs the BIP 341 data and the network id.
++    if (!this->txdata) {
++        HandleMissingData(m_mdb);
++        return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_PROOF);
++    }
++    // No network id: the rescue lane is not for this network, and no proof can be bound to it.
++    if (!this->txdata->m_p2mr_rescue_network_id) return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_PROOF);
++    const uint256& network_id{*this->txdata->m_p2mr_rescue_network_id};
++    uint256 sighash;
++    if (!SignatureHashP2MRRescue(sighash, execdata, *txTo, nIn, *this->txdata, m_mdb, network_id, token->sid, token->pub)) {
++        return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_PROOF);
++    }
++    // R7: m = rescue_sighash || network_id || pk_commitment, exactly 96 bytes.
++    std::array<unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m;
++    const uint256 pk_commitment{P2MRRescueKeyCommitment(pubkey.first<32>())};
++    std::ranges::copy(sighash, m.begin());
++    std::ranges::copy(network_id, m.begin() + 32);
++    std::ranges::copy(pk_commitment, m.begin() + 64);
++    if (!VerifyP2MRRescueProof(*token, m, execdata.m_annex.subspan(2))) {
++        return set_error(serror, SCRIPT_ERR_P2MR_RESCUE_PROOF);
++    }
++    return true;
++}
++
+ template <class T>
+ bool GenericTransactionSignatureChecker<T>::CheckLockTime(const CScriptNum& nLockTime) const
+ {
+@@ -2244,6 +2361,8 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion,
+             const valtype& annex = SpanPopBack(stack);
+             execdata.m_annex_hash = (HashWriter{} << annex).GetSHA256();
+             execdata.m_annex_present = true;
++            // As received, for a rescue check (doc/p2mr-rescue.md). The witness outlives this call.
++            execdata.m_annex = annex;
+         } else {
+             execdata.m_annex_present = false;
+         }
+@@ -2490,6 +2609,7 @@ const std::map<std::string, script_verify_flag_name>& ScriptFlagNamesToEnum()
+         FLAG_NAME(P2MR_TRIPWIRE),
+         FLAG_NAME(P2MR_EC_DISABLED),
+         FLAG_NAME(P2MR_SLHDSA128S),
++        FLAG_NAME(P2MR_NO_RESCUE),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_PUBKEYTYPE),
+         FLAG_NAME(DISCOURAGE_OP_SUCCESS),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_TAPROOT_VERSION),
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index 7eb1d76..5ddb9b2 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -11,6 +11,7 @@
+ #include <crypto/slhdsa128s.h>
+ #include <hash.h>
+ #include <primitives/transaction.h>
++#include <script/p2mr_rescue.h>
+ #include <script/script_error.h> // IWYU pragma: export
+ #include <script/verify_flags.h> // IWYU pragma: export
+ #include <span.h>
+@@ -183,6 +184,12 @@ enum class script_verify_flag_name : uint8_t {
+     //
+     SCRIPT_VERIFY_P2MR_SLHDSA128S,
+ 
++    // The P2MR rescue lane is closed: in an executed P2MR leaf of version 0xe0, a rescue token in
++    // place of a signature is a signature like any other (doc/p2mr-rescue.md). A restricting flag,
++    // set below the rescue lane's height, and in neither static set of flags.
++    //
++    SCRIPT_VERIFY_P2MR_NO_RESCUE,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+@@ -219,6 +226,10 @@ struct PrecomputedTransactionData
+     //! Whether m_spent_outputs is initialized.
+     bool m_spent_outputs_ready = false;
+ 
++    //! The network id the P2MR rescue lane binds its proofs to (doc/p2mr-rescue.md): SHA256 of the
++    //! signet challenge, or SHA256("regtest"). Unset on the networks where the lane never opens.
++    std::optional<uint256> m_p2mr_rescue_network_id;
++
+     PrecomputedTransactionData() = default;
+ 
+     /** Initialize this PrecomputedTransactionData with transaction data.
+@@ -278,6 +289,14 @@ struct ScriptExecutionData
+     //! Whether the script is a P2MR leaf of leaf version 0xe0 that is executed, whose elliptic
+     //! curve signature checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
+     bool m_tripwired_leaf{false};
++
++    //! Whether a rescue check (doc/p2mr-rescue.md) has been made in this input, which allows one.
++    //! Set before the signature cache is looked at.
++    bool m_rescue_done{false};
++
++    //! The annex of a P2MR input, as received, when m_annex_present; empty otherwise. It points into
++    //! the witness, which outlives the execution of the input's script.
++    std::span<const unsigned char> m_annex{};
+ };
+ 
+ /** Signature hash sizes */
+@@ -338,6 +357,7 @@ static_assert(SLHDSA128S_CONTEXT.size() == 20);
+ extern const HashWriter HASHER_TAPSIGHASH; //!< Hasher with tag "TapSighash" pre-fed to it.
+ extern const HashWriter HASHER_TAPLEAF;    //!< Hasher with tag "TapLeaf" pre-fed to it.
+ extern const HashWriter HASHER_TAPBRANCH;  //!< Hasher with tag "TapBranch" pre-fed to it.
++extern const HashWriter HASHER_P2MR_RESCUE_SIGHASH; //!< Hasher with tag "P2MR/Rescue/Sighash" pre-fed to it.
+ 
+ /** Data structure to cache SHA256 midstates for the ECDSA sighash calculations
+  *  (bare, P2SH, P2WPKH, P2WSH). */
+@@ -384,6 +404,13 @@ public:
+         return false;
+     }
+ 
++    /** Rules R4 to R7 of a rescue check (doc/p2mr-rescue.md): `token` is a well-formed rescue token
++     *  in place of the signature, `pubkey` the 32-byte key of the check. */
++    virtual bool CheckP2MRRescue(std::span<const unsigned char> token, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const
++    {
++        return false;
++    }
++
+     virtual bool CheckLockTime(const CScriptNum& nLockTime) const
+     {
+          return false;
+@@ -409,6 +436,13 @@ enum class MissingDataBehavior
+ /** key_version is the BIP 342 key version, used with SigVersion::TAPSCRIPT only: 0 for the
+  *  32-byte keys of the BIP 342 signature opcodes, MLDSA44_KEY_VERSION for OP_CHECKMLDSA44,
+  *  SLHDSA128S_KEY_VERSION for OP_CHECKSLHDSA128S. */
++/** The rescue signature message of an input (doc/p2mr-rescue.md): TaggedHash("P2MR/Rescue/Sighash")
++ *  over the fields of a BIP 342 SIGHASH_DEFAULT message without sha_annex, with key_version 0x03,
++ *  then the network id, the statement id and SHA256 of the token's public inputs. False, after
++ *  MissingDataBehavior, when the BIP 341 data of `cache` is not ready. */
++template<typename T>
++bool SignatureHashP2MRRescue(uint256& hash_out, const ScriptExecutionData& execdata, const T& tx_to, uint32_t in_pos, const PrecomputedTransactionData& cache, MissingDataBehavior mdb, const uint256& network_id, uint8_t sid, std::span<const unsigned char> pub);
++
+ template<typename T>
+ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, const T& tx_to, uint32_t in_pos, uint8_t hash_type, SigVersion sigversion, const PrecomputedTransactionData& cache, MissingDataBehavior mdb, uint8_t key_version = 0);
+ 
+@@ -428,6 +462,7 @@ protected:
+     virtual bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const;
+     virtual bool VerifyMLDSA44Signature(std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE> sig, std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey, const uint256& sighash) const;
+     virtual bool VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const;
++    virtual bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof) const;
+ 
+ public:
+     GenericTransactionSignatureChecker(const T* txToIn, unsigned int nInIn, const CAmount& amountIn, MissingDataBehavior mdb) : txTo(txToIn), m_mdb(mdb), nIn(nInIn), amount(amountIn), txdata(nullptr) {}
+@@ -436,6 +471,7 @@ public:
+     bool CheckSchnorrSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
+     bool CheckMLDSA44Signature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
+     bool CheckSLHDSA128SSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
++    bool CheckP2MRRescue(std::span<const unsigned char> token, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
+     bool CheckLockTime(const CScriptNum& nLockTime) const override;
+     bool CheckSequence(const CScriptNum& nSequence) const override;
+ };
+@@ -471,6 +507,11 @@ public:
+         return m_checker.CheckSLHDSA128SSignature(sig, pubkey, sigversion, execdata, serror);
+     }
+ 
++    bool CheckP2MRRescue(std::span<const unsigned char> token, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override
++    {
++        return m_checker.CheckP2MRRescue(token, pubkey, sigversion, execdata, serror);
++    }
++
+     bool CheckLockTime(const CScriptNum& nLockTime) const override
+     {
+         return m_checker.CheckLockTime(nLockTime);
+diff --git a/src/script/p2mr_rescue.cpp b/src/script/p2mr_rescue.cpp
+new file mode 100644
+index 0000000..c722821
+--- /dev/null
++++ b/src/script/p2mr_rescue.cpp
+@@ -0,0 +1,121 @@
++// Copyright (c) 2026 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <script/p2mr_rescue.h>
++
++#include <hash.h>
++#include <script/script.h>
++
++#include <secp256k1.h>
++#include <secp256k1_extrakeys.h>
++#include <voleith.h>
++
++#include <algorithm>
++#include <atomic>
++#include <cassert>
++#include <cstring>
++
++std::optional<P2MRRescueToken> ParseP2MRRescueToken(std::span<const unsigned char> element)
++{
++    // Lengths first: |K| + 36 bytes, |K| in [1, 64], and never 64 or 65 bytes.
++    if (element.size() < P2MR_RESCUE_MIN_K_SIZE + P2MR_RESCUE_TOKEN_OVERHEAD ||
++        element.size() > P2MR_RESCUE_MAX_TOKEN_SIZE) return std::nullopt;
++    if (element.size() == 64 || element.size() == 65) return std::nullopt;
++    if (element[0] != P2MR_RESCUE_KEY_VERSION) return std::nullopt;
++    const uint8_t sid{element[1]};
++    if (!P2MRRescueProofSize(sid)) return std::nullopt;
++    const std::span<const unsigned char> pub{element.subspan(2)};
++    const size_t k_size{pub[0]};
++    if (k_size < P2MR_RESCUE_MIN_K_SIZE || k_size > P2MR_RESCUE_MAX_K_SIZE) return std::nullopt;
++    if (pub.size() != k_size + 34) return std::nullopt;
++    const std::span<const unsigned char> k{pub.subspan(1, k_size)};
++    if (!std::ranges::all_of(k, [](unsigned char c) { return c >= 0x20 && c <= 0x7e; })) return std::nullopt;
++    return P2MRRescueToken{
++        .sid = sid,
++        .pub = pub,
++        .k = k,
++        .suffix = pub[1 + k_size],
++        .y = pub.subspan(2 + k_size).first<32>(),
++    };
++}
++
++std::optional<size_t> P2MRRescueProofSize(uint8_t sid)
++{
++    if (sid == P2MR_RESCUE_STATEMENT_HMAC) return P2MR_RESCUE_S1_PROOF_SIZE;
++    return std::nullopt;
++}
++
++bool IsP2MRRescueAnnex(std::span<const unsigned char> annex, uint8_t sid)
++{
++    const auto proof_size{P2MRRescueProofSize(sid)};
++    return proof_size && annex.size() == 2 + *proof_size && annex[0] == ANNEX_TAG && annex[1] == P2MR_RESCUE_ANNEX_TYPE;
++}
++
++bool HasP2MRRescueRecordMark(std::span<const std::vector<unsigned char>> witness_stack)
++{
++    if (witness_stack.size() < 2) return false;
++    const std::vector<unsigned char>& last{witness_stack.back()};
++    return last.size() >= 2 && last[0] == ANNEX_TAG && last[1] == P2MR_RESCUE_ANNEX_TYPE;
++}
++
++namespace {
++/** A context for the key relation of R5. secp256k1_keypair_create needs one other than
++ *  secp256k1_context_static; y is public, so it is not randomized. */
++const secp256k1_context* RescueKeyContext()
++{
++    static const secp256k1_context* const ctx{[] {
++        secp256k1_context* c{secp256k1_context_create(SECP256K1_CONTEXT_NONE)};
++        assert(c != nullptr);
++        return c;
++    }()};
++    return ctx;
++}
++} // namespace
++
++bool CheckP2MRRescueKey(std::span<const unsigned char, 32> y, std::span<const unsigned char> pubkey)
++{
++    if (pubkey.size() != 32) return false;
++    const secp256k1_context* ctx{RescueKeyContext()};
++    // 0 < y < n.
++    if (!secp256k1_ec_seckey_verify(ctx, y.data())) return false;
++    secp256k1_keypair keypair;
++    if (!secp256k1_keypair_create(ctx, &keypair, y.data())) return false;
++    secp256k1_xonly_pubkey xonly;
++    // The parity is ignored: an x-only key stands for both y and n - y.
++    if (!secp256k1_keypair_xonly_pub(ctx, &xonly, nullptr, &keypair)) return false;
++    unsigned char x[32];
++    if (!secp256k1_xonly_pubkey_serialize(ctx, x, &xonly)) return false;
++    return std::memcmp(x, pubkey.data(), 32) == 0;
++}
++
++uint256 P2MRRescueKeyCommitment(std::span<const unsigned char, 32> pubkey)
++{
++    static const HashWriter HASHER_P2MR_RESCUE_KEY{TaggedHash("P2MR/Rescue/Key")};
++    HashWriter ss{HASHER_P2MR_RESCUE_KEY};
++    ss << uint8_t{0x00};
++    ss.write(std::as_bytes(pubkey));
++    return ss.GetSHA256();
++}
++
++namespace {
++std::atomic<uint64_t> g_proof_verifications{0};
++} // namespace
++
++bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof)
++{
++    switch (token.sid) {
++    case P2MR_RESCUE_STATEMENT_HMAC:
++        g_proof_verifications.fetch_add(1, std::memory_order_relaxed);
++        // The library checks every length before it reads a pointer, returns 0 for any malformed
++        // input or internal error, and catches any panic inside itself.
++        return voleith_verify_s1(token.k.data(), token.k.size(), token.suffix, token.y.data(),
++                                 m.data(), m.size(), proof.data(), proof.size()) == 1;
++    }
++    return false;
++}
++
++uint64_t P2MRRescueProofVerifications()
++{
++    return g_proof_verifications.load(std::memory_order_relaxed);
++}
+diff --git a/src/script/p2mr_rescue.h b/src/script/p2mr_rescue.h
+new file mode 100644
+index 0000000..fa264da
+--- /dev/null
++++ b/src/script/p2mr_rescue.h
+@@ -0,0 +1,94 @@
++// Copyright (c) 2026 The Bitcoin Core developers
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#ifndef BITCOIN_SCRIPT_P2MR_RESCUE_H
++#define BITCOIN_SCRIPT_P2MR_RESCUE_H
++
++#include <uint256.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <vector>
++
++/**
++ * The P2MR rescue lane (doc/p2mr-rescue.md): an elliptic curve signature check in an executed P2MR
++ * leaf of version 0xe0 whose signature element is a rescue token is checked by verifying a
++ * VOLE-in-the-head proof, carried in the input's annex, that the spender knows the seed behind the
++ * key (ark0-rescue SPEC.md v0.2, version byte 0x02, statement 0x01).
++ *
++ * token = 0x03 || sid || pub, pub = u8(|K|) || K || u8(suffix) || y   (SPEC.md section 7.5)
++ * annex = 0x50 || 0x01 || proof
++ */
++
++/** The first byte of a rescue token, the key_version of the rescue signature message. */
++static constexpr uint8_t P2MR_RESCUE_KEY_VERSION{0x03};
++/** Statement 0x01 of SPEC.md: knowledge of x with HMAC-SHA256(K, x || suffix) = y. The only
++ *  registered statement. */
++static constexpr uint8_t P2MR_RESCUE_STATEMENT_HMAC{0x01};
++/** The second byte of the annex of a rescue spend: the record type "P2MR rescue proof v1". */
++static constexpr uint8_t P2MR_RESCUE_ANNEX_TYPE{0x01};
++/** The length of a statement 0x01 proof (SPEC.md section 10), and of the annex that carries it. */
++static constexpr size_t P2MR_RESCUE_S1_PROOF_SIZE{130218};
++static constexpr size_t P2MR_RESCUE_S1_ANNEX_SIZE{2 + P2MR_RESCUE_S1_PROOF_SIZE};
++/** The bounds of K (SPEC.md section 7.5). */
++static constexpr size_t P2MR_RESCUE_MIN_K_SIZE{1};
++static constexpr size_t P2MR_RESCUE_MAX_K_SIZE{64};
++/** A token is |K| + 36 bytes: 0x03, sid, |K|, K, suffix and the 32 bytes of y. */
++static constexpr size_t P2MR_RESCUE_TOKEN_OVERHEAD{36};
++static constexpr size_t P2MR_RESCUE_MAX_TOKEN_SIZE{P2MR_RESCUE_MAX_K_SIZE + P2MR_RESCUE_TOKEN_OVERHEAD};
++/** The length of the message a rescue proof binds: rescue sighash || network id || key commitment. */
++static constexpr size_t P2MR_RESCUE_MESSAGE_SIZE{96};
++
++/** A well-formed rescue token, as spans into the element it was parsed from. */
++struct P2MRRescueToken {
++    //! The statement id.
++    uint8_t sid;
++    //! The public inputs, as received: u8(|K|) || K || u8(suffix) || y.
++    std::span<const unsigned char> pub;
++    std::span<const unsigned char> k;
++    uint8_t suffix;
++    std::span<const unsigned char, 32> y;
++};
++
++/**
++ * Parse a stack element as a rescue token. Every condition is structural, and nullopt for any
++ * element that fails one: such an element is a signature and nothing else.
++ *  - the first byte is 0x03 and the second a registered statement id (only 0x01);
++ *  - the rest is the canonical encoding of SPEC.md section 7.5: 1 <= |K| <= 64, every byte of K
++ *    in 0x20..0x7e, y 32 bytes, nothing after it;
++ *  - the token is not 64 or 65 bytes long (|K| is not 28 or 29), the lengths of a BIP 340
++ *    signature, so that no element that can be a valid Schnorr signature is a token.
++ */
++std::optional<P2MRRescueToken> ParseP2MRRescueToken(std::span<const unsigned char> element);
++inline bool IsP2MRRescueToken(std::span<const unsigned char> element) { return ParseP2MRRescueToken(element).has_value(); }
++
++/** The length of a proof for a registered statement id, nullopt for any other id. */
++std::optional<size_t> P2MRRescueProofSize(uint8_t sid);
++
++/** Whether `annex` is exactly one rescue record for statement `sid`: 0x50, 0x01, and a proof of the
++ *  length of that statement, with nothing before or after. */
++bool IsP2MRRescueAnnex(std::span<const unsigned char> annex, uint8_t sid);
++
++/** The structural mark of a rescue record that policy looks for, without reading any coin: a
++ *  witness of at least two elements whose last one starts with 0x50 0x01 (doc/p2mr-rescue.md). */
++bool HasP2MRRescueRecordMark(std::span<const std::vector<unsigned char>> witness_stack);
++
++/** Rule R5: 0 < y < n, the order of secp256k1, and x(y * G) equals the 32-byte x-only key `pubkey`,
++ *  either parity of the point. */
++bool CheckP2MRRescueKey(std::span<const unsigned char, 32> y, std::span<const unsigned char> pubkey);
++
++/** pk_commitment = TaggedHash("P2MR/Rescue/Key", 0x00 || P), 0x00 for a BIP 340 x-only key. */
++uint256 P2MRRescueKeyCommitment(std::span<const unsigned char, 32> pubkey);
++
++/** Rule R7: verify the proof of a token's statement against the 96-byte message, through the C ABI
++ *  of the Rust library (voleith_verify_s1). Any error inside the library is a rejection. */
++bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof);
++
++/** How many proofs VerifyP2MRRescueProof has given to the library since the process started. For the
++ *  tests, which check that a signature cache hit skips the verification. */
++uint64_t P2MRRescueProofVerifications();
++
++#endif // BITCOIN_SCRIPT_P2MR_RESCUE_H
+diff --git a/src/script/script.h b/src/script/script.h
+index 4024714..3eca514 100644
+--- a/src/script/script.h
++++ b/src/script/script.h
+@@ -73,6 +73,14 @@ static constexpr int64_t VALIDATION_WEIGHT_PER_MLDSA44_CHECK{250};
+ // It never changes once a build carrying it has left the network's own nodes.
+ static constexpr int64_t VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK{5000};
+ 
++// Validation weight per rescue check (P2MR leaves of leaf version 0xe0 only, see
++// doc/p2mr-rescue.md): the verification of a 130,218-byte VOLE-in-the-head proof against the 50 of
++// BIP 342, charged on top of those 50, before the check hashes or parses anything.
++// PROVISIONAL: 100,000 is fixed by measurement before release (the single-check and whole-block
++// gates of doc/p2mr-rescue.md). It must stay at or below 130,333, the budget of the smallest valid
++// rescue input less 50, or that input cannot pay for itself.
++static constexpr int64_t VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK{100000};
++
+ // How much weight budget is added to the witness size (Tapscript only, see BIP 342).
+ static constexpr int64_t VALIDATION_WEIGHT_OFFSET{50};
+ 
+diff --git a/src/script/script_error.cpp b/src/script/script_error.cpp
+index 7ca501f..d0344fa 100644
+--- a/src/script/script_error.cpp
++++ b/src/script/script_error.cpp
+@@ -125,6 +125,14 @@ std::string ScriptErrorString(const ScriptError serror)
+             return "Invalid SLH-DSA-SHA2-128s signature hash type";
+         case SCRIPT_ERR_SLHDSA128S_SIG:
+             return "Invalid SLH-DSA-SHA2-128s signature";
++        case SCRIPT_ERR_P2MR_RESCUE_REPEAT:
++            return "A second rescue check in the same input";
++        case SCRIPT_ERR_P2MR_RESCUE_ANNEX:
++            return "A rescue check without exactly one rescue record as the annex";
++        case SCRIPT_ERR_P2MR_RESCUE_KEY:
++            return "A rescue token whose y does not belong to the public key";
++        case SCRIPT_ERR_P2MR_RESCUE_PROOF:
++            return "Invalid rescue proof";
+         case SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT:
+             return "Too much signature validation relative to witness weight";
+         case SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG:
+diff --git a/src/script/script_error.h b/src/script/script_error.h
+index 9d916fe..d96a942 100644
+--- a/src/script/script_error.h
++++ b/src/script/script_error.h
+@@ -93,6 +93,13 @@ typedef enum ScriptError_t
+     SCRIPT_ERR_SLHDSA128S_SIG_SIZE,
+     SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE,
+     SCRIPT_ERR_SLHDSA128S_SIG,
++
++    /* The P2MR rescue lane (doc/p2mr-rescue.md) */
++    SCRIPT_ERR_P2MR_RESCUE_REPEAT,
++    SCRIPT_ERR_P2MR_RESCUE_ANNEX,
++    SCRIPT_ERR_P2MR_RESCUE_KEY,
++    SCRIPT_ERR_P2MR_RESCUE_PROOF,
++
+     SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT,
+     SCRIPT_ERR_TAPSCRIPT_CHECKMULTISIG,
+     SCRIPT_ERR_TAPSCRIPT_MINIMALIF,
+diff --git a/src/script/sigcache.cpp b/src/script/sigcache.cpp
+index 8f93946..adc9578 100644
+--- a/src/script/sigcache.cpp
++++ b/src/script/sigcache.cpp
+@@ -23,12 +23,13 @@ SignatureCache::SignatureCache(const size_t max_size_bytes)
+     // We want the nonce to be 64 bytes long to force the hasher to process
+     // this chunk, which makes later hash computations more efficient. We
+     // just write our 32-byte entropy, and then pad with 'E' for ECDSA,
+-    // 'S' for Schnorr, 'M' for ML-DSA-44 and 'H' for the hash-based
+-    // SLH-DSA-SHA2-128s (followed by 0 bytes).
++    // 'S' for Schnorr, 'M' for ML-DSA-44, 'H' for the hash-based
++    // SLH-DSA-SHA2-128s and 'R' for P2MR rescue proofs (followed by 0 bytes).
+     static constexpr unsigned char PADDING_ECDSA[32] = {'E'};
+     static constexpr unsigned char PADDING_SCHNORR[32] = {'S'};
+     static constexpr unsigned char PADDING_MLDSA44[32] = {'M'};
+     static constexpr unsigned char PADDING_SLHDSA128S[32] = {'H'};
++    static constexpr unsigned char PADDING_P2MR_RESCUE[32] = {'R'};
+     m_salted_hasher_ecdsa.Write(nonce.begin(), 32);
+     m_salted_hasher_ecdsa.Write(PADDING_ECDSA, 32);
+     m_salted_hasher_schnorr.Write(nonce.begin(), 32);
+@@ -37,6 +38,8 @@ SignatureCache::SignatureCache(const size_t max_size_bytes)
+     m_salted_hasher_mldsa44.Write(PADDING_MLDSA44, 32);
+     m_salted_hasher_slhdsa128s.Write(nonce.begin(), 32);
+     m_salted_hasher_slhdsa128s.Write(PADDING_SLHDSA128S, 32);
++    m_salted_hasher_p2mr_rescue.Write(nonce.begin(), 32);
++    m_salted_hasher_p2mr_rescue.Write(PADDING_P2MR_RESCUE, 32);
+ 
+     const auto [num_elems, approx_size_bytes] = setValid.setup_bytes(max_size_bytes);
+     LogInfo("Using %zu MiB out of %zu MiB requested for signature cache, able to store %zu elements",
+@@ -67,6 +70,12 @@ void SignatureCache::ComputeEntrySLHDSA128S(uint256& entry, const uint256& hash,
+     hasher.Write(hash.begin(), 32).Write(pubkey.data(), pubkey.size()).Write(sig.data(), sig.size()).Finalize(entry.begin());
+ }
+ 
++void SignatureCache::ComputeEntryP2MRRescue(uint256& entry, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, uint8_t sid, std::span<const unsigned char> pub, std::span<const unsigned char> proof) const
++{
++    CSHA256 hasher = m_salted_hasher_p2mr_rescue;
++    hasher.Write(m.data(), m.size()).Write(&sid, 1).Write(pub.data(), pub.size()).Write(proof.data(), proof.size()).Finalize(entry.begin());
++}
++
+ bool SignatureCache::Get(const uint256& entry, const bool erase)
+ {
+     std::shared_lock<std::shared_mutex> lock(cs_sigcache);
+@@ -121,3 +130,16 @@ bool CachingTransactionSignatureChecker::VerifySLHDSA128SSignature(std::span<con
+     if (store) m_signature_cache.Set(entry);
+     return true;
+ }
++
++bool CachingTransactionSignatureChecker::VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof) const
++{
++    // Rules R1 to R6 have run before this point, on a cache hit too: only the verification of the
++    // proof (R7) is saved. m holds this input's rescue signature message, so an entry never stands
++    // for another transaction or input (doc/p2mr-rescue.md).
++    uint256 entry;
++    m_signature_cache.ComputeEntryP2MRRescue(entry, m, token.sid, token.pub, proof);
++    if (m_signature_cache.Get(entry, !store)) return true;
++    if (!TransactionSignatureChecker::VerifyP2MRRescueProof(token, m, proof)) return false;
++    if (store) m_signature_cache.Set(entry);
++    return true;
++}
+diff --git a/src/script/sigcache.h b/src/script/sigcache.h
+index 49603f8..434a122 100644
+--- a/src/script/sigcache.h
++++ b/src/script/sigcache.h
+@@ -38,11 +38,13 @@ static_assert(DEFAULT_VALIDATION_CACHE_BYTES == DEFAULT_SIGNATURE_CACHE_BYTES +
+ class SignatureCache
+ {
+ private:
+-    //! Entries are SHA256(nonce || 'E', 'S', 'M' or 'H' || 31 zero bytes || signature hash || public key || signature):
++    //! Entries are SHA256(nonce || 'E', 'S', 'M' or 'H' || 31 zero bytes || signature hash || public key || signature),
++    //! and for rescue proofs SHA256(nonce || 'R' || 31 zero bytes || m || sid || pub || proof):
+     CSHA256 m_salted_hasher_ecdsa;
+     CSHA256 m_salted_hasher_schnorr;
+     CSHA256 m_salted_hasher_mldsa44;
+     CSHA256 m_salted_hasher_slhdsa128s;
++    CSHA256 m_salted_hasher_p2mr_rescue;
+     typedef CuckooCache::cache<uint256, SignatureCacheHasher> map_type;
+     map_type setValid;
+     std::shared_mutex cs_sigcache;
+@@ -61,6 +63,8 @@ public:
+ 
+     void ComputeEntrySLHDSA128S(uint256& entry, const uint256& hash, std::span<const unsigned char> sig, std::span<const unsigned char> pubkey) const;
+ 
++    void ComputeEntryP2MRRescue(uint256& entry, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, uint8_t sid, std::span<const unsigned char> pub, std::span<const unsigned char> proof) const;
++
+     bool Get(const uint256& entry, bool erase);
+ 
+     void Set(const uint256& entry);
+@@ -79,6 +83,7 @@ public:
+     bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const override;
+     bool VerifyMLDSA44Signature(std::span<const unsigned char, MLDSA44_SIGNATURE_SIZE> sig, std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey, const uint256& sighash) const override;
+     bool VerifySLHDSA128SSignature(std::span<const unsigned char, SLHDSA128S_SIGNATURE_SIZE> sig, std::span<const unsigned char, SLHDSA128S_PUBKEY_SIZE> pubkey, const uint256& sighash) const override;
++    bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof) const override;
+ };
+ 
+ #endif // BITCOIN_SCRIPT_SIGCACHE_H
+diff --git a/src/test/script_tests.cpp b/src/test/script_tests.cpp
+index 8493b0e..a755188 100644
+--- a/src/test/script_tests.cpp
++++ b/src/test/script_tests.cpp
+@@ -103,6 +103,10 @@ static ScriptErrorDesc script_errors[]={
+     {SCRIPT_ERR_SLHDSA128S_SIG_SIZE, "SLHDSA128S_SIG_SIZE"},
+     {SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE, "SLHDSA128S_SIG_HASHTYPE"},
+     {SCRIPT_ERR_SLHDSA128S_SIG, "SLHDSA128S_SIG"},
++    {SCRIPT_ERR_P2MR_RESCUE_REPEAT, "P2MR_RESCUE_REPEAT"},
++    {SCRIPT_ERR_P2MR_RESCUE_ANNEX, "P2MR_RESCUE_ANNEX"},
++    {SCRIPT_ERR_P2MR_RESCUE_KEY, "P2MR_RESCUE_KEY"},
++    {SCRIPT_ERR_P2MR_RESCUE_PROOF, "P2MR_RESCUE_PROOF"},
+     {SCRIPT_ERR_DISCOURAGE_OP_SUCCESS, "DISCOURAGE_OP_SUCCESS"},
+     {SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE, "DISCOURAGE_UPGRADABLE_PUBKEYTYPE"},
+     {SCRIPT_ERR_SCHNORR_SIG_SIZE, "SCHNORR_SIG_SIZE"},
+@@ -1754,9 +1758,11 @@ BOOST_AUTO_TEST_CASE(formatscriptflags)
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH), "P2SH");
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_TAPROOT), "P2SH,TAPROOT");
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH | script_verify_flags::from_int(1u<<31)), "P2SH,0x80000000");
+-    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int(1u<<27)), "TAPROOT,0x08000000");
+-    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int((1u<<28) | (1ull<<58))), "TAPROOT,0x400000010000000");
+-    BOOST_CHECK_EQUAL(FormatScriptFlags(script_verify_flags::from_int(1u<<26)), "0x04000000");
++    // Bits far above the flags in use, which stay unknown as flags are added (the P2MR series
++    // took 21 to 26).
++    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int(1ull<<45)), "TAPROOT,0x200000000000");
++    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int((1ull<<46) | (1ull<<58))), "TAPROOT,0x400400000000000");
++    BOOST_CHECK_EQUAL(FormatScriptFlags(script_verify_flags::from_int(1ull<<44)), "0x100000000000");
+ }
+ 
+ BOOST_AUTO_TEST_SUITE_END()
+-- 
+2.43.0
+

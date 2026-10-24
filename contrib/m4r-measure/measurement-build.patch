@@ -1,0 +1,406 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6109639..62f2522 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -184,6 +184,61 @@ endif()
+ option(BUILD_BENCH "Build bench_bitcoin executable." OFF)
+ option(BUILD_FUZZ_BINARY "Build fuzz binary." OFF)
+ option(BUILD_FOR_FUZZING "Build for fuzzing. Enabling this will disable all other targets and override BUILD_FUZZ_BINARY." OFF)
++# MEASUREMENT ONLY (contrib/m4r-measure): the measurement-only node bitcoind_m4r_measure of the
++# whole-block gate of the P2MR rescue lane, with the worst-case hook of the rescue verifier (M4R_WORST),
++# the switch to its portable GF(2^128) multiplication (M4R_PORTABLE) and verification counters. This
++# configuration may define no executable or shared library target but bitcoind_m4r_measure, which has
++# no install rule, and `cmake --install` fails. The check looks at the targets themselves, not at
++# options: deferred to the end of the top-level CMakeLists.txt (cmake_language(DEFER)), it queues itself
++# again while other deferred calls of that directory are pending, so that it runs last; then it walks
++# every directory's BUILDSYSTEM_TARGETS and stops on any EXECUTABLE, SHARED_LIBRARY or MODULE_LIBRARY
++# other than that one, whichever option created it.
++option(M4R_MEASURE "Measurement build of contrib/m4r-measure (bitcoind_m4r_measure only, never a node)." OFF)
++if(M4R_MEASURE)
++  install(CODE "message(FATAL_ERROR \"A M4R_MEASURE build (contrib/m4r-measure) cannot be installed.\")" ALL_COMPONENTS)
++  function(m4r_measure_collect_targets dir out)
++    set(found)
++    get_property(targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
++    foreach(target IN LISTS targets)
++      get_target_property(type ${target} TYPE)
++      if(type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$" AND NOT target STREQUAL "bitcoind_m4r_measure")
++        list(APPEND found ${target})
++      endif()
++    endforeach()
++    get_property(subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
++    foreach(subdir IN LISTS subdirs)
++      m4r_measure_collect_targets("${subdir}" sub_found)
++      list(APPEND found ${sub_found})
++    endforeach()
++    set(${out} ${found} PARENT_SCOPE)
++  endfunction()
++  function(m4r_measure_check_targets)
++    cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" GET_CALL_IDS pending)
++    if(pending)
++      get_property(rounds GLOBAL PROPERTY M4R_MEASURE_CHECK_ROUNDS)
++      if(NOT rounds)
++        set(rounds 0)
++      endif()
++      math(EXPR rounds "${rounds} + 1")
++      if(rounds GREATER 100)
++        message(FATAL_ERROR "M4R_MEASURE: the target check could not run after the other deferred calls.")
++      endif()
++      set_property(GLOBAL PROPERTY M4R_MEASURE_CHECK_ROUNDS ${rounds})
++      cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL m4r_measure_check_targets)
++      return()
++    endif()
++    m4r_measure_collect_targets("${PROJECT_SOURCE_DIR}" others)
++    if(others)
++      list(JOIN others ", " others)
++      message(FATAL_ERROR "M4R_MEASURE builds bitcoind_m4r_measure only, but this configuration also defines: ${others}. Turn their options off (contrib/m4r-measure/build.sh does).")
++    endif()
++    if(NOT TARGET bitcoind_m4r_measure)
++      message(FATAL_ERROR "M4R_MEASURE: no bitcoind_m4r_measure target.")
++    endif()
++  endfunction()
++  cmake_language(DEFER DIRECTORY "${PROJECT_SOURCE_DIR}" CALL m4r_measure_check_targets)
++  add_compile_definitions(M4R_MEASURE)
++endif()
+ 
+ option(INSTALL_MAN "Install man pages." ON)
+ 
+@@ -427,7 +482,8 @@ endif()
+ include(AddBoostIfNeeded)
+ add_boost_if_needed()
+ 
+-if(BUILD_DAEMON OR BUILD_GUI OR BUILD_CLI OR BUILD_TESTS OR BUILD_BENCH OR BUILD_FUZZ_BINARY)
++# MEASUREMENT ONLY (contrib/m4r-measure): bitcoind_m4r_measure needs libevent too.
++if(BUILD_DAEMON OR BUILD_GUI OR BUILD_CLI OR BUILD_TESTS OR BUILD_BENCH OR BUILD_FUZZ_BINARY OR M4R_MEASURE)
+   find_package(Libevent 2.1.8 MODULE REQUIRED)
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index faf1e8e..b752127 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -338,6 +338,20 @@ if(ENABLE_IPC AND BUILD_DAEMON)
+   )
+   install_binary_component(bitcoin-node INTERNAL)
+ endif()
++# MEASUREMENT ONLY (contrib/m4r-measure): the node of the whole-block gate, with the rescue verifier's
++# worst-case hook. It has no install rule, and a measurement configuration refuses `cmake --install`.
++if(M4R_MEASURE)
++  add_executable(bitcoind_m4r_measure
++    bitcoind.cpp
++    init/bitcoind.cpp
++  )
++  target_compile_definitions(bitcoind_m4r_measure PRIVATE M4R_MEASURE_NODE)
++  target_link_libraries(bitcoind_m4r_measure
++    core_interface
++    bitcoin_node
++    $<TARGET_NAME_IF_EXISTS:bitcoin_wallet>
++  )
++endif()
+ 
+ 
+ add_library(bitcoin_cli STATIC EXCLUDE_FROM_ALL
+diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
+index 323e757..4e6d943 100644
+--- a/src/bitcoind.cpp
++++ b/src/bitcoind.cpp
+@@ -3,6 +3,16 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++// MEASUREMENT ONLY (contrib/m4r-measure): a build with the rescue verifier's worst-case hook must never
++// make a node, bitcoind or bitcoin-node. Only the measurement-only target bitcoind_m4r_measure, which
++// has no install rule, compiles this file in it (M4R_MEASURE_NODE), for the whole-block gate.
++#if defined(M4R_MEASURE) && !defined(M4R_MEASURE_NODE)
++#error "M4R_MEASURE is a measurement build: bitcoind and bitcoin-node cannot be built with it"
++#endif
++#if defined(M4R_MEASURE_NODE) && !defined(M4R_MEASURE)
++#error "M4R_MEASURE_NODE needs M4R_MEASURE"
++#endif
++
+ #include <bitcoin-build-config.h> // IWYU pragma: keep
+ 
+ #include <chainparams.h>
+@@ -31,6 +41,18 @@
+ #include <any>
+ #include <functional>
+ #include <optional>
++#ifdef M4R_MEASURE_NODE
++#include <cstdint>
++#include <cstdlib>
++#include <initializer_list>
++#include <iostream>
++#include <string>
++#include <utility>
++
++#include <crypto/slhdsa128s.h>
++#include <script/p2mr_rescue.h>
++#include <util/chaintype.h>
++#endif
+ 
+ using node::NodeContext;
+ 
+@@ -129,6 +151,24 @@ static bool ParseArgs(NodeContext& node, int argc, char* argv[])
+             return InitError(Untranslated(strprintf("Command line contains unexpected token '%s', see bitcoind -h for a list of options.", argv[i])));
+         }
+     }
++#ifdef M4R_MEASURE_NODE
++    // MEASUREMENT ONLY: this node must never follow a real network. Once the configuration has chosen
++    // the chain, it refuses anything but regtest, and it runs without P2P: no listening, no outbound
++    // connections, the network switched off, every proxy pointed at a closed port.
++    try {
++        if (args.GetChainType() != ChainType::REGTEST) {
++            return InitError(Untranslated(strprintf("bitcoind_m4r_measure is a measurement-only node and runs on regtest only, not on %s.", args.GetChainTypeString())));
++        }
++    } catch (const std::exception& e) {
++        return InitError(Untranslated(strprintf("bitcoind_m4r_measure: %s", e.what())));
++    }
++    for (const auto& [arg, value] : std::initializer_list<std::pair<const char*, const char*>>{
++             {"-listen", "0"}, {"-listenonion", "0"}, {"-connect", "0"}, {"-dnsseed", "0"}, {"-fixedseeds", "0"},
++             {"-discover", "0"}, {"-networkactive", "0"}, {"-maxconnections", "0"}, {"-proxy", "127.0.0.1:1"},
++             {"-onion", "127.0.0.1:1"}, {"-i2psam", ""}, {"-natpmp", "0"}}) {
++        args.ForceSetArg(arg, value);
++    }
++#endif
+     return true;
+ }
+ 
+@@ -257,8 +297,33 @@ static bool AppInit(NodeContext& node)
+     return fRet;
+ }
+ 
++#ifdef M4R_MEASURE_NODE
++// MEASUREMENT ONLY (contrib/m4r-measure, measurement-build.patch): the switches and counters of this
++// build, in src/script/p2mr_rescue.cpp, src/pubkey.cpp, src/crypto/mldsa44.cpp and the measurement
++// copy of the rescue verifier.
++extern int m4r_measure_worst;
++uint64_t M4RMeasureWorstVerifications();
++uint64_t M4RMeasureSchnorrVerifications();
++uint64_t M4RMeasureMLDSA44Verifications();
++extern "C" void voleith_m4r_set_portable(int on);
++extern "C" int voleith_m4r_portable();
++#endif
++
+ MAIN_FUNCTION
+ {
++#ifdef M4R_MEASURE_NODE
++    {
++        // MEASUREMENT ONLY: M4R_WORST=1 turns on the worst-case hook of the rescue verifier, and
++        // M4R_PORTABLE=1 makes it take its portable GF(2^128) multiplication, as on a CPU without
++        // PCLMULQDQ.
++        const char* worst{std::getenv("M4R_WORST")};
++        if (worst && std::string{worst} == "1") m4r_measure_worst = 1;
++        const char* portable{std::getenv("M4R_PORTABLE")};
++        voleith_m4r_set_portable(portable && std::string{portable} == "1");
++        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4r-measure), not for any network; rescue worst-case hook: " << m4r_measure_worst
++                  << "; portable multiplication: " << voleith_m4r_portable() << std::endl;
++    }
++#endif
+     NodeContext node;
+     int exit_status;
+     std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
+@@ -286,5 +351,10 @@ MAIN_FUNCTION
+     Interrupt(node);
+     Shutdown(node);
+ 
++#ifdef M4R_MEASURE_NODE
++    std::cerr << "MEASUREMENT-ONLY NODE counters: rescue=" << P2MRRescueProofVerifications()
++              << " rescue_worst=" << M4RMeasureWorstVerifications() << " schnorr=" << M4RMeasureSchnorrVerifications()
++              << " mldsa44=" << M4RMeasureMLDSA44Verifications() << " slhdsa128s=" << SLHDSA128SVerifyLibraryCalls() << std::endl;
++#endif
+     return node.exit_status;
+ }
+diff --git a/src/crypto/mldsa44.cpp b/src/crypto/mldsa44.cpp
+index 2e34324..3bddd36 100644
+--- a/src/crypto/mldsa44.cpp
++++ b/src/crypto/mldsa44.cpp
+@@ -11,6 +11,14 @@
+ static_assert(MLDSA44_PUBLICKEYBYTES == MLDSA44_PUBKEY_SIZE);
+ static_assert(MLDSA44_BYTES == MLDSA44_SIGNATURE_SIZE);
+ 
++#ifdef M4R_MEASURE
++#include <atomic>
++#include <cstdint>
++// MEASUREMENT ONLY (contrib/m4r-measure): complete ML-DSA-44 verifications, for the gate's counts.
++static std::atomic<uint64_t> g_m4r_mldsa44_verifications{0};
++uint64_t M4RMeasureMLDSA44Verifications() { return g_m4r_mldsa44_verifications.load(std::memory_order_relaxed); }
++#endif
++
+ bool MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey,
+                    std::span<const unsigned char> msg,
+                    std::span<const unsigned char> ctx,
+@@ -18,5 +26,8 @@ bool MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey,
+ {
+     // Zero on success; any other value (an invalid signature, or a context
+     // longer than 255 bytes) is a failure.
++#ifdef M4R_MEASURE
++    g_m4r_mldsa44_verifications.fetch_add(1, std::memory_order_relaxed);
++#endif
+     return bitcoin_mldsa_verify(sig.data(), msg.data(), msg.size(), ctx.data(), ctx.size(), pubkey.data()) == 0;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index d0bc3ec..f4948d5 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -2311,6 +2311,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+     if (!node.connman->Start(scheduler, connOptions)) {
+         return false;
+     }
++#ifdef M4R_MEASURE
++    // MEASUREMENT ONLY (contrib/m4r-measure, bitcoind_m4r_measure): no P2P at all. Interrupting the
++    // connection manager here, before RPC leaves its warm-up, stops its network threads and makes it
++    // refuse every connection (setnetworkactive and addnode included) before any RPC can be served.
++    node.connman->Interrupt();
++    LogInfo("MEASUREMENT-ONLY NODE: connection manager interrupted before RPC warm-up ends; no P2P");
++#endif
+ 
+     // ********************************************************* Step 13: finished
+ 
+diff --git a/src/pubkey.cpp b/src/pubkey.cpp
+index 264f861..0b79926 100644
+--- a/src/pubkey.cpp
++++ b/src/pubkey.cpp
+@@ -17,6 +17,10 @@
+ 
+ #include <algorithm>
+ #include <cassert>
++#ifdef M4R_MEASURE
++#include <atomic>
++#include <cstdint>
++#endif
+ 
+ using namespace util::hex_literals;
+ 
+@@ -233,9 +237,18 @@ bool XOnlyPubKey::IsFullyValid() const
+     return secp256k1_xonly_pubkey_parse(secp256k1_context_static, &pubkey, m_keydata.data());
+ }
+ 
++#ifdef M4R_MEASURE
++// MEASUREMENT ONLY (contrib/m4r-measure): BIP 340 verifications, for the gate's counts.
++static std::atomic<uint64_t> g_m4r_schnorr_verifications{0};
++uint64_t M4RMeasureSchnorrVerifications() { return g_m4r_schnorr_verifications.load(std::memory_order_relaxed); }
++#endif
++
+ bool XOnlyPubKey::VerifySchnorr(const uint256& msg, std::span<const unsigned char> sigbytes) const
+ {
+     assert(sigbytes.size() == 64);
++#ifdef M4R_MEASURE
++    g_m4r_schnorr_verifications.fetch_add(1, std::memory_order_relaxed);
++#endif
+     secp256k1_xonly_pubkey pubkey;
+     if (!secp256k1_xonly_pubkey_parse(secp256k1_context_static, &pubkey, m_keydata.data())) return false;
+     return secp256k1_schnorrsig_verify(secp256k1_context_static, sigbytes.data(), msg.begin(), 32, &pubkey);
+diff --git a/src/qt/main.cpp b/src/qt/main.cpp
+index 422cf7f..8688628 100644
+--- a/src/qt/main.cpp
++++ b/src/qt/main.cpp
+@@ -2,6 +2,11 @@
+ // Distributed under the MIT software license, see the accompanying
+ // file COPYING or http://www.opensource.org/licenses/mit-license.php.
+ 
++// MEASUREMENT ONLY (contrib/m4r-measure): a build with the rescue verifier's worst-case hook must never make a node.
++#ifdef M4R_MEASURE
++#error "M4R_MEASURE is a measurement build: bitcoin-qt and bitcoin-gui cannot be built with it"
++#endif
++
+ #include <qt/bitcoin.h>
+ 
+ #include <compat/compat.h>
+diff --git a/src/rescue/voleith/src/clmul.rs b/src/rescue/voleith/src/clmul.rs
+index 65b7f52..8d219bd 100644
+--- a/src/rescue/voleith/src/clmul.rs
++++ b/src/rescue/voleith/src/clmul.rs
+@@ -20,9 +20,15 @@ use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x, _mm_stor
+ /// with `-C target-feature=+pclmulqdq` it is a compile-time constant.
+ #[inline]
+ pub fn available() -> bool {
+-    std::arch::is_x86_feature_detected!("pclmulqdq") && std::arch::is_x86_feature_detected!("sse2")
++    !M4R_PORTABLE.load(core::sync::atomic::Ordering::Relaxed)
++        && std::arch::is_x86_feature_detected!("pclmulqdq")
++        && std::arch::is_x86_feature_detected!("sse2")
+ }
+ 
++/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch): when set, `available()`
++/// says no, so that every product takes the portable path, as on a CPU without PCLMULQDQ.
++pub static M4R_PORTABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
++
+ /// Carry-less product of two 128-bit polynomials as (low, high) halves.
+ ///
+ /// # Safety
+diff --git a/src/rescue/voleith/src/ffi.rs b/src/rescue/voleith/src/ffi.rs
+index 5a24160..c16e07a 100644
+--- a/src/rescue/voleith/src/ffi.rs
++++ b/src/rescue/voleith/src/ffi.rs
+@@ -29,6 +29,22 @@ unsafe fn slice<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+     Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+ }
+ 
++/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch): make every GF(2^128)
++/// product take the portable path (`on` non-zero), as on a CPU without PCLMULQDQ, or not.
++#[no_mangle]
++pub extern "C" fn voleith_m4r_set_portable(on: c_int) {
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    crate::clmul::M4R_PORTABLE.store(on != 0, core::sync::atomic::Ordering::Relaxed);
++    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
++    let _ = on;
++}
++
++/// MEASUREMENT ONLY: whether the products take the portable path (1) or not (0).
++#[no_mangle]
++pub extern "C" fn voleith_m4r_portable() -> c_int {
++    c_int::from(!crate::gf128::has_clmul())
++}
++
+ /// Verify a statement 0x01 proof: K (`k`, `k_len` bytes), the suffix byte,
+ /// y (32 bytes at `y`), the message (`msg`, `msg_len` bytes) and the proof
+ /// (`proof`, `proof_len` bytes). Returns 1 if the proof is valid and 0
+diff --git a/src/script/p2mr_rescue.cpp b/src/script/p2mr_rescue.cpp
+index c722821..a7bc1ce 100644
+--- a/src/script/p2mr_rescue.cpp
++++ b/src/script/p2mr_rescue.cpp
+@@ -12,6 +12,9 @@
+ #include <voleith.h>
+ 
+ #include <algorithm>
++#ifdef M4R_MEASURE
++#include <vector>
++#endif
+ #include <atomic>
+ #include <cassert>
+ #include <cstring>
+@@ -102,11 +105,36 @@ namespace {
+ std::atomic<uint64_t> g_proof_verifications{0};
+ } // namespace
+ 
++#ifdef M4R_MEASURE
++// MEASUREMENT ONLY (contrib/m4r-measure, measurement-build.patch): the worst-case hook. With
++// m4r_measure_worst set (M4R_WORST=1, read once at startup by bitcoind_m4r_measure), every proof first
++// has a copy of itself with chall3 = ff..ff verified, the most expensive invalid proof for its statement
++// and message (SPEC.md section 11: after step 6 the work is fixed but for one conditional XOR per set
++// bit of chall3), and then itself; the result is the proof's own. So every check does at least the work
++// of any invalid proof that reaches R7, and a block of valid proofs at least the work of the same block
++// with any of them invalid, since validation stops at the first failure.
++int m4r_measure_worst{0};
++namespace {
++std::atomic<uint64_t> g_worst_verifications{0};
++} // namespace
++uint64_t M4RMeasureWorstVerifications() { return g_worst_verifications.load(std::memory_order_relaxed); }
++#endif
++
+ bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE> m, std::span<const unsigned char> proof)
+ {
+     switch (token.sid) {
+     case P2MR_RESCUE_STATEMENT_HMAC:
+         g_proof_verifications.fetch_add(1, std::memory_order_relaxed);
++#ifdef M4R_MEASURE
++        if (m4r_measure_worst && proof.size() >= 16) {
++            std::vector<unsigned char> worst{proof.begin(), proof.end()};
++            std::fill(worst.end() - 16, worst.end(), 0xff);
++            const int worst_result{voleith_verify_s1(token.k.data(), token.k.size(), token.suffix, token.y.data(),
++                                                     m.data(), m.size(), worst.data(), worst.size())};
++            // Kept, so that the call is not taken for dead code.
++            g_worst_verifications.fetch_add(1 + (worst_result & 0), std::memory_order_relaxed);
++        }
++#endif
+         // The library checks every length before it reads a pointer, returns 0 for any malformed
+         // input or internal error, and catches any panic inside itself.
+         return voleith_verify_s1(token.k.data(), token.k.size(), token.suffix, token.y.data(),

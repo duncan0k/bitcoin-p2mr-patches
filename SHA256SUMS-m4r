@@ -1,0 +1,10 @@
+d6505359cb0c03882b0a707d78897a8a5719b061ad772d937d358514084dc5ad *0079-rescue-vendor-the-ark0-rescue-verifier-and-build-it-.patch
+48231845bf4239532ec31c81fbb51c619ad4499d3d04734e1ce4454a573a193f *0080-script-add-the-P2MR-rescue-lane-to-leaf-version-0xe0.patch
+0c81fe06a519708d1037b10075c74c47ccd50372f217dc59fc0c3962fd093bcc *0081-consensus-deploy-the-P2MR-rescue-lane-closed-on-Ark-.patch
+d38a310fa08ba589124877ef7841a83c2604e7b457b30859c896d4995bd47b15 *0082-policy-relay-rescue-spends-only-in-template-R1-once-.patch
+e921ac33bf89884b1f951d4a122a1e27a1763bfd1eaa662b58830efd1c247073 *0083-rpc-validation-report-the-rescue-lane-in-gettripwire.patch
+bbc58af85c1f429f59ffd07f381646a843ce374ab44ba8098cd788ca0d652b08 *0084-test-add-p2mr_rescue_tests-and-the-vectors-it-checks.patch
+bc90d36519166173dae6f6c19bf045f65fc49e3baef5ef1701a1148e512a0c55 *0085-test-add-feature_p2mr_rescue.py-and-feature_p2mr_res.patch
+ace5df78be09ac142c51a03606627a0e8b14d1fba9ac57312a02ce114cb0127e *0086-test-add-fuzz-targets-for-the-P2MR-rescue-lane.patch
+960feb1fd61fdbc6f526730737327138e827a331d9d67a148e9baacb998d62a9 *0087-bench-time-the-rescue-verifier-and-the-whole-path-of.patch
+835e285c765e0af381b5b5a4ba3ebcef80a54a314393d1f9e9f152c75a434e6a *0088-doc-describe-the-P2MR-rescue-lane.patch

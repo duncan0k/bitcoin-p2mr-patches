@@ -1,0 +1,209 @@
+From 3c42b3557df49f716c8355e2a588953cfd63fc12 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:09 +0000
+Subject: [PATCH 82/88] policy: relay rescue spends only in template R1, once
+ the lane is open and the checks are disabled
+
+- The mempool checks with SCRIPT_VERIFY_P2MR_NO_RESCUE until the lane is
+  open at the tip itself rather than for the next block: the lane lifts
+  a restriction, and ConsensusScriptChecks checks again with the tip's
+  own flags, which keep it below the height, so a spend accepted for the
+  next block would otherwise end in a BUG! line. The first rescue spend
+  through the mempool goes in the block after the first open one.
+- A rescue spend puts the key's secret in the mempool. While elliptic
+  curve checks in leaf version 0xe0 still work for the next block, anyone
+  could spend the same output with it, so such a transaction is refused
+  (p2mr-rescue-ec-enabled), with the state M3 reads from the confirmed
+  UTXO set. A policy check, not a script flag: blocks are not affected.
+- P2MR annexes stay non-standard but in the one relayed template, R1:
+  a leaf of version 0xe0 at depth one or more whose script is
+  <32-byte key> OP_CHECKSIG, and exactly the token, the script, the
+  control block and the rescue record. Its token, up to 100 bytes, is
+  exempt from the 80-byte limit.
+- A reorganization that puts the tip back below the lane's height removes
+  the transactions with a rescue record, with their descendants.
+- Over P2P, a transaction with a rescue record is dropped before
+  validation, and before the orphan pool, unless the peer has noban: an
+  invalid proof costs about 35 ms to find out, and v31.1 does not
+  penalize peers for invalid transactions. It goes to neither reject
+  filter, and both its txid and its wtxid count as answered, so that
+  another peer is asked at once.
+
+"A transaction with a rescue record" is one structural test the three
+share, HasP2MRRescueRecord: an input whose witness has at least two
+elements, the last of which starts with 0x50 0x01. It reads no coin, so
+it holds for orphans too.
+---
+ src/net_processing.cpp | 15 +++++++++++++++
+ src/policy/policy.cpp  | 27 ++++++++++++++++++++++++++-
+ src/policy/policy.h    | 17 +++++++++++++++++
+ src/validation.cpp     | 24 ++++++++++++++++++++++++
+ 4 files changed, 82 insertions(+), 1 deletion(-)
+
+diff --git a/src/net_processing.cpp b/src/net_processing.cpp
+index e2f7126..21505fb 100644
+--- a/src/net_processing.cpp
++++ b/src/net_processing.cpp
+@@ -4504,6 +4504,21 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
+ 
+         LOCK2(cs_main, m_tx_download_mutex);
+ 
++        // A rescue spend of the P2MR rescue lane (doc/p2mr-rescue.md) costs a proof verification of
++        // about 35 ms before an invalid one is known to be invalid, and a peer that sends invalid
++        // transactions is not penalized. So one with a rescue record is only taken from a peer with
++        // noban permission, and from any other dropped here, before validation and before the orphan
++        // pool: the mark is structural and reads no coin. It is not added to the reject filters, so
++        // the same transaction from a trusted peer is still taken; the peer is not penalized. Both its
++        // txid and its wtxid count as answered, so that a request for either goes to another peer at
++        // once rather than after a timeout.
++        if (HasP2MRRescueRecord(*ptx) && !pfrom.HasPermission(NetPermissionFlags::NoBan)) {
++            LogDebug(BCLog::MEMPOOLREJ, "dropped rescue spend %s (wtxid=%s) from peer=%d without noban permission\n",
++                     txid.ToString(), wtxid.ToString(), pfrom.GetId());
++            m_txdownloadman.ReceivedNotFound(pfrom.GetId(), {GenTxid{txid}, GenTxid{wtxid}});
++            return;
++        }
++
+         const auto& [should_validate, package_to_validate] = m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx);
+         if (!should_validate) {
+             if (pfrom.HasPermission(NetPermissionFlags::ForceRelay)) {
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 74a3268..26daff3 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -303,6 +303,24 @@ static bool IsSLHDSA128STemplate(std::span<const unsigned char> script)
+     return script.size() == 2 + SLHDSA128S_PUBKEY_SIZE && script[0] == SLHDSA128S_PUBKEY_SIZE && script.back() == OP_CHECKSLHDSA128S;
+ }
+ 
++bool IsP2MRRescueTemplate(std::span<const std::vector<unsigned char>> witness)
++{
++    if (witness.size() != 4) return false;
++    const std::vector<unsigned char>& token{witness[0]};
++    const std::vector<unsigned char>& script{witness[1]};
++    const std::vector<unsigned char>& control{witness[2]};
++    const std::vector<unsigned char>& annex{witness[3]};
++    if (control.size() <= P2MR_CONTROL_BASE_SIZE || (control[0] & TAPROOT_LEAF_MASK) != P2MR_LEAF_TRIPWIRED) return false;
++    if (script.size() != 34 || script[0] != 32 || script[33] != OP_CHECKSIG) return false;
++    const std::optional<P2MRRescueToken> parsed{ParseP2MRRescueToken(token)};
++    return parsed && IsP2MRRescueAnnex(annex, parsed->sid);
++}
++
++bool HasP2MRRescueRecord(const CTransaction& tx)
++{
++    return std::ranges::any_of(tx.vin, [](const CTxIn& txin) { return HasP2MRRescueRecordMark(txin.scriptWitness.stack); });
++}
++
+ /** Whether a size is that of the signature chunk at index `index` (0 to 15) of OP_CHECKSLHDSA128S. */
+ static bool IsSLHDSA128SSigChunkSize(size_t index, size_t size)
+ {
+@@ -414,9 +432,15 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+         if (witnessversion == 2 && witnessprogram.size() == WITNESS_V2_P2MR_SIZE && !p2sh) {
+             // P2MR spend (non-P2SH-wrapped, version 2, witness program size 32; see BIP 360)
+             std::span stack{tx.vin[i].scriptWitness.stack};
++            // The rescue template R1 (doc/p2mr-rescue.md) is the one exception to both limits: its
++            // annex is a rescue record, and its token may be up to 100 bytes. The script checks of the
++            // mempool turn it away while the rescue lane is closed: a token is then a signature,
++            // which fails.
++            const bool rescue_template{IsP2MRRescueTemplate(stack)};
+             if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
+                 // Annexes are nonstandard as long as no semantics are defined for them.
+-                return false;
++                if (!rescue_template) return false;
++                SpanPopBack(stack);
+             }
+             if (stack.size() < 2) {
+                 // Fewer than 2 stack elements; this is already invalid by consensus rules
+@@ -456,6 +480,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 if (slhdsa128s_template && stack.size() != SLHDSA128S_SIG_CHUNK_SIZES.size()) slhdsa128s_template = false;
+                 for (size_t j = 0; j < stack.size(); ++j) {
+                     if (stack[j].size() <= MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE) continue;
++                    if (rescue_template && j == 0) continue;
+                     if (slhdsa128s_template && IsSLHDSA128SSigChunkSize(j, stack[j].size())) continue;
+                     if (!sig_chunks_at || j < *sig_chunks_at || !IsMLDSA44SigChunkSize(j - *sig_chunks_at, stack[j].size())) return false;
+                 }
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index 308f4d1..15f63b9 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -175,6 +175,23 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+ * Also enforce a maximum stack item size limit and no annexes for tapscript spends.
+ */
+ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
++/**
++ * Whether the whole witness of a P2MR input is the one relayed rescue template, R1 of
++ * doc/p2mr-rescue.md: exactly a rescue token, the leaf script, the control block and the annex,
++ * where the leaf is of version 0xe0 at depth one or more, its script is byte for byte
++ * <32-byte key> OP_CHECKSIG, and the annex is exactly one rescue record for the token's statement.
++ * Structural only, and of constant cost: whether the lane is open and the token belongs to the key is
++ * for the script checks to find. The policy exception for R1 and the log of rescue spends use it.
++ */
++bool IsP2MRRescueTemplate(std::span<const std::vector<unsigned char>> witness);
++/**
++ * Whether a transaction carries a rescue record (doc/p2mr-rescue.md): an input whose witness has at
++ * least two elements, the last of which starts with 0x50 0x01. It reads no coin, so it holds for an
++ * orphan too; it may also hold for other witnesses whose last element starts so, P2TR and P2MR
++ * annexes, which are not standard, and P2WSH scripts starting with OP_RESERVED, which fail. The
++ * mempool's policy gate, its removal below the rescue lane's height and the P2P gate share it.
++ */
++bool HasP2MRRescueRecord(const CTransaction& tx);
+ /** Whether a script has OP_CHECKMLDSA44 among its opcodes; a 0xf0 byte inside pushed data does not count. */
+ bool HasMLDSA44Opcode(std::span<const unsigned char> script);
+ /** Whether a script has OP_CHECKSLHDSA128S among its opcodes; a 0xf1 byte inside pushed data does not count. */
+diff --git a/src/validation.cpp b/src/validation.cpp
+index a47db90..90364b4 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -371,6 +371,14 @@ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoi
+     if (P2MRECDisabledAfter(tip, coins, chainman)) {
+         flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
+     }
++    // The P2MR rescue lane (doc/p2mr-rescue.md) removes a restriction at its height rather than adding
++    // one, so it opens in the mempool only once it is open at the tip itself, not for the next block:
++    // ConsensusScriptChecks checks again with the tip's own flags, which keep
++    // SCRIPT_VERIFY_P2MR_NO_RESCUE below the height. The first rescue spend through the mempool
++    // goes in the block after the first one where the lane is open.
++    if (!tip || !DeploymentActiveAt(*tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) {
++        flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
++    }
+     return flags;
+ }
+ 
+@@ -457,6 +465,11 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // disconnectpool, out of reach, and the lock points of other transactions could still refer to
+     // a disconnected block. The parents are back now, the dependencies are mended, and the filter
+     // below mends the lock points of the transactions it keeps.
++    // And below the height of the P2MR rescue lane, which the mempool takes rescue spends from, at the
++    // tip itself (doc/p2mr-rescue.md), the transactions with a rescue record go, with their
++    // descendants. The mark is structural: no coin is read, and the leaf need not execute.
++    const bool remove_rescue_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) &&
++                                    !DeploymentActiveAt(*Assert(m_chain.Tip()), m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)};
+     const bool recheck_tripwired_spends{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
+     const script_verify_flags tripwired_flags{recheck_tripwired_spends ? MempoolScriptFlags(m_chain.Tip(), CoinsTip(), m_chainman) : SCRIPT_VERIFY_NONE};
+     CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
+@@ -477,6 +490,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+         if (remove_mldsa44_spends && SpendsP2MRMLDSA44Leaf(tx, mempool_view)) return true;
+         if (remove_tripwired_spends && SpendsP2MRTripwiredLeaf(tx, mempool_view)) return true;
+         if (remove_slhdsa128s_spends && SpendsP2MRSLHDSA128SLeaf(tx, mempool_view)) return true;
++        if (remove_rescue_spends && HasP2MRRescueRecord(tx)) return true;
+         if (recheck_tripwired_spends && TripwiredSpendFails(tx, mempool_view, tripwired_flags, m_chainman.m_validation_cache)) return true;
+ 
+         // The transaction must be final.
+@@ -1271,6 +1285,16 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
+     const CTransaction& tx = *ws.m_ptx;
+     TxValidationState& state = ws.m_state;
+ 
++    // A rescue spend puts the key's secret, y = d, in the mempool (doc/p2mr-rescue.md). While elliptic
++    // curve checks in leaf version 0xe0 still work, anyone who sees it could sign an ordinary spend of
++    // the same output with d, so the mempool takes it only when they are disabled for the next block,
++    // as M3 decides from the confirmed UTXO set. A policy check, not a script flag: the rule does not
++    // depend on it, and a block can still include such a spend.
++    if (HasP2MRRescueRecord(tx) && !P2MRECDisabledAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)) {
++        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "p2mr-rescue-ec-enabled",
++                             "a rescue spend is only relayed once elliptic curve checks in leaf version 0xe0 are disabled for the next block");
++    }
++
+     const script_verify_flags scriptVerifyFlags{MempoolScriptFlags(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)};
+ 
+     // Check input scripts and signatures.
+-- 
+2.43.0
+

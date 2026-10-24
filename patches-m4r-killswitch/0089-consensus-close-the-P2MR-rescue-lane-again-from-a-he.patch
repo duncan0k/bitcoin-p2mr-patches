@@ -1,0 +1,605 @@
+From b7788d10fa8d421abc63b9e85bfccb73db6e38e5 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:31 +0000
+Subject: [PATCH] consensus: close the P2MR rescue lane again from a height,
+ the kill switch
+
+The kill switch of the M4-R design (section 11), prepared and tested
+with M4-R1 and not released with it: if the proof system turns out to
+allow forgeries or malleated proofs, or the verifier a bug that passes
+an invalid proof, a build with this patch closes the rescue lane from a
+height on. It only restricts the rules, a soft fork, and needs no key.
+
+- A buried deployment p2mr_rescue_end. From its height GetBlockScriptFlags
+  sets SCRIPT_VERIFY_P2MR_NO_RESCUE again, so that a rescue token is a
+  signature like any other. ARK0_RESCUE_END_HEIGHT is left unset, to be
+  chosen when the patch is used; another custom signet gives it with
+  -signetrescueend, above -signetrescue, and regtest with
+  -testactivationheight=p2mr_rescue_end@N, above the p2mr_rescue height.
+- The mempool follows it, or the next block template would fail
+  TestBlockValidity: MempoolScriptFlags adds the restriction as the next
+  block will have it, which agrees with the second check on the tip's
+  flags; the block that leaves the next one at the height removes the
+  transactions with a rescue record, with their descendants; and so does
+  a reorganization that leaves the next block at or above the height,
+  with the same test as below the lane's own height.
+- gettripwireinfo reports end_height, and the lane as closed for the next
+  block and for the mempool from there; the startup log names the
+  height.
+
+Rescue spends confirmed below the height stay valid.
+feature_p2mr_rescue_killswitch.py covers the mempool at the boundary,
+reorganizations across it in both directions and one that ends just
+below it.
+---
+ doc/p2mr-rescue.md                            |  13 ++
+ src/chainparams.cpp                           |  33 +++-
+ src/chainparamsbase.cpp                       |   3 +-
+ src/consensus/params.h                        |  10 +-
+ src/deploymentinfo.cpp                        |   4 +
+ src/init.cpp                                  |   3 +
+ src/kernel/chainparams.cpp                    |  16 ++
+ src/kernel/chainparams.h                      |  14 ++
+ src/rpc/blockchain.cpp                        |   9 +-
+ src/validation.cpp                            |  25 ++-
+ .../feature_p2mr_rescue_killswitch.py         | 171 ++++++++++++++++++
+ test/functional/test_runner.py                |   1 +
+ 12 files changed, 295 insertions(+), 7 deletions(-)
+ create mode 100755 test/functional/feature_p2mr_rescue_killswitch.py
+
+diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
+index 9c508cd..21a4b41 100644
+--- a/doc/p2mr-rescue.md
++++ b/doc/p2mr-rescue.md
+@@ -230,3 +230,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
+   vectors.
+ - `bench_bitcoin -filter='.*P2MRRescue.*'`: the verifier, valid and in its most expensive invalid
+   form, and the whole path of a check.
++
++## Kill switch
++
++This build carries the kill switch of the M4-R design (section 11), which is not part of the M4-R1
++release: from the height of the buried deployment `p2mr_rescue_end` (`ARK0_RESCUE_END_HEIGHT` on
++Ark-0, not set; `-signetrescueend=<height>` on another custom signet, above `-signetrescue`;
++`-testactivationheight=p2mr_rescue_end@<height>` on regtest), blocks are checked with
++`SCRIPT_VERIFY_P2MR_NO_RESCUE` again. It only restricts the rules, a soft fork, and needs no key. The
++mempool follows it: it checks with the restriction once the next block is at the height; the block
++before the height removes the transactions with a rescue record, with their descendants, and so does
++a reorganization that leaves the next block at or above it; `gettripwireinfo` reports `end_height`
++and stops reporting `mempool_accepts`. Rescue spends confirmed below the height stay valid.
++`feature_p2mr_rescue_killswitch.py` tests it.
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 071bbaf..2e8fbdf 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -83,7 +83,7 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+     // genesis block and message start): none of the options that change the rules of a custom signet
+     // may change its rules.
+     if (options.challenge && IsDefaultSignetChallenge(*options.challenge)) {
+-        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue"}) {
++        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue", "-signetrescueend"}) {
+             if (!args.GetArgs(arg).empty()) {
+                 throw std::runtime_error(strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", arg));
+             }
+@@ -231,6 +231,23 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.rescue_height = *height;
+     }
++    // The kill switch of the rescue lane (doc/p2mr-rescue.md) closes it again from a height above the
++    // one it opens at.
++    if (!args.GetArgs("-signetrescueend").empty()) {
++        const auto values = args.GetArgs("-signetrescueend");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetrescueend cannot be multiple values.");
++        }
++        if (!options.rescue_height) {
++            throw std::runtime_error("-signetrescueend requires -signetrescue.");
++        }
++        const auto height{ToIntegral<int32_t>(values[0])};
++        if (!height || *height <= *options.rescue_height || *height == std::numeric_limits<int>::max()) {
++            throw std::runtime_error(strprintf("-signetrescueend must be a height above the -signetrescue height %d and below %d, not '%s'.",
++                                               *options.rescue_height, std::numeric_limits<int>::max(), values[0]));
++        }
++        options.rescue_end_height = *height;
++    }
+ }
+ 
+ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& options)
+@@ -280,6 +297,17 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+             throw std::runtime_error(strprintf("The p2mr_rescue height must be at or above the p2mr_tripwire height %d, not %d.", tripwire_height, rescue->second));
+         }
+     }
++    // The kill switch (doc/p2mr-rescue.md) closes the lane above the height it opens at.
++    if (const auto end{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_RESCUE_END)}; end != options.activation_heights.end()) {
++        const auto rescue{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_RESCUE)};
++        const auto tripwire{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_TRIPWIRE)};
++        const int rescue_height{rescue != options.activation_heights.end() ? rescue->second :
++                                options.tripwire                       ? options.tripwire->height :
++                                tripwire != options.activation_heights.end() ? tripwire->second : 0};
++        if (end->second <= rescue_height) {
++            throw std::runtime_error(strprintf("The p2mr_rescue_end height must be above the p2mr_rescue height %d, not %d.", rescue_height, end->second));
++        }
++    }
+ 
+     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {
+         std::vector<std::string> vDeploymentParams = SplitString(strDeployment, ':');
+@@ -342,6 +370,9 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+     if (chain != ChainType::SIGNET && args.IsArgSet("-signetrescue")) {
+         throw std::runtime_error("-signetrescue can only be used with signet.");
+     }
++    if (chain != ChainType::SIGNET && args.IsArgSet("-signetrescueend")) {
++        throw std::runtime_error("-signetrescueend can only be used with signet.");
++    }
+     if (chain != ChainType::SIGNET && chain != ChainType::REGTEST && args.IsArgSet("-signettripwire")) {
+         throw std::runtime_error("-signettripwire can only be used with signet or regtest.");
+     }
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index b08d603..d6dbd44 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s, p2mr_rescue). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s, p2mr_rescue, p2mr_rescue_end). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+@@ -28,6 +28,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetmldsa44=<height>", "Execute OP_CHECKMLDSA44 in P2MR leaves from <height> (at least 1) on; see doc/p2mr-mldsa44.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signettripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe0 from <height> (at least 1) on, and from there fail their elliptic curve signature checks in every block whose parent leaves one of these tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge and -signetmldsa44 below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_tripwire, which must be above that of p2mr_mldsa44 (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetrescue=<height>", "Open the P2MR rescue lane from <height> (at least 1, and at or above the -signettripwire height) on: in executed P2MR leaves of leaf version 0xe0, an elliptic curve signature check whose signature is a rescue token is checked with the rescue proof in the input's annex; see doc/p2mr-rescue.md. This relaxes the rules (a hard fork): every node must use the same value before the chain reaches <height>. Requires -signetchallenge and -signettripwire, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetrescueend=<height>", "Close the P2MR rescue lane again from <height> on, above the -signetrescue height: the kill switch of doc/p2mr-rescue.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetrescue (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetslhdsa128s=<height>", "Execute OP_CHECKSLHDSA128S in P2MR leaves from <height> (at least 1) on; see doc/p2mr-slhdsa128s.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index b01a13d..e1783cd 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -36,8 +36,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_P2MR_TRIPWIRE,
+     DEPLOYMENT_P2MR_SLHDSA128S,
+     DEPLOYMENT_P2MR_RESCUE,
++    DEPLOYMENT_P2MR_RESCUE_END,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_RESCUE; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_RESCUE_END; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -168,6 +169,11 @@ struct Params {
+     /** The network id rescue proofs are bound to: SHA256 of the signet challenge on a signet,
+      * SHA256("regtest") on regtest, unset elsewhere (doc/p2mr-rescue.md). */
+     std::optional<uint256> p2mr_rescue_network_id;
++    /** Block height from which the P2MR rescue lane is closed again, the kill switch of
++     * doc/p2mr-rescue.md: from it on, blocks are checked with SCRIPT_VERIFY_P2MR_NO_RESCUE again.
++     * std::numeric_limits<int>::max() but where ARK0_RESCUE_END_HEIGHT, -signetrescueend or
++     * -testactivationheight=p2mr_rescue_end@<height> sets it. Above P2MRRescueHeight. */
++    int P2MRRescueEndHeight;
+     /** Don't warn about unknown BIP 9 activations below this height.
+      * This prevents us from warning about the CSV and segwit activations. */
+     int MinBIP9WarningHeight;
+@@ -253,6 +259,8 @@ struct Params {
+             return P2MRSLHDSA128SHeight;
+         case DEPLOYMENT_P2MR_RESCUE:
+             return P2MRRescueHeight;
++        case DEPLOYMENT_P2MR_RESCUE_END:
++            return P2MRRescueEndHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index 50b7c3b..bc7933e 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -43,6 +43,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "p2mr_slhdsa128s";
+     case Consensus::DEPLOYMENT_P2MR_RESCUE:
+         return "p2mr_rescue";
++    case Consensus::DEPLOYMENT_P2MR_RESCUE_END:
++        return "p2mr_rescue_end";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -69,6 +71,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S;
+     } else if (name == "p2mr_rescue") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE;
++    } else if (name == "p2mr_rescue_end") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE_END;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index d0bc3ec..574aa5a 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -977,6 +977,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+                 chainparams.GetChainType() == ChainType::SIGNET ? "Signet" : "Regtest",
+                 chainparams.GetConsensus().P2MRRescueHeight, HexStr(*Assert(chainparams.GetConsensus().p2mr_rescue_network_id)));
+     }
++    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_RESCUE_END)) {
++        LogInfo("P2MR rescue lane closed again from height %d (the kill switch)", chainparams.GetConsensus().P2MRRescueEndHeight);
++    }
+ 
+     // Warn if unrecognized section name are present in the config file.
+     bilingual_str warnings;
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 822a5c7..5c03768 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -217,6 +217,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRRescueEndHeight = std::numeric_limits<int>::max();
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -353,6 +354,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRRescueEndHeight = std::numeric_limits<int>::max();
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -465,6 +467,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRRescueEndHeight = std::numeric_limits<int>::max();
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -671,6 +674,15 @@ public:
+             consensus.P2MRRescueHeight = IsArk0SignetChallenge(bin) ? ARK0_RESCUE_HEIGHT : std::numeric_limits<int>::max();
+         }
+         consensus.p2mr_rescue_network_id = P2MRRescueNetworkId(bin);
++        // The kill switch of the rescue lane (doc/p2mr-rescue.md): closed again from
++        // -signetrescueend, which ReadSigNetArgs accepts only above -signetrescue, or on Ark-0 from
++        // ARK0_RESCUE_END_HEIGHT.
++        if (options.rescue_end_height) {
++            assert(options.rescue_height && *options.rescue_height < *options.rescue_end_height);
++            consensus.P2MRRescueEndHeight = *options.rescue_end_height;
++        } else {
++            consensus.P2MRRescueEndHeight = IsArk0SignetChallenge(bin) ? ARK0_RESCUE_END_HEIGHT : std::numeric_limits<int>::max();
++        }
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         // A different target spacing for the retargets from a height on.
+@@ -794,6 +806,7 @@ public:
+         consensus.P2MRTripwireHeight = 0; // Always active unless overridden, without tripwire outputs
+         consensus.P2MRSLHDSA128SHeight = 0; // Always active unless overridden
+         consensus.P2MRRescueHeight = 0; // Follows the final p2mr_tripwire height unless overridden, see below
++        consensus.P2MRRescueEndHeight = std::numeric_limits<int>::max(); // The kill switch: unless overridden, never
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -860,6 +873,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE:
+                 consensus.P2MRRescueHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE_END:
++                consensus.P2MRRescueEndHeight = int{height};
++                break;
+             }
+         }
+         // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 9a7baf0..487b090 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -89,6 +89,14 @@ inline constexpr int ARK0_RESCUE_HEIGHT{std::numeric_limits<int>::max()};
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
+ 
++/**
++ * Height from which the Ark-0 signet closes the P2MR rescue lane again: the kill switch of
++ * doc/p2mr-rescue.md, a soft fork kept ready for a forgery or a verifier bug. Not set: this is the
++ * prepared patch, and the height is chosen when it is used, above ARK0_RESCUE_HEIGHT.
++ */
++inline constexpr int ARK0_RESCUE_END_HEIGHT{std::numeric_limits<int>::max()};
++static_assert(ARK0_RESCUE_END_HEIGHT >= ARK0_RESCUE_HEIGHT);
++
+ /** The bytes regtest's rescue network id is the SHA256 of (doc/p2mr-rescue.md). */
+ inline constexpr std::string_view P2MR_RESCUE_REGTEST_ID{"regtest"};
+ 
+@@ -261,6 +269,12 @@ public:
+          * with a tripwire at or below its height.
+          */
+         std::optional<int> rescue_height{};
++        /**
++         * Height from which the rescue lane is closed again (-signetrescueend,
++         * the kill switch of doc/p2mr-rescue.md). Only accepted above
++         * rescue_height.
++         */
++        std::optional<int> rescue_end_height{};
+     };
+ 
+     /**
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 605b271..e0be356 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1486,6 +1486,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+@@ -1571,6 +1572,7 @@ static RPCHelpMan gettripwireinfo()
+                 {RPCResult::Type::BOOL, "ec_disabled_next_block", "whether elliptic curve signature checks in those leaves fail in the next block"},
+                 {RPCResult::Type::OBJ, "rescue", /*optional=*/true, "the P2MR rescue lane (doc/p2mr-rescue.md), only where it has a height", {
+                     {RPCResult::Type::NUM, "height", "the height from which the lane is open"},
++                    {RPCResult::Type::NUM, "end_height", /*optional=*/true, "the height from which the kill switch closes the lane again, where it has one"},
+                     {RPCResult::Type::BOOL, "active_next_block", "whether the lane is open in the next block"},
+                     {RPCResult::Type::BOOL, "mempool_accepts", "whether the mempool takes rescue spends: the lane is open at the tip itself, and elliptic curve checks in those leaves fail in the next block"},
+                     {RPCResult::Type::STR_HEX, "network_id", "the network id rescue proofs are bound to"},
+@@ -1621,8 +1623,11 @@ static RPCHelpMan gettripwireinfo()
+         // the next block), and the policy check on the state of elliptic curve checks.
+         UniValue rescue(UniValue::VOBJ);
+         rescue.pushKV("height", consensus.P2MRRescueHeight);
+-        rescue.pushKV("active_next_block", DeploymentActiveAfter(&tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE));
+-        rescue.pushKV("mempool_accepts", DeploymentActiveAt(tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) && ec_disabled_next_block);
++        // The kill switch (doc/p2mr-rescue.md) closes the lane for the next block from its height.
++        const bool closed_next_block{DeploymentActiveAfter(&tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)};
++        rescue.pushKV("active_next_block", DeploymentActiveAfter(&tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) && !closed_next_block);
++        rescue.pushKV("mempool_accepts", DeploymentActiveAt(tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) && !closed_next_block && ec_disabled_next_block);
++        if (DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)) rescue.pushKV("end_height", consensus.P2MRRescueEndHeight);
+         rescue.pushKV("network_id", HexStr(*CHECK_NONFATAL(consensus.p2mr_rescue_network_id)));
+         UniValue statements(UniValue::VARR);
+         statements.push_back(strprintf("%02x", P2MR_RESCUE_STATEMENT_HMAC));
+diff --git a/src/validation.cpp b/src/validation.cpp
+index c136b9c..d3dc488 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -400,6 +400,11 @@ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoi
+     if (!tip || !DeploymentActiveAt(*tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) {
+         flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
+     }
++    // The kill switch closes the lane again (doc/p2mr-rescue.md): a restriction, so it applies as the
++    // next block will have it.
++    if (DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)) {
++        flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
++    }
+     return flags;
+ }
+ 
+@@ -489,8 +494,10 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // And below the height of the P2MR rescue lane, which the mempool takes rescue spends from, at the
+     // tip itself (doc/p2mr-rescue.md), the transactions with a rescue record go, with their
+     // descendants. The mark is structural: no coin is read, and the leaf need not execute.
+-    const bool remove_rescue_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) &&
+-                                    !DeploymentActiveAt(*Assert(m_chain.Tip()), m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)};
++    // So do they where the kill switch closes the lane for the next block.
++    const bool remove_rescue_spends{(DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) &&
++                                     !DeploymentActiveAt(*Assert(m_chain.Tip()), m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) ||
++                                    DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)};
+     const bool recheck_tripwired_spends{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
+     const script_verify_flags tripwired_flags{recheck_tripwired_spends ? MempoolScriptFlags(m_chain.Tip(), CoinsTip(), m_chainman) : SCRIPT_VERIFY_NONE};
+     CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
+@@ -2500,6 +2507,10 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+     if (!DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) {
+         flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
+     }
++    // The kill switch (doc/p2mr-rescue.md): from its height the lane is closed again, a soft fork.
++    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)) {
++        flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
++    }
+ 
+     return flags;
+ }
+@@ -3442,6 +3453,16 @@ bool Chainstate::ConnectTip(
+         });
+     }
+ 
++    // When this block is the last before the kill switch closes the rescue lane (doc/p2mr-rescue.md),
++    // the rescue spends in the mempool go, with their descendants: the next block cannot hold them.
++    // During a reorganization MaybeUpdateMempoolForReorg does this instead.
++    if (m_mempool && !reorganizing && DeploymentActiveAfter(pindexNew, m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END) &&
++        !DeploymentActiveAt(*pindexNew, m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE_END)) {
++        m_mempool->removeForReorg(m_chain, [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
++            return HasP2MRRescueRecord(it->GetTx());
++        });
++    }
++
+     // The rescue spends of this block (doc/p2mr-rescue.md), found before ConnectBlock, now that it
+     // is in the active chain, under the same restriction as the log of tripwire spends below.
+     for (const RescueLogEntry& rescue : rescue_log) {
+diff --git a/test/functional/feature_p2mr_rescue_killswitch.py b/test/functional/feature_p2mr_rescue_killswitch.py
+new file mode 100755
+index 0000000..bb19fa3
+--- /dev/null
++++ b/test/functional/feature_p2mr_rescue_killswitch.py
+@@ -0,0 +1,171 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the kill switch of the P2MR rescue lane (doc/p2mr-rescue.md, section 11), on regtest.
++
++Not part of the M4-R1 release: the prepared patch that closes the lane again from END
++(-testactivationheight=p2mr_rescue_end@END here), a soft fork. Heights: tripwire rules from 220 with
++a tripwire output that never existed (elliptic curve checks disabled from there), the lane from 230,
++END = 240.
++
++  node 0  the rules and the kill switch, where the chain is mined
++  node 1  the same, which builds a competing branch for a reorganization that ends at END - 1
++
++Covered: a rescue spend in the mempool when a block connects END - 1 is removed, and the template and
++the next block are fine; at tip END - 1 new rescue spends are refused, and a block at END with one is
++invalid; reorganizations across END in both directions, and one that ends exactly at END - 1; rescue
++spends confirmed before END stay valid (-reindex).
++"""
++
++import hashlib
++
++from test_framework.messages import COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_rescue import (
++    P2MR_LEAF_TRIPWIRED,
++    RESCUE_STATEMENT_HMAC,
++    WALLET_V1_SCHNORR_K,
++    find_prover,
++    network_id_regtest,
++    prove,
++    rescue_annex,
++    rescue_key,
++    rescue_message,
++    rescue_pub,
++    rescue_sighash,
++    rescue_token,
++    rescue_y,
++)
++from test_framework.script import CScript, OP_CHECKSIG, OP_RETURN
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++H3 = 220
++H4R = 230
++END = 240
++FUND_SATS = 1_000_000
++FEE_SATS = 60_000
++EC_DISABLED_ERROR = "Elliptic curve signature checks are disabled in this leaf"
++ARGS = [f"-signettripwire={H3}@{'11' * 32}:0", f"-testactivationheight=p2mr_rescue@{H4R}", f"-testactivationheight=p2mr_rescue_end@{END}"]
++
++
++class P2MRRescueKillSwitchTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 2
++        self.extra_args = [ARGS, ARGS]
++
++    def rescue_tx(self, utxo):
++        x = hashlib.sha256(b"feature_p2mr_rescue_killswitch").digest()
++        y = rescue_y(WALLET_V1_SCHNORR_K, x, 0)
++        tx = CTransaction()
++        tx.vin = [CTxIn(COutPoint(utxo["txid"], utxo["vout"]), b"", 0xfffffffd)]
++        tx.vout = [CTxOut(FUND_SATS - FEE_SATS, self.wallet.get_output_script())]
++        leaf = self.tree.leaves["rescue"]
++        pub = rescue_pub(WALLET_V1_SCHNORR_K, 0, y)
++        sighash = rescue_sighash(tx, 0, [CTxOut(FUND_SATS, self.tree.scriptPubKey)], leaf.script, network_id_regtest(), RESCUE_STATEMENT_HMAC, pub)
++        _, proof = prove(self.prover, WALLET_V1_SCHNORR_K, 0, x, rescue_message(sighash, network_id_regtest(), self.pubkey))
++        tx.wit.vtxinwit = [CTxInWitness()]
++        tx.wit.vtxinwit[0].scriptWitness.stack = [rescue_token(WALLET_V1_SCHNORR_K, 0, y), bytes(leaf.script), leaf.control_block, rescue_annex(proof)]
++        return tx
++
++    def mine_to(self, height):
++        node = self.nodes[0]
++        self.generate(node, height - node.getblockcount())
++        assert_equal(node.getblockcount(), height)
++
++    def empty_block(self):
++        return self.nodes[0].generateblock(self.wallet.get_address(), [], called_by_framework=True)["hash"]
++
++    def run_test(self):
++        node = self.nodes[0]
++        self.prover = find_prover(self.config)
++        self.wallet = MiniWallet(node)
++        self.wallet.rescan_utxos()
++        y = rescue_y(WALLET_V1_SCHNORR_K, hashlib.sha256(b"feature_p2mr_rescue_killswitch").digest(), 0)
++        self.pubkey = rescue_key(y)
++        self.tree = p2mr_construct([("rescue", CScript([self.pubkey, OP_CHECKSIG]), P2MR_LEAF_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        fund = CTransaction()
++        fund.vin = [CTxIn(COutPoint(int(utxo["txid"], 16), utxo["vout"]))]
++        fund.vout = [CTxOut(FUND_SATS, self.tree.scriptPubKey) for _ in range(8)]
++        fund.vout.append(CTxOut(int(utxo["value"] * COIN) - 8 * FUND_SATS - 20_000, self.wallet.get_output_script()))
++        self.wallet.sign_tx(fund)
++        self.wallet.sendrawtransaction(from_node=node, tx_hex=fund.serialize().hex())
++        self.generate(node, 1)
++        outs = [{"txid": fund.txid_int, "vout": n} for n in range(8)]
++
++        self.log.info("Startup log, and the lane open between H4R and END")
++        assert node.debug_log_path.read_text().count(f"P2MR rescue lane closed again from height {END} (the kill switch)") == 1
++        self.mine_to(H4R + 1)
++        info = node.gettripwireinfo()["rescue"]
++        assert_equal((info["end_height"], info["active_next_block"], info["mempool_accepts"]), (END, True, True))
++        before = self.rescue_tx(outs[0])
++        node.sendrawtransaction(before.serialize().hex())
++        confirmed = self.generate(node, 1)[0]
++        assert before.txid_hex in node.getblock(confirmed)["tx"]
++
++        self.log.info("A rescue spend in the mempool when END - 1 connects goes, with its descendant; the next block is fine")
++        self.mine_to(END - 2)
++        pooled = self.rescue_tx(outs[1])
++        node.sendrawtransaction(pooled.serialize().hex())
++        self.wallet.rescan_utxos()
++        child = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=self.wallet.get_utxo(txid=pooled.txid_hex))
++        assert {pooled.txid_hex, child["txid"]} <= set(node.getrawmempool())
++        self.empty_block()
++        self.sync_blocks()
++        assert_equal(node.getblockcount(), END - 1)
++        assert pooled.txid_hex not in node.getrawmempool() and child["txid"] not in node.getrawmempool()
++        info = node.gettripwireinfo()["rescue"]
++        assert_equal((info["active_next_block"], info["mempool_accepts"]), (False, False))
++        node.getblocktemplate({"rules": ["segwit"]})
++
++        self.log.info("Tip END - 1: a new rescue spend is refused; a block at END with one is invalid")
++        late = self.rescue_tx(outs[2])
++        assert_raises_rpc_error(-26, EC_DISABLED_ERROR, node.sendrawtransaction, late.serialize().hex())
++        assert_raises_rpc_error(-25, EC_DISABLED_ERROR, node.generateblock, self.wallet.get_address(), [late.serialize().hex()], called_by_framework=True)
++        self.generate(node, 3)
++
++        self.log.info("Reorganization back below END - 1: the mempool takes rescue spends again; forward over END - 1: they go")
++        tip = node.getbestblockhash()
++        at_end_minus_2 = node.getblockhash(END - 2)
++        node.invalidateblock(at_end_minus_2)
++        assert_equal(node.getblockcount(), END - 3)
++        again = self.rescue_tx(outs[3])
++        node.sendrawtransaction(again.serialize().hex())
++        assert again.txid_hex in node.getrawmempool()
++        node.reconsiderblock(at_end_minus_2)
++        assert_equal(node.getbestblockhash(), tip)
++        assert again.txid_hex not in node.getrawmempool()
++
++        self.log.info("A reorganization that ends exactly at END - 1 removes them too")
++        self.disconnect_nodes(0, 1)
++        node.invalidateblock(node.getblockhash(END - 1))
++        assert_equal(node.getblockcount(), END - 2)
++        pool = self.rescue_tx(outs[4])
++        node.sendrawtransaction(pool.serialize().hex())
++        assert pool.txid_hex in node.getrawmempool()
++        # Node 1 replaces the block at END - 2 and adds one: a branch that ends at END - 1 and leaves
++        # node 0's tip, at END - 2, out.
++        n1 = self.nodes[1]
++        n1.invalidateblock(n1.getblockhash(END - 2))
++        self.generate(n1, 2, sync_fun=self.no_op)
++        assert_equal(n1.getblockcount(), END - 1)
++        self.connect_nodes(0, 1)
++        self.wait_until(lambda: node.getbestblockhash() == n1.getbestblockhash())
++        assert_equal(node.getblockcount(), END - 1)
++        assert pool.txid_hex not in node.getrawmempool()
++
++        self.log.info("Rescue spends confirmed before END stay valid")
++        self.generate(node, 2)
++        assert before.txid_hex in node.getblock(confirmed)["tx"]
++        height = node.getblockcount()
++        self.restart_node(0, extra_args=ARGS + ["-reindex"])
++        self.wait_until(lambda: node.getblockcount() >= height)
++        assert node.getblock(confirmed)["confirmations"] > 0
++
++
++if __name__ == '__main__':
++    P2MRRescueKillSwitchTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 4673f0f..12875e7 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -292,6 +292,7 @@ BASE_SCRIPTS = [
+     'feature_p2mr_slhdsa128s.py',
+     'feature_p2mr_rescue.py',
+     'feature_p2mr_rescue_signet.py',
++    'feature_p2mr_rescue_killswitch.py',
+     'feature_p2mr_tripwire.py',
+     'feature_signet_pqblock.py',
+     'wallet_p2mr.py',
+-- 
+2.43.0
+

@@ -1,0 +1,271 @@
+From 8bbd630aca53768a7b54a91a0f3f14bc17c9e641 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:10 +0000
+Subject: [PATCH 88/88] doc: describe the P2MR rescue lane
+
+doc/p2mr-rescue.md: where the lane applies, the token and the annex, the
+rules and the signature message, the library, the provisional validation
+weight and its bounds, the activation and the hard fork, the policy, the
+RPC and logs, and the tests.
+---
+ doc/p2mr-rescue.md | 232 +++++++++++++++++++++++++++++++++++++++++++++
+ doc/p2mr.md        |   4 +-
+ 2 files changed, 235 insertions(+), 1 deletion(-)
+ create mode 100644 doc/p2mr-rescue.md
+
+diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
+new file mode 100644
+index 0000000..9c508cd
+--- /dev/null
++++ b/doc/p2mr-rescue.md
+@@ -0,0 +1,232 @@
++# The P2MR rescue lane: elliptic curve checks of leaf version 0xe0 rescued with a proof of seed knowledge
++
++This build adds a rescue lane to P2MR leaves of leaf version `0xe0` ([p2mr-tripwire.md](p2mr-tripwire.md)).
++From a set height on, an elliptic curve signature check in such a leaf whose signature element is a
++**rescue token** is checked by verifying a VOLE-in-the-head proof, carried in the input's annex, that
++the spender knows the seed the key was derived from, without revealing the seed. It is part M4-R1 of
++the M4 series of the Ark-0 test signet. It is not part of BIP 360 or BIP 361, it is not proposed for
++Bitcoin, and it does not make any network quantum-resistant.
++
++The proof system is that of ark0-rescue `SPEC.md` v0.2 revision 2 (version byte `0x02`), statement
++`0x01`: knowledge of `x` with `HMAC-SHA256(K, x || suffix) = y`. Its security rests on an argument in the
++classical random oracle model with a 128-bit target; its security against quantum attackers is
++conjectured, not proven, and it has had no external review.
++
++**It relaxes the rules: a hard fork.** A leaf such as `<P> OP_CHECKSIG` frozen by the tripwire has no
++valid witness under the earlier rules; the lane makes some valid. A node without this build refuses
++the first block that contains a rescue spend and stops there (see [Activation](#activation)).
++
++**Not active on Ark-0.** The height for the Ark-0 signet, `ARK0_RESCUE_HEIGHT`, is not decided: until
++it is, it is `std::numeric_limits<int>::max()` and the lane stays closed there. Regtest and custom
++signets given `-signetrescue` have it.
++
++**Publishing a rescue spend publishes the key.** The token carries `y`, which is the Schnorr secret key
++`d` of the spent output. While elliptic curve checks in the leaf work, anyone who sees a rescue spend
++can spend the same output with an ordinary signature; once the checks are disabled, the output's
++safety depends on them staying disabled, that is, on no reorganization undoing the tripwire spend.
++The mempool takes rescue spends only when the checks are disabled for the next block (see
++[Policy](#policy)); the rule itself does not depend on it.
++
++## Where the lane applies
++
++A check is a rescue check when all of these hold, rule R1:
++
++- it is `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a 32-byte public key and a
++  non-empty signature element;
++- it executes in a P2MR leaf of version `0xe0` at depth one or more, with
++  `SCRIPT_VERIFY_P2MR_TRIPWIRE` (the leaf executes);
++- `SCRIPT_VERIFY_P2MR_NO_RESCUE` does not apply (the lane is open for the block);
++- the signature element is a well-formed rescue token.
++
++This is decided before the tripwire rule of [p2mr-tripwire.md](p2mr-tripwire.md) (rule 5 there), and
++whatever the state of elliptic curve checks: from the height on, a token is a rescue check whether
++the checks are disabled or not. Every other check is as before: with the checks disabled it fails
++with `P2MR_EC_DISABLED`, otherwise it is a BIP 340 check. Leaf version `0xc0`, P2TR, legacy and
++witness v0 scripts, `OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S` are not affected.
++
++`SCRIPT_VERIFY_P2MR_NO_RESCUE` restricts: with it, a token is a signature like any other, which can
++never be a valid one. It is set for every block below the lane's height, and is in neither
++`STANDARD_SCRIPT_VERIFY_FLAGS` nor `MANDATORY_SCRIPT_VERIFY_FLAGS`, so that adding a flag only ever
++makes fewer spends valid.
++
++## Encoding
++
++```
++token = 0x03 || sid || pub         pub = u8(|K|) || K || u8(suffix) || y     (SPEC.md section 7.5)
++annex = 0x50 || 0x01 || proof      proof: 130,218 bytes for statement 0x01   (SPEC.md section 10)
++```
++
++An element is a token exactly when: its first byte is `0x03`; `sid` is a registered statement id
++(only `0x01`); `1 <= |K| <= 64`, every byte of `K` in `0x20..0x7e`; `y` is 32 bytes and nothing
++follows; and the element is not 64 or 65 bytes long, so `|K|` is neither 28 nor 29. The last
++condition keeps every element that can be a valid BIP 340 signature from being a token. A token is
++`|K| + 36` bytes; for the Ark-0 web wallet v1, `K = "ark0-wallet v1 schnorr"`, 58 bytes. There is
++no error for a malformed token: it is not a token.
++
++The annex is exactly one record: `0x50`, the record type `0x01` ("P2MR rescue proof v1") and the
++proof, with no length prefix. Spends that make no rescue check keep the annex semantics of BIP 341.
++
++## Execution
++
++In this order, after the 50 of BIP 342 for a non-empty signature and the public key size check:
++
++| Rule | | Error |
++|---|---|---|
++| R2 | charge `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` before any hashing or parsing of the annex | `TAPSCRIPT_VALIDATION_WEIGHT` |
++| R3 | at most one rescue check per input, counted before the signature cache is looked at | `P2MR_RESCUE_REPEAT` |
++| R4 | the input's annex is exactly one rescue record for the token's statement | `P2MR_RESCUE_ANNEX` |
++| R5 | `0 < y < n` and `x(y*G)` is the check's key, either parity (libsecp256k1) | `P2MR_RESCUE_KEY` |
++| R6 | the rescue signature message (below); missing transaction data fails as `MissingDataBehavior` says | `P2MR_RESCUE_PROOF` |
++| R7 | `voleith_verify_s1(K, suffix, y, m, proof)` with `m` of exactly 96 bytes; any error in the library is a rejection | `P2MR_RESCUE_PROOF` |
++| R8 | otherwise the check passes as a valid signature does: `OP_CHECKSIG` pushes true, `OP_CHECKSIGVERIFY` goes on, `OP_CHECKSIGADD` adds 1 | |
++
++Because of R3, a leaf with two checks of keys that need rescuing (a 2-of-2, for example) cannot be
++rescued.
++
++### Rescue signature message
++
++```
++rescue_sighash = TaggedHash("P2MR/Rescue/Sighash",
++      0x00 (epoch) || 0x00 (hash type: SIGHASH_DEFAULT only)
++   || nVersion || nLockTime
++   || sha_prevouts || sha_amounts || sha_scriptpubkeys || sha_sequences || sha_outputs
++   || 0x03 (spend type: ext_flag 1, annex present) || u32le(input index)
++   || tapleaf_hash || 0x03 (key_version) || u32le(codesep_pos)
++   || network_id || sid || SHA256(pub))
++network_id     = SHA256(signet challenge) on a signet, SHA256("regtest") on regtest
++pk_commitment  = TaggedHash("P2MR/Rescue/Key", 0x00 || P)
++m              = rescue_sighash || network_id || pk_commitment
++```
++
++The message commits to everything a BIP 341 `SIGHASH_ALL` message does, but not to the annex,
++which holds the proof. Like a BIP 341 signature, it does not commit to the other inputs' scriptSigs,
++to the control block, or to witness elements the script does not check: a third party can change
++those and leave the transaction valid, changing its wtxid (and, for a scriptSig, its txid). Other
++signatures in the same input commit to the whole annex, proof included, as BIP 341 says.
++
++### Signature cache
++
++The result of R7 is cached under a fifth salted hasher (padding byte `R`), keyed by
++`m || sid || pub || proof`. R1 to R6 run before the cache is looked at; only the proof verification
++is saved.
++
++## Verification library
++
++The verifier is the Rust crate `voleith` of ark0-rescue, vendored with its dependencies in
++`src/rescue/` (see its README for the source commit, every file's SHA-256 and the licences) and
++built by CMake into a static library. The build uses one exact toolchain (Rust 1.97.0), run directly
++rather than through rustup, with no cargo or Rust variable of the environment and no cargo
++configuration file. It uses the crate's release profile (`panic = "unwind"`, which the C ABI needs;
++the build checks it) and no default features, which leaves the prover out, and remaps every local
++path. Any change to a vendored file rebuilds the library from nothing. It is linked into
++`bitcoin_consensus` and `bitcoinkernel`. A shared `bitcoinkernel` exports none of its symbols; a
++static one is installed with it as `libbitcoinkernel_voleith`, which `pkg-config --static` lists with
++the system libraries it needs. As with upstream's static kernel, a program links it with a C++ compiler
++driver, which adds the C++ runtime. Its C ABI is one function, `voleith_verify_s1`
++(`src/rescue/voleith/include/voleith.h`), which checks every length before it reads a pointer,
++returns 0 for any malformed input, and catches panics. Building the node needs `cargo` and `rustc`
++1.97.0; the crate's own prover is built for the functional tests only.
++
++## Validation weight
++
++`VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` is **100,000, provisional**: it is fixed by measurement
++before release, by a single-check condition
++`C >= 1.5 x 50 x p99(rescue check) / median(Schnorr check)` over the most expensive invalid proof, a
++65,535-byte message and a valid proof, and by a whole-block condition. Whatever it is fixed at, it
++must not exceed 130,333: the smallest valid rescue input (`|K| = 1`, template R1 at depth one) has a
++witness of 130,333 bytes and a budget of 130,383, which has to pay for the 50 and the rescue weight.
++A second rescue check in the same input never fits the budget of an input that carries one proof.
++
++## Activation
++
++| Network | Lane open from |
++|---|---|
++| mainnet, testnet3, testnet4, default signet | never |
++| Ark-0 signet | `ARK0_RESCUE_HEIGHT`, not decided: never in this build |
++| other custom signets | `-signetrescue=<height>`, with `-signetchallenge` and `-signettripwire`, at or above the tripwire height |
++| regtest | the final `p2mr_tripwire` height (after `-testactivationheight` and `-signettripwire`), or `-testactivationheight=p2mr_rescue@<height>`, at or above it |
++
++`p2mr_rescue` is a buried deployment. `GetBlockScriptFlags` sets `SCRIPT_VERIFY_P2MR_NO_RESCUE` for
++every block below the height. `-signetrescue` is refused on Ark-0, on the default signet and on the
++other chains; regtest refuses an explicit height below the final tripwire height. A node logs at
++startup:
++
++```
++Signet P2MR rescue lane from height <H> for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id <hex>
++```
++
++The lane adds no state: whether a rescue spend is valid depends only on the block's height, whether
++the leaf executes, and the transaction. Restarts, `-reindex`, pruning and assumeutxo have nothing to
++restore.
++
++**The hard fork.** A node without this build (an M3 or M4-S node) finds the first block with a rescue
++spend invalid, marks it so, and stops: on a network whose blocks one party signs, it has no other
++chain to follow, as long as that party extends only one chain. Upgraded later, it still has the block
++marked invalid: `bitcoin-cli reconsiderblock <hash of that block>` lets it continue.
++
++## Policy
++
++1. The mempool checks with `SCRIPT_VERIFY_P2MR_NO_RESCUE` until the lane is open **at the tip itself**,
++   not just for the next block: `ConsensusScriptChecks` checks again with the tip's own flags, which
++   keep the restriction below the height. The first rescue spend through the mempool goes in the
++   block after the first open one; one in the first open block has to be submitted directly, with
++   `generateblock` for example.
++2. A transaction with a rescue record is taken only when elliptic curve checks in leaf version `0xe0`
++   are disabled for the next block, from the confirmed UTXO set (`p2mr-rescue-ec-enabled` otherwise).
++   This is a policy check, not a script flag. Spends already in the mempool stay there when a
++   reorganization enables the checks again; spends from a disconnected block are refused if the
++   checks then work.
++3. The one standard template is R1: a leaf of version `0xe0` at depth one or more whose script is
++   `<32-byte key> OP_CHECKSIG`, byte for byte, and a witness of exactly the token, the script, the
++   control block and the annex. Its token is exempt from the 80-byte limit (100 bytes at most), and
++   its annex is allowed; every other annex stays non-standard. Other uses of the lane are valid in
++   blocks but not relayed. A standard transaction holds at most three rescue inputs.
++4. When the tip goes back below the lane's height, transactions with a rescue record are removed,
++   with their descendants.
++5. Over P2P, a transaction with a rescue record is taken only from a peer with `noban` permission and
++   dropped otherwise, before validation and before the orphan pool, without penalty and without the
++   reject filters; its txid and wtxid both count as answered, so another peer is asked at once.
++   `-whitelist` applies to inbound peers only unless it names a direction: use
++   `-whitelist=noban,in,out@<address>` between the network's own nodes. `sendrawtransaction` and
++   `testmempoolaccept` are not limited by this.
++
++"A transaction with a rescue record" is one structural test, shared by items 2, 4 and 5: an input
++whose witness has at least two elements, the last of which starts with `0x50 0x01`. It reads no coin.
++
++## RPC and logs
++
++`gettripwireinfo` has a `rescue` object where the lane has a height: `height`, `active_next_block`,
++`mempool_accepts` (open at the tip and elliptic curve checks disabled for the next block),
++`network_id` and `statements` (`["01"]`). `getdeploymentinfo` lists `p2mr_rescue`. When a block joins
++the active chain, each rescue spend in it is logged:
++
++```
++P2MR rescue of <txid:vout> by <txid> in block <hash> (height <N>): statement 01, key <P>
++```
++
++Only the rescue spends through template R1 are logged, in a block checked with P2MR, leaf version
++`0xe0` and the lane in force (its script flags, not the deployment alone): an input that spends a
++P2MR output and whose whole witness is a token, `<P> OP_CHECKSIG` in a leaf of version `0xe0` at depth one or more, the
++control block and one rescue record. A token is never a valid BIP 340 signature, so in a valid block
++such an input went through the rescue path; finding it costs a constant amount per input and no
++elliptic curve operation. Rescue checks in other leaf shapes (`OP_CHECKSIGVERIFY`, `OP_CHECKSIGADD`,
++after `OP_CODESEPARATOR`, or with more elements), valid in a block but not relayed, are not logged.
++
++There is no RPC to make proofs or rescue transactions: proofs are made off the node.
++
++## Tests
++
++- `src/test/p2mr_rescue_tests.cpp`: the parameters of every network, the block flags at the height,
++  the token and annex encodings, the key relation, the signature message against an independent
++  implementation (`test/functional/test_framework/p2mr_rescue.py`), every rule and its failures, the
++  three flags in all combinations, the signature cache, the flag monotonicity with every prevout,
++  and the relay template. Its vectors, `src/test/data/p2mr_rescue_vectors.json`, were made once by
++  `test/util/generate_p2mr_rescue_vectors.py` with the crate's prover.
++- `test/functional/feature_p2mr_rescue.py` (regtest) and `feature_p2mr_rescue_signet.py` (a custom
++  signet): activation, the mempool, reorganizations, the P2P gate, the hard fork against an M4-S
++  node (`M4S_BITCOIND=<path to its bitcoind>`), restarts and pruning.
++- Fuzz targets `p2mr_rescue_token`, `p2mr_rescue_verify`, `p2mr_rescue` and
++  `p2mr_rescue_script_flags`, whose seeds `test/util/p2mr_rescue_fuzz_seeds.py` writes from the
++  vectors.
++- `bench_bitcoin -filter='.*P2MRRescue.*'`: the verifier, valid and in its most expensive invalid
++  form, and the whole path of a check.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index b747d3c..0f5a151 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -10,7 +10,9 @@ the experimental `OP_CHECKMLDSA44` described in [p2mr-mldsa44.md](p2mr-mldsa44.m
+ signatures in P2MR leaves, [p2mr-tripwire.md](p2mr-tripwire.md) describes leaf version `0xe0`,
+ whose elliptic curve checks stop working once a tripwire output is spent, and the experimental
+ `OP_CHECKSLHDSA128S` described in [p2mr-slhdsa128s.md](p2mr-slhdsa128s.md) checks SLH-DSA-SHA2-128s
+-signatures in P2MR leaves.
++signatures in P2MR leaves. [p2mr-rescue.md](p2mr-rescue.md) describes the rescue lane, in which an
++elliptic curve check of leaf version `0xe0` can pass with a proof of knowledge of the seed behind its
++key instead of a signature.
+ 
+ ## Output format
+ 
+-- 
+2.43.0
+

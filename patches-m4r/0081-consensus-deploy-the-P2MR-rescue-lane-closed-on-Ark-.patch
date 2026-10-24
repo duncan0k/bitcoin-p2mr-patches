@@ -1,0 +1,464 @@
+From 670e41b062675b78e41b8847a76ddb375d0c7c30 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:09 +0000
+Subject: [PATCH 81/88] consensus: deploy the P2MR rescue lane, closed on Ark-0
+ until its height is decided
+
+The rescue lane relaxes the rules, a hard fork: GetBlockScriptFlags sets
+SCRIPT_VERIFY_P2MR_NO_RESCUE for every block below the height of the new
+buried deployment p2mr_rescue, which ConnectBlock and the mempool's
+second check both read.
+
+- Ark-0: ARK0_RESCUE_HEIGHT, not decided yet, so it stays at
+  std::numeric_limits<int>::max() and the lane closed, as M4-S did before
+  its height was fixed; static assertions keep it above the tripwire and
+  SLH-DSA heights. The height has to be announced at least four weeks
+  ahead and never changes once a build with it has left the network's own
+  nodes.
+- Another custom signet opens it with -signetrescue=<height>, which needs
+  -signetchallenge and -signettripwire, at or above the tripwire height,
+  and is refused on Ark-0, on the default signet and on the other chains.
+- Regtest opens it at the final p2mr_tripwire height, after both
+  -testactivationheight and -signettripwire, so that the existing
+  configurations that only move the tripwire height still start; an
+  explicit -testactivationheight=p2mr_rescue@N below that height is
+  refused once all options are read.
+- The network id that proofs are bound to is SHA256 of the signet
+  challenge, since every signet has the same genesis block, or
+  SHA256("regtest"); none on mainnet and the testnets, where the lane
+  never opens. ChainstateManager gives it to its ValidationCache, and
+  CheckInputScripts to every transaction it checks.
+- The startup log names the height and the network id, and
+  getdeploymentinfo lists p2mr_rescue.
+---
+ src/chainparams.cpp               | 42 ++++++++++++++++++++++++++++++-
+ src/chainparamsbase.cpp           |  3 ++-
+ src/consensus/params.h            | 13 +++++++++-
+ src/deploymentinfo.cpp            |  4 +++
+ src/init.cpp                      |  8 ++++++
+ src/kernel/chainparams.cpp        | 34 +++++++++++++++++++++++++
+ src/kernel/chainparams.h          | 26 +++++++++++++++++++
+ src/rpc/blockchain.cpp            |  1 +
+ src/validation.cpp                | 15 ++++++++---
+ src/validation.h                  |  6 ++++-
+ test/functional/rpc_blockchain.py |  1 +
+ 11 files changed, 146 insertions(+), 7 deletions(-)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index febcbb0..071bbaf 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -83,7 +83,7 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+     // genesis block and message start): none of the options that change the rules of a custom signet
+     // may change its rules.
+     if (options.challenge && IsDefaultSignetChallenge(*options.challenge)) {
+-        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire"}) {
++        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue"}) {
+             if (!args.GetArgs(arg).empty()) {
+                 throw std::runtime_error(strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", arg));
+             }
+@@ -203,6 +203,34 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.tripwire = std::move(*tripwire);
+     }
++    // The P2MR rescue lane (doc/p2mr-rescue.md) rescues what leaves of version 0xe0 froze, so it needs
++    // the tripwire rules, and opens at or above their height.
++    if (!args.GetArgs("-signetrescue").empty()) {
++        const auto values = args.GetArgs("-signetrescue");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetrescue cannot be multiple values.");
++        }
++        if (!options.challenge) {
++            throw std::runtime_error("-signetrescue requires -signetchallenge.");
++        }
++        if (IsArk0SignetChallenge(*options.challenge)) {
++            throw std::runtime_error("-signetrescue cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++        }
++        if (!options.tripwire) {
++            throw std::runtime_error("-signetrescue requires -signettripwire.");
++        }
++        const auto height{ToIntegral<int32_t>(values[0])};
++        if (!height) {
++            throw std::runtime_error(strprintf("-signetrescue must be a height, not '%s'.", values[0]));
++        }
++        if (*height < 1 || *height == std::numeric_limits<int>::max()) {
++            throw std::runtime_error(strprintf("-signetrescue height must be at least 1 and below %d, not %d.", std::numeric_limits<int>::max(), *height));
++        }
++        if (*height < options.tripwire->height) {
++            throw std::runtime_error(strprintf("-signetrescue height must be at or above the -signettripwire height %d, not %d.", options.tripwire->height, *height));
++        }
++        options.rescue_height = *height;
++    }
+ }
+ 
+ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& options)
+@@ -243,6 +271,15 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+         }
+         options.tripwire = std::move(*tripwire);
+     }
++    // The P2MR rescue lane (doc/p2mr-rescue.md) follows the final height of p2mr_tripwire, once both
++    // -testactivationheight and -signettripwire are read; an explicit height must not be below it.
++    if (const auto rescue{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_RESCUE)}; rescue != options.activation_heights.end()) {
++        const auto tripwire{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_TRIPWIRE)};
++        const int tripwire_height{options.tripwire ? options.tripwire->height : tripwire == options.activation_heights.end() ? 0 : tripwire->second};
++        if (rescue->second < tripwire_height) {
++            throw std::runtime_error(strprintf("The p2mr_rescue height must be at or above the p2mr_tripwire height %d, not %d.", tripwire_height, rescue->second));
++        }
++    }
+ 
+     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {
+         std::vector<std::string> vDeploymentParams = SplitString(strDeployment, ':');
+@@ -302,6 +339,9 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+     if (chain != ChainType::SIGNET && args.IsArgSet("-signetslhdsa128s")) {
+         throw std::runtime_error("-signetslhdsa128s can only be used with signet.");
+     }
++    if (chain != ChainType::SIGNET && args.IsArgSet("-signetrescue")) {
++        throw std::runtime_error("-signetrescue can only be used with signet.");
++    }
+     if (chain != ChainType::SIGNET && chain != ChainType::REGTEST && args.IsArgSet("-signettripwire")) {
+         throw std::runtime_error("-signettripwire can only be used with signet or regtest.");
+     }
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index 61e5716..b08d603 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s, p2mr_rescue). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+@@ -27,6 +27,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetpqblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1) to also carry an ML-DSA-44 signature by <pubkey> (1312 bytes, hex) in its witness commitment output; see doc/signet-pqblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetmldsa44=<height>", "Execute OP_CHECKMLDSA44 in P2MR leaves from <height> (at least 1) on; see doc/p2mr-mldsa44.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signettripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe0 from <height> (at least 1) on, and from there fail their elliptic curve signature checks in every block whose parent leaves one of these tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge and -signetmldsa44 below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_tripwire, which must be above that of p2mr_mldsa44 (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetrescue=<height>", "Open the P2MR rescue lane from <height> (at least 1, and at or above the -signettripwire height) on: in executed P2MR leaves of leaf version 0xe0, an elliptic curve signature check whose signature is a rescue token is checked with the rescue proof in the input's annex; see doc/p2mr-rescue.md. This relaxes the rules (a hard fork): every node must use the same value before the chain reaches <height>. Requires -signetchallenge and -signettripwire, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetslhdsa128s=<height>", "Execute OP_CHECKSLHDSA128S in P2MR leaves from <height> (at least 1) on; see doc/p2mr-slhdsa128s.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index b5762fd..b01a13d 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -35,8 +35,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_P2MR_MLDSA44,
+     DEPLOYMENT_P2MR_TRIPWIRE,
+     DEPLOYMENT_P2MR_SLHDSA128S,
++    DEPLOYMENT_P2MR_RESCUE,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_SLHDSA128S; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_RESCUE; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -159,6 +160,14 @@ struct Params {
+      * std::numeric_limits<int>::max() on every chain but the Ark-0 signet (from
+      * ARK0_SLHDSA128S_HEIGHT, 32000), a custom signet given -signetslhdsa128s, and regtest. */
+     int P2MRSLHDSA128SHeight;
++    /** Block height from which the P2MR rescue lane is open (doc/p2mr-rescue.md): below it, blocks
++     * are checked with SCRIPT_VERIFY_P2MR_NO_RESCUE. std::numeric_limits<int>::max() on every chain
++     * but a custom signet given -signetrescue and regtest; on the Ark-0 signet it stays there until
++     * ARK0_RESCUE_HEIGHT is decided. Never below P2MRTripwireHeight. */
++    int P2MRRescueHeight;
++    /** The network id rescue proofs are bound to: SHA256 of the signet challenge on a signet,
++     * SHA256("regtest") on regtest, unset elsewhere (doc/p2mr-rescue.md). */
++    std::optional<uint256> p2mr_rescue_network_id;
+     /** Don't warn about unknown BIP 9 activations below this height.
+      * This prevents us from warning about the CSV and segwit activations. */
+     int MinBIP9WarningHeight;
+@@ -242,6 +251,8 @@ struct Params {
+             return P2MRTripwireHeight;
+         case DEPLOYMENT_P2MR_SLHDSA128S:
+             return P2MRSLHDSA128SHeight;
++        case DEPLOYMENT_P2MR_RESCUE:
++            return P2MRRescueHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index 797d024..50b7c3b 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -41,6 +41,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "p2mr_tripwire";
+     case Consensus::DEPLOYMENT_P2MR_SLHDSA128S:
+         return "p2mr_slhdsa128s";
++    case Consensus::DEPLOYMENT_P2MR_RESCUE:
++        return "p2mr_rescue";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -65,6 +67,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_TRIPWIRE;
+     } else if (name == "p2mr_slhdsa128s") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S;
++    } else if (name == "p2mr_rescue") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index 13f54fa..d0bc3ec 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -969,6 +969,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+     if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
+         LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0)", chainparams.GetConsensus().P2MRSLHDSA128SHeight);
+     }
++    // The P2MR rescue lane (doc/p2mr-rescue.md) is only open on a signet given -signetrescue and on
++    // regtest; on the Ark-0 signet not before ARK0_RESCUE_HEIGHT is decided. Every node of a network
++    // needs the same height and network id: log them, so that operators can compare.
++    if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_RESCUE)) {
++        LogInfo("%s P2MR rescue lane from height %d for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id %s",
++                chainparams.GetChainType() == ChainType::SIGNET ? "Signet" : "Regtest",
++                chainparams.GetConsensus().P2MRRescueHeight, HexStr(*Assert(chainparams.GetConsensus().p2mr_rescue_network_id)));
++    }
+ 
+     // Warn if unrecognized section name are present in the config file.
+     bilingual_str warnings;
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index c17f3b4..822a5c7 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -125,6 +125,13 @@ bool IsDefaultSignetChallenge(std::span<const uint8_t> challenge)
+     return std::ranges::equal(challenge, DEFAULT_SIGNET_CHALLENGE);
+ }
+ 
++uint256 P2MRRescueNetworkId(std::span<const unsigned char> data)
++{
++    uint256 id;
++    CSHA256().Write(data.data(), data.size()).Finalize(id.begin());
++    return id;
++}
++
+ //! The P2MR tripwire rules as a node logs them at startup, so that the nodes of one network can
+ //! compare them (doc/p2mr-tripwire.md): the height, and each tripwire outpoint, with the label of
+ //! one the code fixes and the SHA256 of its key unless the key is the BIP-341 NUMS point.
+@@ -209,6 +216,7 @@ public:
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
++        consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -344,6 +352,7 @@ public:
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
++        consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -455,6 +464,7 @@ public:
+         consensus.P2MRMLDSA44Height = std::numeric_limits<int>::max(); // nor does OP_CHECKMLDSA44
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
++        consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -648,6 +658,19 @@ public:
+             // Every node of the network needs the same values: log what an operator can compare.
+             LogInfo("Signet %s", DescribeTripwireRules(consensus));
+         }
++        // The P2MR rescue lane (doc/p2mr-rescue.md): on a custom signet only from the height
++        // -signetrescue gives, which ReadSigNetArgs refuses on Ark-0 and on the default signet and
++        // accepts only with -signettripwire, at or above its height. On Ark-0 from
++        // ARK0_RESCUE_HEIGHT, which is not decided yet: the lane stays closed there. The rescue
++        // proofs of a signet are bound to its challenge, as every signet has the same genesis block.
++        if (options.rescue_height) {
++            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
++            assert(options.tripwire && options.tripwire->height <= *options.rescue_height);
++            consensus.P2MRRescueHeight = *options.rescue_height;
++        } else {
++            consensus.P2MRRescueHeight = IsArk0SignetChallenge(bin) ? ARK0_RESCUE_HEIGHT : std::numeric_limits<int>::max();
++        }
++        consensus.p2mr_rescue_network_id = P2MRRescueNetworkId(bin);
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         // A different target spacing for the retargets from a height on.
+@@ -770,6 +793,7 @@ public:
+         consensus.P2MRMLDSA44Height = 0; // Always active unless overridden
+         consensus.P2MRTripwireHeight = 0; // Always active unless overridden, without tripwire outputs
+         consensus.P2MRSLHDSA128SHeight = 0; // Always active unless overridden
++        consensus.P2MRRescueHeight = 0; // Follows the final p2mr_tripwire height unless overridden, see below
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -833,6 +857,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S:
+                 consensus.P2MRSLHDSA128SHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE:
++                consensus.P2MRRescueHeight = int{height};
++                break;
+             }
+         }
+         // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
+@@ -846,6 +873,13 @@ public:
+             }
+             LogInfo("%s", DescribeTripwireRules(consensus));
+         }
++        // The P2MR rescue lane (doc/p2mr-rescue.md) opens where leaf version 0xe0 starts to execute,
++        // after -testactivationheight and -signettripwire, unless -testactivationheight moves it;
++        // ReadRegTestArgs refuses a height below that of p2mr_tripwire.
++        if (!opts.activation_heights.contains(Consensus::DEPLOYMENT_P2MR_RESCUE)) {
++            consensus.P2MRRescueHeight = consensus.P2MRTripwireHeight;
++        }
++        consensus.p2mr_rescue_network_id = P2MRRescueNetworkId(MakeUCharSpan(P2MR_RESCUE_REGTEST_ID));
+ 
+         for (const auto& [deployment_pos, version_bits_params] : opts.version_bits_parameters) {
+             consensus.vDeployments[deployment_pos].nStartTime = version_bits_params.start_time;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 81ffd31..9a7baf0 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -21,6 +21,7 @@
+ #include <optional>
+ #include <span>
+ #include <string>
++#include <string_view>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -76,6 +77,21 @@ static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT);
+ static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT);
+ static_assert(ARK0_PQ_BLOCK_HEIGHT < ARK0_TRIPWIRE_HEIGHT);
+ 
++/**
++ * Height from which the Ark-0 signet opens the P2MR rescue lane (doc/p2mr-rescue.md), H4R. NOT
++ * DECIDED YET: until it is, it is std::numeric_limits<int>::max() and the lane stays closed on
++ * Ark-0, as OP_CHECKSLHDSA128S stayed before its height was fixed. The lane relaxes the rules (a
++ * hard fork): the height is announced at least four weeks before it, and never changes once a
++ * build carrying it has left the network's own nodes.
++ */
++inline constexpr int ARK0_RESCUE_HEIGHT{std::numeric_limits<int>::max()};
++// The lane rescues what the tripwire leaves froze: it comes after their height.
++static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
++static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
++
++/** The bytes regtest's rescue network id is the SHA256 of (doc/p2mr-rescue.md). */
++inline constexpr std::string_view P2MR_RESCUE_REGTEST_ID{"regtest"};
++
+ /** Height of the block that created both tripwire outputs of the Ark-0 signet. */
+ inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
+ // An output counts as present only when it was created below the height of the rules.
+@@ -85,6 +101,9 @@ static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_CREATION_HEIGHT);
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
+ /** Whether a signet challenge is the default (public) signet's, whose rules this code fixes too. */
+ bool IsDefaultSignetChallenge(std::span<const uint8_t> challenge);
++/** The network id of the P2MR rescue lane (doc/p2mr-rescue.md): SHA256 of a signet's challenge, or of
++ *  P2MR_RESCUE_REGTEST_ID. */
++uint256 P2MRRescueNetworkId(std::span<const unsigned char> data);
+ 
+ struct AssumeutxoHash : public BaseHash<uint256> {
+     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
+@@ -235,6 +254,13 @@ public:
+          * its own that is not the Ark-0 signet's.
+          */
+         std::optional<int> slhdsa128s_height{};
++        /**
++         * Height from which the P2MR rescue lane is open (-signetrescue,
++         * doc/p2mr-rescue.md). Only accepted together with a challenge of its
++         * own that is neither the Ark-0 signet's nor the default signet's, and
++         * with a tripwire at or below its height.
++         */
++        std::optional<int> rescue_height{};
+     };
+ 
+     /**
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 8c349c9..fdbd35a 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1485,6 +1485,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_MLDSA44);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 77820dc..a47db90 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2161,8 +2161,8 @@ std::optional<std::pair<ScriptError, std::string>> CScriptCheck::operator()() {
+     }
+ }
+ 
+-ValidationCache::ValidationCache(const size_t script_execution_cache_bytes, const size_t signature_cache_bytes)
+-    : m_signature_cache{signature_cache_bytes}
++ValidationCache::ValidationCache(const size_t script_execution_cache_bytes, const size_t signature_cache_bytes, std::optional<uint256> p2mr_rescue_network_id)
++    : m_signature_cache{signature_cache_bytes}, m_p2mr_rescue_network_id{p2mr_rescue_network_id}
+ {
+     // Setup the salted hasher
+     uint256 nonce = GetRandHash();
+@@ -2234,6 +2234,8 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
+         txdata.Init(tx, std::move(spent_outputs));
+     }
+     assert(txdata.m_spent_outputs.size() == tx.vin.size());
++    // The network rescue proofs are bound to (doc/p2mr-rescue.md).
++    if (!txdata.m_p2mr_rescue_network_id) txdata.m_p2mr_rescue_network_id = validation_cache.m_p2mr_rescue_network_id;
+ 
+     for (unsigned int i = 0; i < tx.vin.size(); i++) {
+ 
+@@ -2447,6 +2449,13 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_P2MR_SLHDSA128S;
+     }
+ 
++    // Below the height of the P2MR rescue lane (doc/p2mr-rescue.md), a rescue token is a signature
++    // like any other: a restricting flag, lifted at that height, which relaxes the rules (a hard
++    // fork). It has nothing to act on where leaves of version 0xe0 do not execute.
++    if (!DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) {
++        flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
++    }
++
+     return flags;
+ }
+ 
+@@ -6429,7 +6438,7 @@ ChainstateManager::ChainstateManager(const util::SignalInterrupt& interrupt, Opt
+       m_interrupt{interrupt},
+       m_options{Flatten(std::move(options))},
+       m_blockman{interrupt, std::move(blockman_options)},
+-      m_validation_cache{m_options.script_execution_cache_bytes, m_options.signature_cache_bytes}
++      m_validation_cache{m_options.script_execution_cache_bytes, m_options.signature_cache_bytes, m_options.chainparams.GetConsensus().p2mr_rescue_network_id}
+ {
+ }
+ 
+diff --git a/src/validation.h b/src/validation.h
+index da73c7d..62a0c68 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -377,7 +377,11 @@ public:
+     CuckooCache::cache<uint256, SignatureCacheHasher> m_script_execution_cache;
+     SignatureCache m_signature_cache;
+ 
+-    ValidationCache(size_t script_execution_cache_bytes, size_t signature_cache_bytes);
++    //! The network id rescue proofs are bound to (doc/p2mr-rescue.md), given to the transactions
++    //! CheckInputScripts checks; unset on the networks where the rescue lane never opens.
++    const std::optional<uint256> m_p2mr_rescue_network_id;
++
++    ValidationCache(size_t script_execution_cache_bytes, size_t signature_cache_bytes, std::optional<uint256> p2mr_rescue_network_id = std::nullopt);
+ 
+     ValidationCache(const ValidationCache&) = delete;
+     ValidationCache& operator=(const ValidationCache&) = delete;
+diff --git a/test/functional/rpc_blockchain.py b/test/functional/rpc_blockchain.py
+index c331fdd..d010df2 100755
+--- a/test/functional/rpc_blockchain.py
++++ b/test/functional/rpc_blockchain.py
+@@ -224,6 +224,7 @@ class BlockchainTest(BitcoinTestFramework):
+             'p2mr_mldsa44': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_tripwire': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_slhdsa128s': {'type': 'buried', 'active': True, 'height': 0},
++            'p2mr_rescue': {'type': 'buried', 'active': True, 'height': 0},
+             'testdummy': {
+                 'type': 'bip9',
+                 'bip9': {
+-- 
+2.43.0
+

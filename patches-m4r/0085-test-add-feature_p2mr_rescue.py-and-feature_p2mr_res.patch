@@ -1,0 +1,985 @@
+From 5b351d9eb0ebb705aea067df5d13942cb67be99f Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:10 +0000
+Subject: [PATCH 85/88] test: add feature_p2mr_rescue.py and
+ feature_p2mr_rescue_signet.py
+
+On regtest, with the rescue proofs made as the test runs: the activation
+boundary in blocks and in the mempool, through sendrawtransaction,
+testmempoolaccept and packages; the policy check before the trigger and
+after a reorganization over it; removal below the lane's height with the
+checks disabled and working; one to four inputs; spends outside the
+template; the P2P gate with and without wtxid relay, orphans, repeated
+sends and the -whitelist directions; the logs and gettripwireinfo, the
+log only for template R1, and a block whose input drops 998 tokens and
+has 50,000 key-sized pushes in a branch never run connecting within a
+minute without a log line, nor an R1-shaped spend on a regtest with P2MR
+later than the lane; a parent put back from a disconnected block with a
+rescue child and that child's own child in the mempool: with the lane
+kept open all three stay, their dependency edges and ancestor and
+descendant counts restored, and once the lane closes the parent stays,
+the rescue child goes by the filter and its child as a descendant; a
+rescue record that no rescue check reads (an OP_TRUE leaf, relayed by a
+node with -acceptnonstdtxn), which below H4R only the filter removes; a
+reorganization across H3;
+restarts, -reindex, -reindex-chainstate, VerifyDB level 4 and pruning;
+and the hard fork, with an M4-S build as the late node when
+M4S_BITCOIND names its bitcoind, or this build with the lane never open.
+
+On a custom signet with -signetrescue: the network id of the challenge,
+a proof for regtest's refused, and the options.
+---
+ test/functional/feature_p2mr_rescue.py        | 792 ++++++++++++++++++
+ test/functional/feature_p2mr_rescue_signet.py | 127 +++
+ test/functional/test_runner.py                |   2 +
+ 3 files changed, 921 insertions(+)
+ create mode 100644 test/functional/feature_p2mr_rescue.py
+ create mode 100644 test/functional/feature_p2mr_rescue_signet.py
+
+diff --git a/test/functional/feature_p2mr_rescue.py b/test/functional/feature_p2mr_rescue.py
+new file mode 100644
+index 0000000..6b445c1
+--- /dev/null
++++ b/test/functional/feature_p2mr_rescue.py
+@@ -0,0 +1,792 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the P2MR rescue lane (doc/p2mr-rescue.md) on regtest.
++
++From the rescue lane's height H4R, in an executed P2MR leaf of version 0xe0, an elliptic curve
++signature check whose signature element is a rescue token is checked with the VOLE-in-the-head proof
++in the input's annex. The proofs are made as the test runs, by the crate's own prover (voleith-prove,
++feature `cli`), which the build compiles for the tests only.
++
++Heights: the tripwire rules from H3 = 220 with one tripwire output T, the rescue lane from H4R = 240
++(-testactivationheight=p2mr_rescue@240).
++
++  node 0  the rules, the default policy; no permissions on its P2P port, noban on a second one
++  node 1  the rules, -acceptnonstdtxn=1 and -maxsigcachesize=0
++  node 2  an M4-S node (the build without M4-R, from $M4S_BITCOIND), or, without it, this build with
++          the lane never open, which is the same to every block; it upgrades late
++  node 3  the rules, pruned
++
++Covered (doc/p2mr-rescue.md, section 10): the activation boundary in blocks (H4R - 1 refused, H4R
++through generateblock) and in the mempool (refused at tip H4R - 1 without the BUG! line, taken at tip
++H4R, in sendrawtransaction, testmempoolaccept and packages); the policy check on the state of
++elliptic curve checks, before the trigger, and after a reorganization over it, when the spends in the
++mempool stay and a block template works while those from disconnected blocks are refused; removal
++below H4R with elliptic curve checks disabled and enabled; one, two, three inputs standard, four not
++but valid in a block; spends outside template R1 valid but not relayed, -acceptnonstdtxn; other
++annexes; the hard fork: the M4-S node refuses the first rescue block, stops and does not fork, and
++after its upgrade and reconsiderblock catches up; the P2P gate with and without wtxid relay, repeated
++sends, orphans, and the -whitelist directions; the logs and gettripwireinfo, the log only for
++template R1 and of constant cost per input (many tokens and key-sized pushes); restarts, -reindex,
++-reindex-chainstate, VerifyDB level 4, pruning, and a signature cache of size 0.
++"""
++
++from decimal import Decimal
++import hashlib
++import os
++import time
++
++from test_framework.messages import (
++    COIN,
++    COutPoint,
++    CTransaction,
++    CTxIn,
++    CTxInWitness,
++    CTxOut,
++    CInv,
++    MSG_TX,
++    MSG_WTX,
++    msg_inv,
++    msg_tx,
++)
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_rescue import (
++    P2MR_LEAF_TRIPWIRED,
++    RESCUE_STATEMENT_HMAC,
++    WALLET_V1_SCHNORR_K,
++    find_prover,
++    network_id_regtest,
++    prove,
++    rescue_annex,
++    rescue_key,
++    rescue_message,
++    rescue_pub,
++    rescue_sighash,
++    rescue_token,
++    rescue_y,
++)
++from test_framework.p2p import P2PInterface, p2p_lock
++from test_framework.script import CScript, OP_0, OP_1, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DROP, OP_ENDIF, OP_IF, OP_RETURN, OP_TRUE
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error, p2p_port
++from test_framework.wallet import MiniWallet
++
++H3 = 220
++H4R = 240
++NEVER = 2147483646
++FUND_SATS = 1_000_000
++FEE_SATS = 60_000
++EC_DISABLED_ERROR = "Elliptic curve signature checks are disabled in this leaf"
++SCHNORR_SIZE_ERROR = "Invalid Schnorr signature size"
++EC_ENABLED = "p2mr-rescue-ec-enabled"
++NONSTANDARD = "bad-witness-nonstandard"
++# Review round 1, item 1: tokens on the stack (below the 1,000-element limit) and 32-byte pushes of
++# the leaf script, which a search of every pair would try against each other.
++BOMB_TOKENS = 998
++BOMB_PUSHES = 50_000
++
++
++def seed(tag):
++    return hashlib.sha256(b"feature_p2mr_rescue " + tag.encode()).digest()
++
++
++class RescueKey:
++    """A web wallet v1 style key: y = HMAC-SHA256(K, x || suffix), P = x(y*G), and P2MR outputs whose
++    leaf of version 0xe0 checks P."""
++
++    def __init__(self, tag, *, k=WALLET_V1_SCHNORR_K, suffix=0):
++        self.k = k
++        self.suffix = suffix
++        self.x = seed(tag)
++        self.y = rescue_y(k, self.x, suffix)
++        self.pubkey = rescue_key(self.y)
++        self.token = rescue_token(k, suffix, self.y)
++        self.pub = rescue_pub(k, suffix, self.y)
++        # R1 at depth one, next to a leaf that is never used.
++        self.r1 = p2mr_construct([("rescue", CScript([self.pubkey, OP_CHECKSIG]), P2MR_LEAF_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++        # Valid, but not the relayed template.
++        self.verify = p2mr_construct([("rescue", CScript([self.pubkey, OP_CHECKSIGVERIFY, OP_1]), P2MR_LEAF_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++
++
++class P2MRRescueTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 4
++        self.rpc_timeout = 240
++        self.m4s_binary = os.environ.get("M4S_BITCOIND")
++        self.extra_args = [[], ["-acceptnonstdtxn=1", "-maxsigcachesize=0"], [], ["-fastprune", "-prune=1"]]
++
++    def setup_network(self):
++        self.add_nodes(self.num_nodes, self.extra_args)
++        self.start_nodes()
++        for i in (1, 2, 3):
++            self.connect_nodes(0, i)
++        self.sync_all()
++
++    def skip_test_if_missing_module(self):
++        pass
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def rules_args(self, i):
++        """The options of node i once the tripwire output exists."""
++        tripwire = [f"-signettripwire={H3}@{self.tripwire_outpoint}"]
++        if i == 2:
++            # The late node: an M4-S build knows nothing of the lane; this build is told it never opens.
++            return tripwire + ([] if self.m4s_binary else [f"-testactivationheight=p2mr_rescue@{NEVER}"])
++        args = tripwire + [f"-testactivationheight=p2mr_rescue@{H4R}"]
++        if i == 0:
++            args.append(f"-whitebind=noban@127.0.0.1:{self.noban_port}")
++        return args + self.extra_args[i]
++
++    def use_binary(self, node, binary):
++        n = len(node.binaries.node_argv())
++        node.args = [binary] + node.args[n:] if binary else self.default_argv[node.index] + node.args[n:]
++
++    def main_nodes(self):
++        return [self.nodes[0], self.nodes[1], self.nodes[3]]
++
++    def sync_main(self):
++        self.sync_blocks(self.main_nodes())
++
++    def mine(self, count=1):
++        return self.generate(self.nodes[0], count, sync_fun=self.sync_main)
++
++    def fund(self, script_pubkeys, amount=FUND_SATS):
++        """One confirmed output for each scriptPubKey, in one transaction."""
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        tx = CTransaction()
++        tx.vin = [CTxIn(COutPoint(int(utxo["txid"], 16), utxo["vout"]))]
++        tx.vout = [CTxOut(amount, spk) for spk in script_pubkeys]
++        change = int(utxo["value"] * COIN) - amount * len(script_pubkeys) - 10_000
++        tx.vout.append(CTxOut(change, self.wallet.get_output_script()))
++        self.wallet.sign_tx(tx)
++        self.wallet.sendrawtransaction(from_node=self.nodes[0], tx_hex=tx.serialize().hex())
++        self.mine()
++        return [{"txid": tx.txid_int, "vout": n, "value": amount, "spk": tx.vout[n].scriptPubKey} for n in range(len(script_pubkeys))]
++
++    def rescue_tx(self, inputs, *, outputs=None, network_id=None):
++        """A transaction spending (utxo, key, tree) inputs through their rescue leaf with a proof made
++        now, one output to the wallet by default."""
++        network_id = network_id or network_id_regtest()
++        tx = CTransaction()
++        tx.version = 2
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]), b"", 0xfffffffd) for u, _, _ in inputs]
++        total = sum(u["value"] for u, _, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS * len(inputs), self.wallet.get_output_script())]
++        spent = [CTxOut(u["value"], u["spk"]) for u, _, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for i, (_, key, tree) in enumerate(inputs):
++            leaf = tree.leaves["rescue"]
++            sighash = rescue_sighash(tx, i, spent, leaf.script, network_id, RESCUE_STATEMENT_HMAC, key.pub)
++            _, proof = prove(self.prover, key.k, key.suffix, key.x, rescue_message(sighash, network_id, key.pubkey))
++            tx.wit.vtxinwit[i].scriptWitness.stack = [key.token, bytes(leaf.script), leaf.control_block, rescue_annex(proof)]
++        return tx
++
++    def new_rescue(self, tag, count=1, *, tree="r1"):
++        """Fund `count` outputs of one new key and return the (utxo, key, tree) inputs."""
++        key = RescueKey(tag)
++        t = getattr(key, tree)
++        return [(u, key, t) for u in self.fund([t.scriptPubKey] * count)]
++
++    def parent_and_child(self, tag):
++        """A parent that funds a rescue output from the wallet, and the rescue spend of that output."""
++        key = RescueKey(tag)
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        parent = CTransaction()
++        parent.vin = [CTxIn(COutPoint(int(utxo["txid"], 16), utxo["vout"]))]
++        parent.vout = [CTxOut(FUND_SATS, key.r1.scriptPubKey), CTxOut(int(utxo["value"] * COIN) - FUND_SATS - 20_000, self.wallet.get_output_script())]
++        self.wallet.sign_tx(parent)
++        child = self.rescue_tx([({"txid": parent.txid_int, "vout": 0, "value": FUND_SATS, "spk": key.r1.scriptPubKey}, key, key.r1)])
++        return parent, child
++
++    def accept(self, tx, node=0):
++        self.nodes[node].sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in self.nodes[node].getrawmempool()
++
++    def reject(self, tx, reason, node=0):
++        assert_raises_rpc_error(-26, reason, self.nodes[node].sendrawtransaction, tx.serialize().hex(), 0)
++
++    def block_with(self, txs, node=0):
++        """Mine a block with exactly these transactions, through generateblock (submitted directly)."""
++        return self.nodes[node].generateblock(self.wallet.get_address(), [tx.serialize().hex() for tx in txs], called_by_framework=True)["hash"]
++
++    def refuse_block(self, txs, reason, node=0):
++        assert_raises_rpc_error(-25, reason, self.nodes[node].generateblock, self.wallet.get_address(),
++                                [tx.serialize().hex() for tx in txs], called_by_framework=True)
++
++    def rescue_info(self, node=0):
++        return self.nodes[node].gettripwireinfo()["rescue"]
++
++    def rescue_log(self, utxo, tx, block_hash, height, key):
++        return (f"P2MR rescue of {utxo['txid']:064x}:{utxo['vout']} by {tx.txid_hex} in block {block_hash} "
++                f"(height {height}): statement 01, key {key.pubkey.hex()}")
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        self.prover = find_prover(self.config)
++        self.noban_port = p2p_port(self.num_nodes + 5)
++        self.default_argv = {node.index: node.binaries.node_argv() for node in self.nodes}
++        # The coinbases of the cached chain to the MiniWallet address are mature: no blocks are needed
++        # before the tripwire height.
++        self.wallet = MiniWallet(self.nodes[0])
++        self.wallet.rescan_utxos()
++
++        self.log.info("Create the tripwire output and restart the nodes with the rules")
++        t = self.wallet.send_self_transfer(from_node=self.nodes[0])
++        self.tripwire_utxo = t["new_utxo"]
++        self.tripwire_outpoint = f"{t['txid']}:0"
++        self.generate(self.nodes[0], 1)
++        assert self.nodes[0].getblockcount() < H3
++        self.restart_with_rules()
++
++        self.test_parameters()
++        self.fund_everything()
++        self.test_before_trigger_is_irrelevant_below_h4r()
++        self.test_activation_boundary()
++        self.test_relay_policy()
++        self.test_p2p_gate()
++        self.test_removal_below_h4r_ec_disabled()
++        self.test_parent_back_child_removed()
++        self.test_rescue_filter_alone()
++        self.test_reorganization_across_h3()
++        self.test_ec_enabled_branch()
++        self.test_late_upgrade()
++        self.test_restarts()
++        self.test_log_needs_p2mr()
++
++    def restart_with_rules(self):
++        for i, node in enumerate(self.nodes):
++            if i == 2 and self.m4s_binary:
++                self.use_binary(node, self.m4s_binary)
++            self.restart_node(i, extra_args=self.rules_args(i))
++        for i in (1, 2, 3):
++            self.connect_nodes(0, i)
++        self.sync_all()
++        self.wallet.rescan_utxos()
++
++    def test_parameters(self):
++        self.log.info("Startup log, getdeploymentinfo and gettripwireinfo")
++        node = self.nodes[0]
++        with node.assert_debug_log([f"Regtest P2MR rescue lane from height {H4R} for elliptic curve checks disabled by the tripwire "
++                                    f"(VOLEitH v0.2, statement 0x01); network id {network_id_regtest().hex()}"]):
++            self.restart_node(0, extra_args=self.rules_args(0))
++        for i in (1, 2, 3):
++            self.connect_nodes(0, i)
++        dep = node.getdeploymentinfo()["deployments"]["p2mr_rescue"]
++        assert_equal(dep["type"], "buried")
++        assert_equal(dep["height"], H4R)
++        assert_equal(dep["active"], False)
++        info = self.rescue_info()
++        assert_equal(info, {"height": H4R, "active_next_block": False, "mempool_accepts": False,
++                            "network_id": network_id_regtest().hex(), "statements": ["01"]})
++        # The late node: without the lane, an M4-S build, or this build with the lane never open.
++        if self.m4s_binary:
++            assert "p2mr_rescue" not in self.nodes[2].getdeploymentinfo()["deployments"]
++        else:
++            assert_equal(self.nodes[2].getdeploymentinfo()["deployments"]["p2mr_rescue"]["height"], NEVER)
++
++        self.log.info("Options: an explicit height below the final tripwire height is refused")
++        self.stop_node(1)
++        self.nodes[1].assert_start_raises_init_error(
++            extra_args=[f"-signettripwire={H3}@{self.tripwire_outpoint}", f"-testactivationheight=p2mr_rescue@{H3 - 1}"],
++            expected_msg=f"Error: The p2mr_rescue height must be at or above the p2mr_tripwire height {H3}, not {H3 - 1}.")
++        self.nodes[1].assert_start_raises_init_error(extra_args=["-signetrescue=300"],
++                                                     expected_msg="Error: -signetrescue can only be used with signet.")
++        self.start_node(1, extra_args=self.rules_args(1))
++        self.connect_nodes(0, 1)
++        self.sync_all()
++
++    def fund_everything(self):
++        self.log.info("Fund the rescue outputs below the tripwire height")
++        self.r_boundary = self.new_rescue("boundary", 4)
++        self.r_two = self.new_rescue("two", 2)
++        self.r_three = self.new_rescue("three", 3)
++        self.r_four = self.new_rescue("four", 4)
++        self.r_verify = self.new_rescue("verify", 2, tree="verify")
++        self.r_p2p = self.new_rescue("p2p", 6)
++        self.r_removal = self.new_rescue("removal", 3)
++        self.r_branch = self.new_rescue("branch", 6)
++        self.r_late = self.new_rescue("late", 1)
++        # An output with a leaf that executes a rescue check and drops a 0x50-tagged annex otherwise:
++        # a P2MR leaf of version 0xe0 with another annex.
++        self.other_annex = p2mr_construct([("rescue", CScript([OP_TRUE]), P2MR_LEAF_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++        self.r_other_annex = self.fund([self.other_annex.scriptPubKey])
++        # The shape of review round 1, item 1: tokens dropped, 32-byte pushes in a branch never run.
++        self.bomb = p2mr_construct([("rescue", CScript([OP_DROP] * BOMB_TOKENS + [OP_0, OP_IF] +
++                                                       [hashlib.sha256(b"bomb %d" % i).digest() for i in range(BOMB_PUSHES)] +
++                                                       [OP_ENDIF, OP_TRUE]), P2MR_LEAF_TRIPWIRED),
++                                    ("fail", CScript([OP_RETURN]))])
++        self.r_bomb = self.fund([self.bomb.scriptPubKey])
++        assert self.nodes[0].getblockcount() < H3
++
++    def test_before_trigger_is_irrelevant_below_h4r(self):
++        self.log.info("Spend the tripwire output at height 230: elliptic curve checks disabled from 231")
++        self.generate(self.nodes[0], 229 - self.nodes[0].getblockcount(), sync_fun=self.sync_main)
++        spend_t = self.wallet.create_self_transfer(utxo_to_spend=self.tripwire_utxo)["tx"]
++        self.trigger_hash = self.block_with([spend_t])
++        self.sync_main()
++        assert_equal(self.nodes[0].getblockcount(), 230)
++        assert_equal(self.nodes[0].gettripwireinfo()["ec_disabled_next_block"], True)
++
++    def test_activation_boundary(self):
++        node = self.nodes[0]
++        self.generate(node, H4R - 2 - node.getblockcount(), sync_fun=self.sync_main)
++        assert_equal(node.getblockcount(), H4R - 2)
++        (u0, key, tree), (u1, _, _), (u2, _, _), (u3, _, _) = self.r_boundary
++
++        self.log.info("H4R - 1: a rescue spend in a block is refused: the token is a signature there")
++        x0 = self.rescue_tx([(u0, key, tree)])
++        self.refuse_block([x0], EC_DISABLED_ERROR)
++        self.mine()
++        assert_equal(node.getblockcount(), H4R - 1)
++
++        self.log.info("Tip H4R - 1: the mempool refuses it, by the tip's own flags, without the BUG! line")
++        assert_equal(self.rescue_info(), {"height": H4R, "active_next_block": True, "mempool_accepts": False,
++                                          "network_id": network_id_regtest().hex(), "statements": ["01"]})
++        with node.assert_debug_log(expected_msgs=[], unexpected_msgs=["BUG! PLEASE REPORT THIS!"]):
++            self.reject(x0, EC_DISABLED_ERROR)
++            res = node.testmempoolaccept([x0.serialize().hex()])[0]
++            assert_equal(res["allowed"], False)
++            assert EC_DISABLED_ERROR in res["reject-reason"]
++            # A package of a parent and the rescue spend of its output.
++            parent, child = self.parent_and_child("package below")
++            pkg = node.submitpackage([parent.serialize().hex(), child.serialize().hex()])
++            assert EC_DISABLED_ERROR in pkg["tx-results"][child.wtxid_hex]["error"]
++            assert child.txid_hex not in node.getrawmempool()
++        self.wallet.rescan_utxos()
++
++        self.log.info("H4R: a rescue spend in a block through generateblock, which the M4-S node refuses")
++        self.first_rescue_hash = self.block_with([x0])
++        self.sync_main()
++        assert_equal(node.getblockcount(), H4R)
++        # Logged once, on the active chainstate, when the block is connected.
++        assert_equal(node.debug_log_path.read_text().count(self.rescue_log(u0, x0, self.first_rescue_hash, H4R, key)), 1)
++        self.wait_until(lambda: any(tip["hash"] == self.first_rescue_hash and tip["status"] == "invalid" for tip in self.nodes[2].getchaintips()))
++        assert_equal(self.nodes[2].getblockcount(), H4R - 1)
++
++        self.log.info("Tip H4R: the mempool takes rescue spends, through every entry; H4R + 1 confirms them")
++        assert_equal(self.rescue_info()["mempool_accepts"], True)
++        x1 = self.rescue_tx([(u1, key, tree)])
++        res = node.testmempoolaccept([x1.serialize().hex()])[0]
++        assert_equal(res["allowed"], True)
++        self.accept(x1)
++        # A package: a parent that funds a rescue output, and the rescue spend of it.
++        parent, child = self.parent_and_child("package")
++        pkg = node.submitpackage([parent.serialize().hex(), child.serialize().hex()])
++        assert_equal(pkg["package_msg"], "success")
++        assert child.txid_hex in node.getrawmempool()
++        self.wallet.rescan_utxos()
++        # The proof is bound to the network: one made for another network id is refused.
++        other = self.rescue_tx([(u2, key, tree)], network_id=hashlib.sha256(b"another network").digest())
++        self.reject(other, "Invalid rescue proof")
++        hashes = self.mine()
++        block = node.getblock(hashes[0])
++        assert x1.txid_hex in block["tx"] and child.txid_hex in block["tx"]
++        assert node.debug_log_path.read_text().count(f"by {x1.txid_hex} in block {hashes[0]} (height {H4R + 1})") == 1
++        # Not on a template, which is checked with TestBlockValidity: no log line until the block connects.
++        x2 = self.rescue_tx([(u2, key, tree)])
++        self.accept(x2)
++        tmpl = node.getblocktemplate({"rules": ["segwit"]})
++        assert any(t["txid"] == x2.txid_hex for t in tmpl["transactions"])
++        assert_equal(node.debug_log_path.read_text().count(f"by {x2.txid_hex}"), 0)
++        self.mine()
++        assert_equal(node.debug_log_path.read_text().count(f"by {x2.txid_hex}"), 1)
++        self.x_keep = (u3, key, tree)
++
++    def test_relay_policy(self):
++        node = self.nodes[0]
++        self.log.info("Two and three inputs of one key are standard; four are not, but valid in a block")
++        self.accept(self.rescue_tx(self.r_two))
++        self.accept(self.rescue_tx(self.r_three))
++        four = self.rescue_tx(self.r_four)
++        self.reject(four, "tx-size")
++        self.block_with([four])
++        self.sync_main()
++
++        self.log.info("A rescue check outside template R1 is valid but not relayed; -acceptnonstdtxn takes it")
++        v0 = self.rescue_tx(self.r_verify[:1])
++        self.reject(v0, NONSTANDARD)
++        self.accept(v0, node=1)
++        v1 = self.rescue_tx(self.r_verify[1:])
++        v1_hash = self.block_with([v1])
++        self.sync_main()
++        # Valid, but not logged: only template R1 is (doc/p2mr-rescue.md).
++        assert_equal(node.debug_log_path.read_text().count(f"by {v1.txid_hex}"), 0)
++        assert_equal(node.debug_log_path.read_text().count(f"in block {v1_hash}"), 0)
++
++        self.log.info("The log is of constant cost per input: many tokens and many key-sized pushes cost nothing")
++        (u,) = self.r_bomb
++        leaf = self.bomb.leaves["rescue"]
++        key = RescueKey("bomb")
++        bomb = CTransaction()
++        bomb.vin = [CTxIn(COutPoint(u["txid"], u["vout"]))]
++        bomb.vout = [CTxOut(u["value"] - 10_000, self.wallet.get_output_script())]
++        bomb.wit.vtxinwit = [CTxInWitness()]
++        bomb.wit.vtxinwit[0].scriptWitness.stack = [key.token] * BOMB_TOKENS + [bytes(leaf.script), leaf.control_block,
++                                                                                rescue_annex(bytes(130_218))]
++        assert bomb.get_weight() > 1_700_000
++        start = time.time()
++        bomb_hash = self.block_with([bomb])
++        self.sync_main()
++        # A search of every token against every push would make about 50 million elliptic curve
++        # multiplications on each node, many minutes; the structural test makes none.
++        elapsed = time.time() - start
++        self.log.info(f"  connected and synced in {elapsed:.1f} s")
++        assert elapsed < 60, elapsed
++        for n in self.main_nodes():
++            assert_equal(n.getbestblockhash(), bomb_hash)
++            assert_equal(n.debug_log_path.read_text().count(f"in block {bomb_hash}"), 0)
++
++        self.log.info("Other annexes stay non-standard")
++        (u,) = self.r_other_annex
++        leaf = self.other_annex.leaves["rescue"]
++        tx = CTransaction()
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]))]
++        tx.vout = [CTxOut(u["value"] - 10_000, self.wallet.get_output_script())]
++        tx.wit.vtxinwit = [CTxInWitness()]
++        tx.wit.vtxinwit[0].scriptWitness.stack = [bytes(leaf.script), leaf.control_block, b"\x50\x00"]
++        self.reject(tx, NONSTANDARD)
++        self.mine()
++
++    def test_p2p_gate(self):
++        node = self.nodes[0]
++        p2p = self.r_p2p
++        self.log.info("P2P: a rescue spend from a peer without noban is dropped before validation")
++        plain = node.add_p2p_connection(P2PInterface())
++        trusted = node.add_p2p_connection(P2PInterface(), dstport=self.noban_port)
++        peers = node.getpeerinfo()
++        assert_equal([p["permissions"] for p in peers if p["addrbind"].endswith(f":{self.noban_port}")], [["noban", "download"]])
++        assert_equal([p["permissions"] for p in peers if p["inbound"] and not p["addrbind"].endswith(f":{self.noban_port}")], [[]])
++        tx = self.rescue_tx(p2p[:1])
++        with node.assert_debug_log([f"dropped rescue spend {tx.txid_hex} (wtxid={tx.wtxid_hex}) from peer="]):
++            plain.send_and_ping(msg_tx(tx))
++        assert tx.txid_hex not in node.getrawmempool()
++        # Sent again by the same peer: dropped again, the peer stays connected.
++        with node.assert_debug_log([f"dropped rescue spend {tx.txid_hex}"]):
++            plain.send_and_ping(msg_tx(tx))
++        assert plain.is_connected
++        # Not in the reject filters: the same transaction from a noban peer is taken.
++        trusted.send_and_ping(msg_tx(tx))
++        assert tx.txid_hex in node.getrawmempool()
++        self.mine()
++
++        self.log.info("P2P: both txid and wtxid count as answered, so another peer is asked at once")
++        for wtxid_relay in (True, False):
++            tx = self.rescue_tx(p2p[1:2] if wtxid_relay else p2p[2:3])
++            inv_type, inv_hash = (MSG_WTX, tx.wtxid_int) if wtxid_relay else (MSG_TX, tx.txid_int)
++            now = int(time.time())
++            node.setmocktime(now)
++            a = node.add_p2p_connection(P2PInterface(wtxidrelay=wtxid_relay))
++            b = node.add_p2p_connection(P2PInterface(wtxidrelay=wtxid_relay), dstport=self.noban_port)
++            a.send_and_ping(msg_inv([CInv(inv_type, inv_hash)]))
++            node.setmocktime(now + 5)
++            a.wait_for_getdata([inv_hash])
++            b.send_and_ping(msg_inv([CInv(inv_type, inv_hash)]))
++            with p2p_lock:
++                b.last_message.pop("getdata", None)
++            a.send_and_ping(msg_tx(tx))
++            # No time passes beyond the announcement delays: b is asked because a's request is done.
++            node.setmocktime(now + 8)
++            b.wait_for_getdata([inv_hash], timeout=20)
++            b.send_and_ping(msg_tx(tx))
++            assert tx.txid_hex in node.getrawmempool()
++            a.peer_disconnect()
++            b.peer_disconnect()
++            node.setmocktime(0)
++            self.mine()
++
++        self.log.info("P2P: an orphan rescue spend from a peer without noban never reaches the orphanage")
++        key = RescueKey("orphan")
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        parent = CTransaction()
++        parent.vin = [CTxIn(COutPoint(int(utxo["txid"], 16), utxo["vout"]))]
++        parent.vout = [CTxOut(FUND_SATS, key.r1.scriptPubKey), CTxOut(FUND_SATS, key.r1.scriptPubKey),
++                       CTxOut(int(utxo["value"] * COIN) - 2 * FUND_SATS - 20_000, self.wallet.get_output_script())]
++        self.wallet.sign_tx(parent)
++        out = [{"txid": parent.txid_int, "vout": n, "value": FUND_SATS, "spk": key.r1.scriptPubKey} for n in (0, 1)]
++        orphan_a = self.rescue_tx([(out[0], key, key.r1)])
++        orphan_b = self.rescue_tx([(out[1], key, key.r1)])
++        plain = node.add_p2p_connection(P2PInterface())
++        trusted = node.add_p2p_connection(P2PInterface(), dstport=self.noban_port)
++        plain.send_and_ping(msg_tx(orphan_a))
++        assert_equal(node.getorphantxs(), [])
++        trusted.send_and_ping(msg_tx(orphan_b))
++        assert_equal(node.getorphantxs(), [orphan_b.txid_hex])
++        plain.send_and_ping(msg_tx(parent))
++        self.wallet.rescan_utxos()
++        mempool = node.getrawmempool()
++        assert parent.txid_hex in mempool and orphan_b.txid_hex in mempool
++        assert orphan_a.txid_hex not in mempool
++        self.mine()
++        node.disconnect_p2ps()
++
++        self.log.info("P2P: -whitelist without a direction leaves an outbound manual peer without noban")
++        tx = self.rescue_tx(p2p[3:4])
++        for i in (1, 2, 3):
++            self.disconnect_nodes(0, i)
++        self.restart_node(0, extra_args=self.rules_args(0) + ["-whitelist=noban@127.0.0.1"])
++        self.connect_nodes(0, 1)  # outbound from node 0
++        assert_equal([p["permissions"] for p in node.getpeerinfo()], [[]])
++        with node.assert_debug_log(["dropped rescue spend " + tx.txid_hex]):
++            self.accept(tx, node=1)
++            self.wait_until(lambda: node.debug_log_path.read_text().count("dropped rescue spend " + tx.txid_hex) > 0)
++        assert tx.txid_hex not in node.getrawmempool()
++        self.disconnect_nodes(0, 1)
++        self.restart_node(0, extra_args=self.rules_args(0) + ["-whitelist=noban,in,out@127.0.0.1"])
++        self.connect_nodes(0, 1)
++        assert_equal([p["permissions"] for p in node.getpeerinfo()], [["noban", "download"]])
++        # Node 1 has it in its mempool: a new transaction makes it announce, so send another.
++        tx2 = self.rescue_tx(p2p[4:5])
++        self.accept(tx2, node=1)
++        self.wait_until(lambda: tx2.txid_hex in node.getrawmempool())
++        self.restart_node(0, extra_args=self.rules_args(0))
++        for i in (1, 2, 3):
++            self.connect_nodes(0, i)
++        self.mine()
++
++    def test_removal_below_h4r_ec_disabled(self):
++        node = self.nodes[0]
++        self.log.info("Back below H4R with elliptic curve checks disabled: rescue spends and their descendants go")
++        x = self.rescue_tx(self.r_removal[:1])
++        self.accept(x)
++        child = self.wallet.create_self_transfer(utxo_to_spend={"txid": x.txid_hex, "vout": 0, "value": Decimal(x.vout[0].nValue) / COIN,
++                                                                "height": 0, "coinbase": False, "confirmations": 0})
++        self.wallet.sendrawtransaction(from_node=node, tx_hex=child["hex"])
++        assert {x.txid_hex, child["txid"]} <= set(node.getrawmempool())
++        node.invalidateblock(self.first_rescue_hash)
++        assert_equal(node.getblockcount(), H4R - 1)
++        assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], True)
++        mempool = set(node.getrawmempool())
++        assert x.txid_hex not in mempool and child["txid"] not in mempool
++        # Nor do the rescue spends of the disconnected blocks come back.
++        assert not any(len(node.getrawtransaction(t, True)["vin"][0].get("txinwitness", [])) == 4 for t in mempool)
++        node.reconsiderblock(self.first_rescue_hash)
++        self.sync_main()
++        self.wallet.rescan_utxos()
++
++    def test_parent_back_child_removed(self):
++        node = self.nodes[0]
++        self.log.info("A parent put back from a disconnected block: its rescue child and that child's child")
++        parent, child = self.parent_and_child("resurrected")
++        self.accept(parent)
++        block = self.mine()[0]
++        assert parent.txid_hex in node.getblock(block)["tx"]
++        self.accept(child)
++        # The child's own child: not a rescue spend, so the filter can only remove it as a descendant.
++        # nSequence 0xfffffffd, as the rescue spends have: with nSequence 0, a reorganization that
++        # disconnects its grandparent drops such a transaction, with or without the rescue lane.
++        grandchild = self.wallet.create_self_transfer(utxo_to_spend={"txid": child.txid_hex, "vout": 0, "value": Decimal(child.vout[0].nValue) / COIN,
++                                                                     "height": 0, "coinbase": False, "confirmations": 0}, sequence=0xfffffffd)
++        self.wallet.sendrawtransaction(from_node=node, tx_hex=grandchild["hex"])
++
++        # A reorganization that keeps the lane open: the parent comes back, and the whole chain stays,
++        # with the dependency edges restored.
++        node.invalidateblock(block)
++        assert node.getblockcount() >= H4R
++        assert_equal(self.rescue_info()["mempool_accepts"], True)
++        entry = {t: node.getmempoolentry(t) for t in (parent.txid_hex, child.txid_hex, grandchild["txid"])}
++        assert_equal(entry[parent.txid_hex]["depends"], [])
++        assert_equal(entry[parent.txid_hex]["spentby"], [child.txid_hex])
++        assert_equal(entry[child.txid_hex]["depends"], [parent.txid_hex])
++        assert_equal(entry[child.txid_hex]["spentby"], [grandchild["txid"]])
++        assert_equal(entry[grandchild["txid"]]["depends"], [child.txid_hex])
++        # And in the transaction graph, not only in the inputs and the outpoint index.
++        assert_equal([entry[t]["ancestorcount"] for t in (parent.txid_hex, child.txid_hex, grandchild["txid"])], [1, 2, 3])
++        assert_equal([entry[t]["descendantcount"] for t in (parent.txid_hex, child.txid_hex, grandchild["txid"])], [3, 2, 1])
++
++        # One that closes the lane, without crossing H3: the parent stays, the rescue child goes by the
++        # filter, which runs after the parent is back, and its child goes with it as a descendant.
++        node.invalidateblock(self.first_rescue_hash)
++        assert_equal(node.getblockcount(), H4R - 1)
++        assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], True)
++        mempool = set(node.getrawmempool())
++        assert parent.txid_hex in mempool
++        assert_equal(node.getmempoolentry(parent.txid_hex)["spentby"], [])
++        assert child.txid_hex not in mempool
++        assert grandchild["txid"] not in mempool
++        node.reconsiderblock(self.first_rescue_hash)
++        self.sync_main()
++        self.wallet.rescan_utxos()
++
++    def test_rescue_filter_alone(self):
++        node = self.nodes[1]
++        self.log.info("A rescue record that no rescue check reads: below H4R, only the filter removes it")
++        # A leaf of version 0xe0 that is OP_TRUE: valid with the lane open or closed, whatever the annex.
++        # Node 1 relays it (-acceptnonstdtxn), and after a reorganization below H4R its scripts pass, so
++        # the script re-check keeps it; the rescue record is the only reason for it to go.
++        (u,) = self.fund([self.other_annex.scriptPubKey])
++        leaf = self.other_annex.leaves["rescue"]
++        tx = CTransaction()
++        # nSequence 0xfffffffd, as in test_parent_back_child_removed: its funding transaction descends
++        # from transactions the reorganization below puts back.
++        tx.vin = [CTxIn(COutPoint(u["txid"], u["vout"]), b"", 0xfffffffd)]
++        tx.vout = [CTxOut(u["value"] - 10_000, self.wallet.get_output_script())]
++        tx.wit.vtxinwit = [CTxInWitness()]
++        tx.wit.vtxinwit[0].scriptWitness.stack = [bytes(leaf.script), leaf.control_block, rescue_annex(bytes(130_218))]
++        block = self.block_with([tx], node=1)
++        self.sync_main()
++        assert node.getblock(block)["height"] > H4R
++        node.invalidateblock(self.first_rescue_hash)
++        assert_equal(node.getblockcount(), H4R - 1)
++        assert tx.txid_hex not in node.getrawmempool()
++        # Nothing but the filter: the same transaction is taken at that tip.
++        res = node.testmempoolaccept([tx.serialize().hex()])[0]
++        assert_equal(res["allowed"], True)
++        node.reconsiderblock(self.first_rescue_hash)
++        self.sync_main()
++        self.wallet.rescan_utxos()
++
++    def test_reorganization_across_h3(self):
++        node = self.nodes[0]
++        self.log.info("A reorganization across H3: below it, leaf version 0xe0 is not executed and the lane is closed")
++        x = self.rescue_tx(self.r_removal[1:2])
++        self.accept(x)
++        old_tip = node.getbestblockhash()
++        # Back to tip H3 - 2: the next block, H3 - 1, has no tripwire rules.
++        below_h3 = node.getblockhash(H3 - 1)
++        node.invalidateblock(below_h3)
++        assert_equal(node.getblockcount(), H3 - 2)
++        assert x.txid_hex not in node.getrawmempool()
++        assert not any(len(node.getrawtransaction(t, True)["vin"][0].get("txinwitness", [])) == 4 for t in node.getrawmempool())
++        assert_equal(self.rescue_info()["mempool_accepts"], False)
++        # And the mempool refuses it: elliptic curve checks work for the next block.
++        self.reject(x, EC_ENABLED)
++        node.reconsiderblock(below_h3)
++        assert_equal(node.getbestblockhash(), old_tip)
++        # Back above H4R with the trigger in the chain: the spend is taken again.
++        self.accept(x)
++        self.mine()
++        self.wallet.rescan_utxos()
++
++    def test_ec_enabled_branch(self):
++        node = self.nodes[0]
++        self.log.info("A branch without the trigger, on node 0 alone: elliptic curve checks working from H3 on")
++        old_height = node.getblockcount()
++        for i in (1, 2, 3):
++            self.disconnect_nodes(0, i)
++        node.invalidateblock(self.trigger_hash)
++        assert_equal(node.getblockcount(), 229)
++        self.wallet.rescan_utxos()
++        self.generate(node, H4R - 1 - node.getblockcount(), sync_fun=self.no_op)
++        b = self.r_branch
++        y1 = self.rescue_tx(b[:1])
++        self.log.info("Before the trigger: the mempool refuses rescue spends by the policy check, a block takes them")
++        self.reject(y1, EC_ENABLED)
++        assert_equal(node.testmempoolaccept([y1.serialize().hex()])[0]["reject-reason"], EC_ENABLED)
++        self.branch_rescue_hash = self.block_with([y1])
++        assert_equal(node.getblockcount(), H4R)
++        info = self.rescue_info()
++        assert_equal((info["active_next_block"], info["mempool_accepts"]), (True, False))
++        y2 = self.rescue_tx(b[1:2])
++        self.reject(y2, EC_ENABLED)
++        self.generate(node, 4, sync_fun=self.no_op)
++
++        self.log.info("Trigger above H4R; then a reorganization over it brings elliptic curve checks back")
++        # The trigger block confirms y2 too, a rescue spend valid while elliptic curve checks work.
++        spend_t = self.wallet.create_self_transfer(utxo_to_spend=self.tripwire_utxo)["tx"]
++        trigger = self.block_with([spend_t, y2])
++        assert_equal(self.rescue_info()["mempool_accepts"], True)
++        y3 = self.rescue_tx(b[2:3])
++        self.accept(y3)
++        # A rescue spend confirmed above the trigger comes back while the trigger is still in the chain
++        # (invalidateblock updates the mempool after each block it disconnects), and stays.
++        y5 = self.rescue_tx(b[4:5])
++        self.accept(y5)
++        above = self.generate(node, 1, sync_fun=self.no_op)[0]
++        assert y5.txid_hex in node.getblock(above)["tx"]
++        node.invalidateblock(trigger)
++        assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], False)
++        assert_equal(self.rescue_info()["mempool_accepts"], False)
++        mempool = set(node.getrawmempool())
++        # In the mempool before the reorganization: it stays, valid in the next block. From the
++        # disconnected trigger block, whose parent leaves the checks working: refused by the policy check.
++        assert y3.txid_hex in mempool
++        assert y5.txid_hex in mempool
++        assert y2.txid_hex not in mempool
++        assert spend_t.txid_hex in mempool
++        node.getblocktemplate({"rules": ["segwit"]})
++        new = self.generate(node, 1, sync_fun=self.no_op)[0]
++        assert y3.txid_hex in node.getblock(new)["tx"]
++        assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], True)
++
++        self.log.info("Back below H4R with elliptic curve checks working: rescue spends go")
++        y4 = self.rescue_tx(b[3:4])
++        self.accept(y4)
++        node.invalidateblock(self.branch_rescue_hash)
++        assert_equal(node.getblockcount(), H4R - 1)
++        assert_equal(node.gettripwireinfo()["ec_disabled_next_block"], False)
++        assert y4.txid_hex not in node.getrawmempool()
++        node.reconsiderblock(self.branch_rescue_hash)
++        node.reconsiderblock(trigger)
++        # Longer than the chain the others follow, which they then leave for it.
++        self.generate(node, old_height + 2 - node.getblockcount(), sync_fun=self.no_op)
++        for i in (1, 3):
++            self.connect_nodes(0, i)
++        self.sync_main()
++        self.wallet.rescan_utxos()
++
++    def test_late_upgrade(self):
++        self.log.info("The M4-S node stopped below the first rescue block, without a fork of its own")
++        late = self.nodes[2]
++        self.connect_nodes(0, 2)
++        # It has both rescue blocks at H4R, and refused them; it stays at H4R - 1 of either branch.
++        self.wait_until(lambda: f"InvalidChainFound: invalid block={self.branch_rescue_hash}  height={H4R}" in late.debug_log_path.read_text())
++        assert any(t["status"] == "invalid" for t in late.getchaintips())
++        assert_equal(late.getblockcount(), H4R - 1)
++        assert all(t["status"] in ("invalid", "headers-only", "valid-headers", "valid-fork", "active") for t in late.getchaintips())
++        assert_equal(len([t for t in late.getchaintips() if t["status"] == "active"]), 1)
++        self.disconnect_nodes(0, 2)
++        self.log.info("Upgraded to M4-R, with reconsiderblock it follows the chain")
++        self.use_binary(late, None)
++        self.restart_node(2, extra_args=[f"-signettripwire={H3}@{self.tripwire_outpoint}", f"-testactivationheight=p2mr_rescue@{H4R}"])
++        # The block stays marked invalid until reconsidered.
++        assert_equal(late.getblockcount(), H4R - 1)
++        late.reconsiderblock(self.branch_rescue_hash)
++        self.connect_nodes(0, 2)
++        self.sync_blocks()
++        assert_equal(late.getbestblockhash(), self.nodes[0].getbestblockhash())
++
++    def test_restarts(self):
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        for extra in (["-reindex"], ["-reindex-chainstate"], ["-checklevel=4", f"-checkblocks={node.getblockcount() - H4R + 5}"]):
++            self.log.info(f"Restart with {extra}")
++            self.restart_node(0, extra_args=self.rules_args(0) + extra)
++            self.wait_until(lambda: node.getbestblockhash() == tip)
++        self.log.info("The pruned node follows, and restarts")
++        self.restart_node(3, extra_args=self.rules_args(3))
++        self.connect_nodes(0, 3)
++        self.sync_blocks()
++        assert_equal(self.nodes[3].getbestblockhash(), tip)
++
++    def test_log_needs_p2mr(self):
++        self.log.info("Regtest with P2MR above the lane's height: an R1-shaped spend is not a rescue and is not logged")
++        node = self.nodes[3]
++        self.disconnect_nodes(0, 3)
++        self.restart_node(3, extra_args=self.rules_args(3) + ["-testactivationheight=p2mr@5000"])
++        assert node.getblockcount() < 5000
++        wallet = MiniWallet(node)
++        wallet.rescan_utxos()
++        key = RescueKey("no p2mr")
++        sent = wallet.send_to(from_node=node, scriptPubKey=key.r1.scriptPubKey, amount=FUND_SATS)
++        self.generate(node, 1, sync_fun=self.no_op)
++        leaf = key.r1.leaves["rescue"]
++        tx = CTransaction()
++        tx.vin = [CTxIn(COutPoint(int(sent["txid"], 16), sent["sent_vout"]))]
++        tx.vout = [CTxOut(FUND_SATS - 10_000, wallet.get_output_script())]
++        tx.wit.vtxinwit = [CTxInWitness()]
++        # Any proof: without P2MR the output is an unknown witness version, which any witness spends.
++        tx.wit.vtxinwit[0].scriptWitness.stack = [key.token, bytes(leaf.script), leaf.control_block, rescue_annex(bytes(130_218))]
++        block = self.block_with([tx], node=3)
++        assert_equal(node.getbestblockhash(), block)
++        assert_equal(node.debug_log_path.read_text().count(f"by {tx.txid_hex}"), 0)
++
++
++if __name__ == '__main__':
++    P2MRRescueTest(__file__).main()
+diff --git a/test/functional/feature_p2mr_rescue_signet.py b/test/functional/feature_p2mr_rescue_signet.py
+new file mode 100644
+index 0000000..30fad3c
+--- /dev/null
++++ b/test/functional/feature_p2mr_rescue_signet.py
+@@ -0,0 +1,127 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the P2MR rescue lane on a custom signet, with -signetrescue (doc/p2mr-rescue.md).
++
++The lane opens at the height -signetrescue gives, at or above that of -signettripwire, which it
++needs, and its proofs are bound to the signet's network id, SHA256 of the challenge: a proof made
++for regtest's id is refused there. The options are refused without a challenge, without the tripwire
++rules, below the tripwire height, on Ark-0 and on the default signet.
++"""
++
++import hashlib
++
++from test_framework.messages import COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_rescue import (
++    P2MR_LEAF_TRIPWIRED,
++    RESCUE_STATEMENT_HMAC,
++    WALLET_V1_SCHNORR_K,
++    find_prover,
++    network_id_regtest,
++    network_id_signet,
++    prove,
++    rescue_annex,
++    rescue_key,
++    rescue_message,
++    rescue_pub,
++    rescue_sighash,
++    rescue_token,
++    rescue_y,
++)
++from test_framework.script import CScript, OP_CHECKSIG, OP_RETURN
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++
++CHALLENGE = "51"
++H3 = 120
++H4R = 125
++# Signet blocks need real proof of work, about 2^22 hashes each.
++MAXTRIES = 10**9
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++# A tripwire output that never existed: elliptic curve checks in leaf version 0xe0 are disabled from H3.
++TRIPWIRE = f"{H3}@{'11' * 32}:0"
++ARGS = [f"-signetchallenge={CHALLENGE}", "-signetmldsa44=1", f"-signettripwire={TRIPWIRE}", f"-signetrescue={H4R}", "-acceptnonstdtxn=1"]
++
++
++class P2MRRescueSignetTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.num_nodes = 1
++        self.setup_clean_chain = True
++        self.extra_args = [ARGS]
++        self.rpc_timeout = 600
++
++    def run_test(self):
++        node = self.nodes[0]
++        prover = find_prover(self.config)
++        nid = network_id_signet(bytes.fromhex(CHALLENGE))
++        assert_equal(nid, hashlib.sha256(b"\x51").digest())
++
++        self.log.info("Parameters, the startup log and gettripwireinfo")
++        dep = node.getdeploymentinfo()["deployments"]["p2mr_rescue"]
++        assert_equal((dep["type"], dep["height"]), ("buried", H4R))
++        assert_equal(node.gettripwireinfo()["rescue"]["network_id"], nid.hex())
++        assert node.debug_log_path.read_text().count(
++            f"Signet P2MR rescue lane from height {H4R} for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id {nid.hex()}") == 1
++
++        # Blocks to a bare OP_TRUE output, whose first coinbase funds the rescue output.
++        hashes = []
++        for _ in range(11):
++            hashes += self.generatetodescriptor(node, 10, "raw(51)", maxtries=MAXTRIES)
++        coinbase = node.getblock(hashes[0], 2)["tx"][0]
++        x = hashlib.sha256(b"feature_p2mr_rescue_signet seed").digest()
++        y = rescue_y(WALLET_V1_SCHNORR_K, x, 0)
++        pubkey = rescue_key(y)
++        tree = p2mr_construct([("rescue", CScript([pubkey, OP_CHECKSIG]), P2MR_LEAF_TRIPWIRED), ("fail", CScript([OP_RETURN]))])
++        fund_tx = CTransaction()
++        fund_tx.vin = [CTxIn(COutPoint(int(coinbase["txid"], 16), 0))]
++        fund_tx.vout = [CTxOut(1_000_000, tree.scriptPubKey)]
++        node.sendrawtransaction(fund_tx.serialize().hex(), 0)
++        fund = {"txid": fund_tx.txid_hex, "sent_vout": 0}
++        self.generate(node, H4R - node.getblockcount(), maxtries=MAXTRIES)
++        assert_equal(node.getblockcount(), H4R)
++        assert_equal(node.gettripwireinfo()["rescue"]["mempool_accepts"], True)
++
++        def spend(network_id):
++            tx = CTransaction()
++            tx.vin = [CTxIn(COutPoint(int(fund["txid"], 16), fund["sent_vout"]))]
++            # A P2MR output, so that the transaction is not below the minimum size of policy.
++            tx.vout = [CTxOut(900_000, tree.scriptPubKey)]
++            spent = [CTxOut(1_000_000, tree.scriptPubKey)]
++            leaf = tree.leaves["rescue"]
++            pub = rescue_pub(WALLET_V1_SCHNORR_K, 0, y)
++            sighash = rescue_sighash(tx, 0, spent, leaf.script, network_id, RESCUE_STATEMENT_HMAC, pub)
++            _, proof = prove(prover, WALLET_V1_SCHNORR_K, 0, x, rescue_message(sighash, network_id, pubkey))
++            tx.wit.vtxinwit = [CTxInWitness()]
++            tx.wit.vtxinwit[0].scriptWitness.stack = [rescue_token(WALLET_V1_SCHNORR_K, 0, y), bytes(leaf.script), leaf.control_block, rescue_annex(proof)]
++            return tx
++
++        self.log.info("A proof bound to regtest's network id is refused on this signet; one bound to its own is taken")
++        wrong = spend(network_id_regtest())
++        assert_raises_rpc_error(-26, "Invalid rescue proof", node.sendrawtransaction, wrong.serialize().hex())
++        right = spend(nid)
++        node.sendrawtransaction(right.serialize().hex())
++        block = self.generate(node, 1, maxtries=MAXTRIES)[0]
++        assert right.txid_hex in node.getblock(block)["tx"]
++        assert f"by {right.txid_hex} in block {block} (height {H4R + 1}): statement 01, key {pubkey.hex()}" in node.debug_log_path.read_text()
++
++        self.log.info("The options")
++        self.stop_node(0)
++        base = [f"-signetchallenge={CHALLENGE}", "-signetmldsa44=1"]
++        node.assert_start_raises_init_error(extra_args=base + [f"-signetrescue={H4R}"],
++                                            expected_msg="Error: -signetrescue requires -signettripwire.")
++        node.assert_start_raises_init_error(extra_args=base + [f"-signettripwire={TRIPWIRE}", f"-signetrescue={H3 - 1}"],
++                                            expected_msg=f"Error: -signetrescue height must be at or above the -signettripwire height {H3}, not {H3 - 1}.")
++        node.assert_start_raises_init_error(extra_args=[f"-signetrescue={H4R}"],
++                                            expected_msg="Error: -signetrescue requires -signetchallenge.")
++        node.assert_start_raises_init_error(extra_args=[f"-signetchallenge={ARK0_CHALLENGE}", f"-signetrescue={H4R}"],
++                                            expected_msg="Error: -signetrescue cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        node.assert_start_raises_init_error(extra_args=base + [f"-signettripwire={TRIPWIRE}", f"-signetrescue={H4R}", f"-signetrescue={H4R + 1}"],
++                                            expected_msg="Error: -signetrescue cannot be multiple values.")
++        self.start_node(0, extra_args=ARGS)
++
++
++if __name__ == '__main__':
++    P2MRRescueSignetTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index b6046ff..4673f0f 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -290,6 +290,8 @@ BASE_SCRIPTS = [
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
+     'feature_p2mr_slhdsa128s.py',
++    'feature_p2mr_rescue.py',
++    'feature_p2mr_rescue_signet.py',
+     'feature_p2mr_tripwire.py',
+     'feature_signet_pqblock.py',
+     'wallet_p2mr.py',
+-- 
+2.43.0
+

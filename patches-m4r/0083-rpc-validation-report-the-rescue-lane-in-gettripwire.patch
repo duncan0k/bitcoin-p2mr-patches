@@ -1,0 +1,207 @@
+From e43f491ff3de2730b0fe0c19092315274ec39578 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:09 +0000
+Subject: [PATCH 83/88] rpc, validation: report the rescue lane in
+ gettripwireinfo and log rescue spends
+
+- gettripwireinfo has a rescue object where the lane has a height, from
+  the same snapshot as the rest: the height, whether the lane is open for
+  the next block, whether the mempool takes rescue spends (open at the
+  tip and elliptic curve checks disabled for the next block), the network
+  id and the statement ids. Wallets and the explorer read it.
+- When a block joins the active chain, each rescue spend in it is logged
+  with the spent output, the statement and the key, after ConnectTip,
+  and on the active chainstate only: not for proposals, candidates that
+  turn out invalid, VerifyDB or the background chainstate. Only inputs
+  that spend a P2MR output through template R1 are logged: the whole
+  witness a token, <key> OP_CHECKSIG at leaf version 0xe0 and depth one
+  or more, the control block and one rescue record, with the spent
+  output read before the block spends it. A token is never a valid
+  BIP 340 signature, so in a valid block such an input went through the
+  rescue path. The test costs a constant amount per input and makes no
+  elliptic curve operation; rescue checks in other leaf shapes are not
+  logged. Whether the lane applies is read from the flags the block is
+  checked with (P2MR and leaf version 0xe0 in force, the lane open), not
+  from the deployment alone, so that a regtest with P2MR later than the
+  lane logs no unknown witness version spend.
+
+feature_p2mr_tripwire.py compares a whole gettripwireinfo result, which
+now has the rescue object on regtest, where the lane follows the
+tripwire height.
+---
+ src/rpc/blockchain.cpp                   | 25 ++++++++-
+ src/validation.cpp                       | 69 ++++++++++++++++++++++++
+ test/functional/feature_p2mr_tripwire.py |  3 ++
+ 3 files changed, 96 insertions(+), 1 deletion(-)
+
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index fdbd35a..605b271 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1569,6 +1569,15 @@ static RPCHelpMan gettripwireinfo()
+                     }},
+                 }},
+                 {RPCResult::Type::BOOL, "ec_disabled_next_block", "whether elliptic curve signature checks in those leaves fail in the next block"},
++                {RPCResult::Type::OBJ, "rescue", /*optional=*/true, "the P2MR rescue lane (doc/p2mr-rescue.md), only where it has a height", {
++                    {RPCResult::Type::NUM, "height", "the height from which the lane is open"},
++                    {RPCResult::Type::BOOL, "active_next_block", "whether the lane is open in the next block"},
++                    {RPCResult::Type::BOOL, "mempool_accepts", "whether the mempool takes rescue spends: the lane is open at the tip itself, and elliptic curve checks in those leaves fail in the next block"},
++                    {RPCResult::Type::STR_HEX, "network_id", "the network id rescue proofs are bound to"},
++                    {RPCResult::Type::ARR, "statements", "the statement ids a rescue token may name", {
++                        {RPCResult::Type::STR_HEX, "", "a statement id"},
++                    }},
++                }},
+             }},
+         RPCExamples{
+             HelpExampleCli("gettripwireinfo", "")
+@@ -1605,7 +1614,21 @@ static RPCHelpMan gettripwireinfo()
+     result.pushKV("height", consensus.P2MRTripwireHeight);
+     result.pushKV("leaf_version", strprintf("%02x", P2MR_LEAF_TRIPWIRED));
+     result.pushKV("tripwires", std::move(tripwires));
+-    result.pushKV("ec_disabled_next_block", P2MRECDisabledAfter(&tip, coins, chainman));
++    const bool ec_disabled_next_block{P2MRECDisabledAfter(&tip, coins, chainman)};
++    result.pushKV("ec_disabled_next_block", ec_disabled_next_block);
++    if (DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)) {
++        // From the same snapshot. The mempool's rules: the lane open at the tip itself (not only for
++        // the next block), and the policy check on the state of elliptic curve checks.
++        UniValue rescue(UniValue::VOBJ);
++        rescue.pushKV("height", consensus.P2MRRescueHeight);
++        rescue.pushKV("active_next_block", DeploymentActiveAfter(&tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE));
++        rescue.pushKV("mempool_accepts", DeploymentActiveAt(tip, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) && ec_disabled_next_block);
++        rescue.pushKV("network_id", HexStr(*CHECK_NONFATAL(consensus.p2mr_rescue_network_id)));
++        UniValue statements(UniValue::VARR);
++        statements.push_back(strprintf("%02x", P2MR_RESCUE_STATEMENT_HMAC));
++        rescue.pushKV("statements", std::move(statements));
++        result.pushKV("rescue", std::move(rescue));
++    }
+     return result;
+ },
+     };
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 90364b4..c136b9c 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -40,6 +40,7 @@
+ #include <primitives/block.h>
+ #include <primitives/transaction.h>
+ #include <random.h>
++#include <script/p2mr_rescue.h>
+ #include <script/script.h>
+ #include <script/sigcache.h>
+ #include <signet.h>
+@@ -68,6 +69,7 @@
+ #include <cassert>
+ #include <chrono>
+ #include <deque>
++#include <map>
+ #include <numeric>
+ #include <optional>
+ #include <ranges>
+@@ -342,6 +344,25 @@ static bool SpendsP2MRTripwiredLeaf(const CTransaction& tx, const CCoinsView& vi
+     });
+ }
+ 
++/**
++ * For the log of the rescue lane (doc/p2mr-rescue.md): the statement id and the key of the rescue
++ * check an input of a valid block made, when the input spends a P2MR output through template R1, its
++ * whole witness the token, <32-byte key> OP_CHECKSIG, the control block of a leaf of version 0xe0 at
++ * depth one or more, and the rescue record. A token is never a valid BIP 340 signature, so in a valid
++ * block with the lane open that check passed through the rescue path. Of constant cost, with no
++ * elliptic curve operation; rescue checks in other leaf shapes, valid but not relayed, are not logged.
++ */
++static std::optional<std::pair<uint8_t, std::vector<unsigned char>>> P2MRRescueLogEntry(const CTxIn& txin, const CScript& spent_script)
++{
++    int version;
++    std::vector<unsigned char> program;
++    if (!spent_script.IsWitnessProgram(version, program) || version != 2 || program.size() != WITNESS_V2_P2MR_SIZE) return std::nullopt;
++    const std::vector<std::vector<unsigned char>>& stack{txin.scriptWitness.stack};
++    if (!IsP2MRRescueTemplate(stack)) return std::nullopt;
++    // The token's second byte is its statement id; the leaf script is 0x20 <key> OP_CHECKSIG.
++    return std::make_pair(stack[0][1], std::vector<unsigned char>{stack[1].begin() + 1, stack[1].begin() + 33});
++}
++
+ /** The script verification flags the mempool checks a transaction with: the standard ones, as they
+  *  apply to the block after `tip`, whose UTXO set `coins` is. */
+ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoinsView& coins, const ChainstateManager& chainman)
+@@ -3316,9 +3337,49 @@ bool Chainstate::ConnectTip(
+     // num_blocks_total may be zero until the ConnectBlock() call below.
+     LogDebug(BCLog::BENCH, "  - Load block from disk: %.2fms\n",
+              Ticks<MillisecondsDouble>(time_2 - time_1));
++    struct RescueLogEntry {
++        COutPoint prevout;
++        Txid txid;
++        uint8_t sid;
++        std::vector<unsigned char> key;
++    };
++    std::vector<RescueLogEntry> rescue_log;
+     {
+         CCoinsViewCache& view{*m_coins_views->m_connect_block_view};
+         const auto reset_guard{view.CreateResetGuard()};
++        // The rescue spends to log once the block is in the active chain (doc/p2mr-rescue.md): the
++        // inputs whose witness is template R1, with the outputs they spend read before the block
++        // spends them, from the UTXO set or from an earlier transaction of the block. Only where the
++        // flags the block is checked with make such an input go through the rescue path: P2MR and
++        // leaf version 0xe0 in force, and the lane open. Without P2MR (a regtest with
++        // -testactivationheight=p2mr@N above the lane's height) a witness version 2 output is spent as
++        // an unknown witness version, and without the tripwire rules a leaf of version 0xe0 is not
++        // executed.
++        const script_verify_flags block_flags{GetBlockScriptFlags(*pindexNew, m_chainman)};
++        if (this == &m_chainman.ActiveChainstate() && (block_flags & SCRIPT_VERIFY_P2MR) && (block_flags & SCRIPT_VERIFY_P2MR_TRIPWIRE) &&
++            !(block_flags & SCRIPT_VERIFY_P2MR_NO_RESCUE)) {
++            std::map<Txid, const CTransaction*> block_txs;
++            for (const CTransactionRef& tx : block_to_connect->vtx) {
++                if (tx->IsCoinBase()) continue;
++                for (const CTxIn& txin : tx->vin) {
++                    if (!IsP2MRRescueTemplate(txin.scriptWitness.stack)) continue;
++                    const CScript* spent_script{nullptr};
++                    if (const Coin& coin{view.AccessCoin(txin.prevout)}; !coin.IsSpent()) {
++                        spent_script = &coin.out.scriptPubKey;
++                    } else {
++                        if (block_txs.empty()) {
++                            for (const CTransactionRef& t : block_to_connect->vtx) block_txs.emplace(t->GetHash(), t.get());
++                        }
++                        const auto it{block_txs.find(txin.prevout.hash)};
++                        if (it == block_txs.end() || txin.prevout.n >= it->second->vout.size()) continue;
++                        spent_script = &it->second->vout[txin.prevout.n].scriptPubKey;
++                    }
++                    if (auto entry{P2MRRescueLogEntry(txin, *spent_script)}) {
++                        rescue_log.push_back({txin.prevout, tx->GetHash(), entry->first, std::move(entry->second)});
++                    }
++                }
++            }
++        }
+         bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view);
+         if (m_chainman.m_options.signals) {
+             m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
+@@ -3381,6 +3442,14 @@ bool Chainstate::ConnectTip(
+         });
+     }
+ 
++    // The rescue spends of this block (doc/p2mr-rescue.md), found before ConnectBlock, now that it
++    // is in the active chain, under the same restriction as the log of tripwire spends below.
++    for (const RescueLogEntry& rescue : rescue_log) {
++        LogInfo("P2MR rescue of %s:%u by %s in block %s (height %d): statement %02x, key %s",
++                rescue.prevout.hash.ToString(), rescue.prevout.n, rescue.txid.ToString(),
++                pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, rescue.sid, HexStr(rescue.key));
++    }
++
+     // The tripwire outputs this block spends, now that they are spent in the active chain, and the
+     // state of all of them when the block reaches the activation height (doc/p2mr-tripwire.md).
+     // Nowhere else: ConnectBlock also checks proposals, candidates that turn out invalid and blocks
+diff --git a/test/functional/feature_p2mr_tripwire.py b/test/functional/feature_p2mr_tripwire.py
+index dd9f408..7b012f5 100644
+--- a/test/functional/feature_p2mr_tripwire.py
++++ b/test/functional/feature_p2mr_tripwire.py
+@@ -423,6 +423,9 @@ class P2MRTripwireTest(BitcoinTestFramework):
+             "leaf_version": "e0",
+             "tripwires": [{"outpoint": op, "state": "unspent"} for op in self.tripwires.values()],
+             "ec_disabled_next_block": False,
++            # The P2MR rescue lane (doc/p2mr-rescue.md) follows the tripwire height on regtest.
++            "rescue": {"height": H3, "active_next_block": False, "mempool_accepts": False,
++                       "network_id": hashlib.sha256(b"regtest").hexdigest(), "statements": ["01"]},
+         })
+         assert_equal(n0.getdeploymentinfo()["deployments"]["p2mr_tripwire"], {"type": "buried", "active": False, "height": H3})
+ 
+-- 
+2.43.0
+

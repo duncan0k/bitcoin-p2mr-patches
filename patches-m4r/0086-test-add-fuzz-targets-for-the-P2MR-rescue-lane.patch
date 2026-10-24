@@ -1,0 +1,449 @@
+From 3ceac7d369ea7f5fcb258fac49cb07e85401c960 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Fri, 23 Oct 2026 22:45:10 +0000
+Subject: [PATCH 86/88] test: add fuzz targets for the P2MR rescue lane
+
+- p2mr_rescue_token: the token and annex checks against their
+  definition.
+- p2mr_rescue_verify: voleith_verify_s1 through the C ABI, mostly with
+  proofs of the right length, so that it gets past its length checks.
+- p2mr_rescue: the interpreter's rescue path with a stand-in for the
+  proof verification, as p2mr_slhdsa128s has one for SLH-DSA, against the
+  rules written out: where a token is checked, R2 to R5 and R7, with and
+  without SCRIPT_VERIFY_P2MR_NO_RESCUE.
+- p2mr_rescue_script_flags: script_flags with room for proofs, the real
+  verifier and every prevout; test/util/p2mr_rescue_fuzz_seeds.py writes
+  its seeds from the rescue vectors.
+---
+ src/test/fuzz/CMakeLists.txt        |   3 +
+ src/test/fuzz/p2mr_rescue.cpp       | 326 ++++++++++++++++++++++++++++
+ test/util/p2mr_rescue_fuzz_seeds.py |  63 ++++++
+ 3 files changed, 392 insertions(+)
+ create mode 100644 src/test/fuzz/p2mr_rescue.cpp
+ create mode 100644 test/util/p2mr_rescue_fuzz_seeds.py
+
+diff --git a/src/test/fuzz/CMakeLists.txt b/src/test/fuzz/CMakeLists.txt
+index b5f3e11..3682e2a 100644
+--- a/src/test/fuzz/CMakeLists.txt
++++ b/src/test/fuzz/CMakeLists.txt
+@@ -77,6 +77,7 @@ add_executable(fuzz
+   overflow.cpp
+   p2mr.cpp
+   p2mr_mldsa44.cpp
++  p2mr_rescue.cpp
+   p2mr_slhdsa128s.cpp
+   p2p_handshake.cpp
+   p2p_headers_presync.cpp
+@@ -155,6 +156,8 @@ target_link_libraries(fuzz
+   leveldb
+   univalue
+   secp256k1
++  # voleith.h, for the fuzz target of the rescue verifier's C ABI.
++  voleith
+   Boost::headers
+   libevent::extra
+ )
+diff --git a/src/test/fuzz/p2mr_rescue.cpp b/src/test/fuzz/p2mr_rescue.cpp
+new file mode 100644
+index 0000000..cbe939c
+--- /dev/null
++++ b/src/test/fuzz/p2mr_rescue.cpp
+@@ -0,0 +1,326 @@
++// Copyright (c) 2026 duncan0k
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <consensus/amount.h>
++#include <crypto/sha256.h>
++#include <primitives/transaction.h>
++#include <script/interpreter.h>
++#include <script/p2mr_rescue.h>
++#include <script/script.h>
++#include <serialize.h>
++#include <streams.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/fuzz/util.h>
++#include <test/util/script.h>
++#include <uint256.h>
++#include <util/strencodings.h>
++
++#include <voleith.h>
++
++#include <algorithm>
++#include <array>
++#include <cassert>
++#include <cstdint>
++#include <ios>
++#include <vector>
++
++namespace {
++using valtype = std::vector<unsigned char>;
++
++uint256 RegtestNetworkId()
++{
++    uint256 id;
++    CSHA256().Write(reinterpret_cast<const unsigned char*>("regtest"), 7).Finalize(id.begin());
++    return id;
++}
++
++/** Stands in for the proof verification (R7) with a result the fuzzer picks, so that both outcomes
++ *  are reached without valid proofs. Everything before it is the real code: R1 to R6, and the
++ *  construction of the 96-byte message. */
++class FuzzedRescueChecker : public MutableTransactionSignatureChecker
++{
++    const bool m_valid;
++
++public:
++    FuzzedRescueChecker(const CMutableTransaction* tx, const CAmount& amount, const PrecomputedTransactionData& txdata, bool valid)
++        : MutableTransactionSignatureChecker(tx, 0, amount, txdata, MissingDataBehavior::ASSERT_FAIL), m_valid{valid} {}
++
++protected:
++    bool VerifyP2MRRescueProof(const P2MRRescueToken& token, std::span<const unsigned char, P2MR_RESCUE_MESSAGE_SIZE>, std::span<const unsigned char> proof) const override
++    {
++        assert(token.sid == P2MR_RESCUE_STATEMENT_HMAC);
++        assert(proof.size() == P2MR_RESCUE_S1_PROOF_SIZE);
++        return m_valid;
++    }
++};
++
++//! Two secrets whose keys are known without an ECC context: 1 (x of G) and 2 (x of 2G).
++const std::array<valtype, 2> KNOWN_Y{ParseHex("0000000000000000000000000000000000000000000000000000000000000001"),
++                                     ParseHex("0000000000000000000000000000000000000000000000000000000000000002")};
++const std::array<valtype, 2> KNOWN_P{ParseHex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
++                                     ParseHex("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")};
++
++valtype MakeToken(FuzzedDataProvider& provider, const valtype& y)
++{
++    // Mostly a well-formed token; now and then any bytes.
++    if (provider.ConsumeIntegralInRange<int>(0, 7) == 0) {
++        return provider.ConsumeBytes<unsigned char>(provider.ConsumeIntegralInRange<size_t>(0, 110));
++    }
++    const size_t k_size{provider.ConsumeBool() ? 22 : provider.ConsumeIntegralInRange<size_t>(0, 66)};
++    valtype token{P2MR_RESCUE_KEY_VERSION, provider.ConsumeIntegralInRange<int>(0, 7) == 0 ? provider.ConsumeIntegral<uint8_t>() : P2MR_RESCUE_STATEMENT_HMAC,
++                  static_cast<unsigned char>(k_size)};
++    for (size_t i = 0; i < k_size; ++i) {
++        token.push_back(provider.ConsumeIntegralInRange<int>(0, 15) == 0 ? provider.ConsumeIntegral<uint8_t>() : static_cast<unsigned char>(provider.ConsumeIntegralInRange<int>(0x20, 0x7e)));
++    }
++    token.push_back(provider.ConsumeIntegral<uint8_t>());
++    token.insert(token.end(), y.begin(), y.end());
++    if (provider.ConsumeIntegralInRange<int>(0, 15) == 0) token[0] = provider.ConsumeIntegral<uint8_t>();
++    if (provider.ConsumeIntegralInRange<int>(0, 15) == 0) token.resize(provider.ConsumeIntegralInRange<size_t>(0, token.size() + 1));
++    return token;
++}
++} // namespace
++
++// The structural checks of the token and the annex, against their definition (doc/p2mr-rescue.md).
++FUZZ_TARGET(p2mr_rescue_token)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    const valtype element{provider.ConsumeBytes<unsigned char>(provider.ConsumeIntegralInRange<size_t>(0, 200))};
++    const auto token{ParseP2MRRescueToken(element)};
++    const bool expected{element.size() >= 37 && element.size() <= 100 && element.size() != 64 && element.size() != 65 &&
++                        element[0] == 0x03 && element[1] == 0x01 && element[2] >= 1 && element[2] <= 64 && element.size() == size_t{element[2]} + 36 &&
++                        std::all_of(element.begin() + 3, element.begin() + 3 + element[2], [](unsigned char c) { return c >= 0x20 && c <= 0x7e; })};
++    assert(token.has_value() == expected);
++    if (token) {
++        assert(token->pub.size() + 2 == element.size());
++        assert(token->pub.data() == element.data() + 2);
++        assert(token->y.data() + 32 == element.data() + element.size());
++        assert(token->suffix == element[element.size() - 33]);
++    }
++    const valtype annex{provider.ConsumeRemainingBytes<unsigned char>()};
++    const bool annex_expected{annex.size() == P2MR_RESCUE_S1_ANNEX_SIZE && annex[0] == 0x50 && annex[1] == 0x01};
++    assert(IsP2MRRescueAnnex(annex, P2MR_RESCUE_STATEMENT_HMAC) == annex_expected);
++    assert(!IsP2MRRescueAnnex(annex, 0x02));
++}
++
++// voleith_verify_s1 through the C ABI: any input, of any length, returns 0 or 1 and never crashes.
++FUZZ_TARGET(p2mr_rescue_verify)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    valtype k{provider.ConsumeBytes<unsigned char>(provider.ConsumeIntegralInRange<size_t>(0, 70))};
++    // Mostly printable, as K must be, so that the verifier gets past its check of the public inputs.
++    if (provider.ConsumeIntegralInRange<int>(0, 7) != 0) {
++        for (unsigned char& c : k) c = static_cast<unsigned char>(0x20 + c % 95);
++    }
++    const uint8_t suffix{provider.ConsumeIntegral<uint8_t>()};
++    valtype y{provider.ConsumeBytes<unsigned char>(32)};
++    y.resize(32);
++    const valtype m{provider.ConsumeBytes<unsigned char>(provider.ConsumeBool() ? 96 : provider.ConsumeIntegralInRange<size_t>(0, 200))};
++    // Mostly a proof of the right length, so that the verifier gets past its length checks, with the
++    // right version byte and statement id; its bytes from the input, the rest zero.
++    valtype proof;
++    if (provider.ConsumeIntegralInRange<int>(0, 7) != 0) {
++        proof = provider.ConsumeRemainingBytes<unsigned char>();
++        proof.resize(P2MR_RESCUE_S1_PROOF_SIZE);
++        proof[0] = 0x02;
++        proof[1] = 0x01;
++    } else {
++        proof = provider.ConsumeRemainingBytes<unsigned char>();
++    }
++    const int result{voleith_verify_s1(k.data(), k.size(), suffix, y.data(), m.data(), m.size(), proof.data(), proof.size())};
++    assert(result == 0 || result == 1);
++    if (k.empty() || k.size() > 64 || m.size() > 65535 || proof.size() != P2MR_RESCUE_S1_PROOF_SIZE) assert(result == 0);
++    if (m.size() == P2MR_RESCUE_MESSAGE_SIZE) {
++        valtype token{P2MR_RESCUE_KEY_VERSION, P2MR_RESCUE_STATEMENT_HMAC, static_cast<unsigned char>(k.size())};
++        token.insert(token.end(), k.begin(), k.end());
++        token.push_back(suffix);
++        token.insert(token.end(), y.begin(), y.end());
++        if (const auto parsed{ParseP2MRRescueToken(token)}) {
++            assert(VerifyP2MRRescueProof(*parsed, std::span<const unsigned char, 96>{m}, proof) == (result == 1));
++        }
++    }
++}
++
++// The interpreter's rescue path with a stand-in proof verifier: where a token is checked as a rescue
++// (leaf version, depth, the three flags), the validation weight, one rescue per input, the annex, the
++// key relation, and the outcome, against the rules of doc/p2mr-rescue.md written out here.
++FUZZ_TARGET(p2mr_rescue)
++{
++    FuzzedDataProvider provider(buffer.data(), buffer.size());
++    // The key: one of the two known ones; y the secret of one of them, or of another key, or not a
++    // scalar.
++    const size_t which{provider.ConsumeIntegralInRange<size_t>(0, 1)};
++    const valtype& pubkey{KNOWN_P[which]};
++    valtype y;
++    switch (provider.ConsumeIntegralInRange<int>(0, 5)) {
++    case 0: y = KNOWN_Y[1 - which]; break;
++    case 1: y = valtype(32, 0xff); break;
++    case 2: y = valtype(32, 0x00); break;
++    default: y = KNOWN_Y[which]; break;
++    }
++    const valtype token{MakeToken(provider, y)};
++    const auto parsed{ParseP2MRRescueToken(token)};
++
++    // The leaf: <P> OP_CHECKSIG (R1), or with OP_CHECKSIGVERIFY OP_1, or two checks.
++    const int shape{provider.ConsumeIntegralInRange<int>(0, 3)};
++    CScript leaf;
++    std::vector<valtype> items;
++    switch (shape) {
++    case 0: leaf << pubkey << OP_CHECKSIG; items = {token}; break;
++    case 1: leaf << pubkey << OP_CHECKSIGVERIFY << OP_1; items = {token}; break;
++    case 2: leaf << OP_0 << pubkey << OP_CHECKSIGADD << OP_1 << OP_NUMEQUAL; items = {token}; break;
++    default: leaf << pubkey << OP_CHECKSIGVERIFY << pubkey << OP_CHECKSIG; items = {token, token}; break;
++    }
++    // Leaf version 0xe0, 0xc0 or another; depth one or zero.
++    uint8_t leaf_version{P2MR_LEAF_TRIPWIRED};
++    switch (provider.ConsumeIntegralInRange<int>(0, 7)) {
++    case 0: leaf_version = TAPROOT_LEAF_TAPSCRIPT; break;
++    case 1: leaf_version = static_cast<uint8_t>(provider.ConsumeIntegral<uint8_t>() & TAPROOT_LEAF_MASK); break;
++    default: break;
++    }
++    const bool depth_one{provider.ConsumeIntegralInRange<int>(0, 7) != 0};
++    valtype control{static_cast<unsigned char>(leaf_version | 1)};
++    if (depth_one) control.resize(P2MR_CONTROL_BASE_SIZE + P2MR_CONTROL_NODE_SIZE, 0x5a);
++
++    // The annex: a rescue record, another record type, a length one off, or none.
++    std::optional<valtype> annex;
++    const int annex_kind{provider.ConsumeIntegralInRange<int>(0, 7)};
++    if (annex_kind < 5) {
++        annex = valtype(P2MR_RESCUE_S1_ANNEX_SIZE, 0x00);
++        (*annex)[0] = 0x50;
++        (*annex)[1] = 0x01;
++        if (annex_kind == 1) (*annex)[1] = provider.ConsumeIntegral<uint8_t>();
++        if (annex_kind == 2) annex->resize(P2MR_RESCUE_S1_ANNEX_SIZE + (provider.ConsumeBool() ? 1 : -1));
++    } else if (annex_kind == 5) {
++        annex = valtype{0x50, 0x01};
++    }
++    // Room in the budget for a second rescue check, or not: elements of 520 bytes the leaf drops first.
++    const size_t pads{provider.ConsumeBool() ? size_t{0} : size_t{150}};
++    CScriptWitness witness;
++    witness.stack = items;
++    for (size_t i = 0; i < pads; ++i) witness.stack.emplace_back(520, 0x00);
++    CScript full_leaf;
++    for (size_t i = 0; i < pads / 2; ++i) full_leaf << OP_2DROP;
++    full_leaf.insert(full_leaf.end(), leaf.begin(), leaf.end());
++    witness.stack.emplace_back(full_leaf.begin(), full_leaf.end());
++    const uint256 root{ComputeP2MRMerkleRoot(control, ComputeTapleafHash(leaf_version, full_leaf))};
++    const CScript spk{CScript{} << OP_2 << ToByteVector(root)};
++    witness.stack.push_back(control);
++    if (annex) witness.stack.push_back(*annex);
++
++    CMutableTransaction tx;
++    tx.version = 2;
++    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
++    tx.vin[0].scriptWitness = witness;
++    tx.vout.emplace_back(1000, CScript{} << OP_TRUE);
++    const CTxOut spent{2000, spk};
++    PrecomputedTransactionData txdata;
++    txdata.Init(tx, {spent}, /*force=*/true);
++    txdata.m_p2mr_rescue_network_id = RegtestNetworkId();
++
++    const bool tripwire{provider.ConsumeIntegralInRange<int>(0, 7) != 0};
++    const bool ec_disabled{provider.ConsumeBool()};
++    const bool no_rescue{provider.ConsumeIntegralInRange<int>(0, 3) == 0};
++    script_verify_flags flags{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR};
++    if (tripwire) flags |= SCRIPT_VERIFY_P2MR_TRIPWIRE;
++    if (ec_disabled) flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
++    if (no_rescue) flags |= SCRIPT_VERIFY_P2MR_NO_RESCUE;
++    const bool valid{provider.ConsumeBool()};
++    const FuzzedRescueChecker checker{&tx, spent.nValue, txdata, valid};
++    ScriptError serror;
++    const bool ret{VerifyScript(CScript{}, spk, &witness, flags, checker, &serror)};
++    assert(ret == (serror == SCRIPT_ERR_OK));
++
++    // The rules, written out.
++    const bool executes{depth_one && (leaf_version == TAPROOT_LEAF_TAPSCRIPT || (leaf_version == P2MR_LEAF_TRIPWIRED && tripwire))};
++    const bool rescue{executes && leaf_version == P2MR_LEAF_TRIPWIRED && !no_rescue && parsed.has_value()};
++    if (!executes) {
++        assert(serror == SCRIPT_ERR_OK);
++    } else if (token.empty()) {
++        // An empty signature is no check at all.
++        assert(serror != SCRIPT_ERR_P2MR_RESCUE_PROOF && serror != SCRIPT_ERR_P2MR_EC_DISABLED);
++    } else if (!rescue) {
++        // A signature: EC disabled in 0xe0, else a Schnorr check, which cannot pass with this element
++        // (never 64 or 65 bytes when it is a token; random otherwise).
++        if (leaf_version == P2MR_LEAF_TRIPWIRED && ec_disabled) assert(serror == SCRIPT_ERR_P2MR_EC_DISABLED);
++        assert(!ret);
++    } else {
++        const int64_t budget{static_cast<int64_t>(::GetSerializeSize(witness.stack)) + VALIDATION_WEIGHT_OFFSET};
++        const bool annex_ok{annex && IsP2MRRescueAnnex(*annex, parsed->sid)};
++        const bool key_ok{CheckP2MRRescueKey(parsed->y, pubkey)};
++        ScriptError expected;
++        if (budget - VALIDATION_WEIGHT_PER_SIGOP_PASSED - VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK < 0) {
++            expected = SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT;
++        } else if (!annex_ok) {
++            expected = SCRIPT_ERR_P2MR_RESCUE_ANNEX;
++        } else if (!key_ok) {
++            expected = SCRIPT_ERR_P2MR_RESCUE_KEY;
++        } else if (!valid) {
++            expected = SCRIPT_ERR_P2MR_RESCUE_PROOF;
++        } else if (shape == 3) {
++            // The second check: R2 if the budget does not pay for it, R3 otherwise.
++            expected = budget - 2 * (VALIDATION_WEIGHT_PER_SIGOP_PASSED + VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK) < 0 ?
++                           SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT : SCRIPT_ERR_P2MR_RESCUE_REPEAT;
++        } else {
++            expected = SCRIPT_ERR_OK;
++        }
++        assert(serror == expected);
++    }
++
++    // The signing wrapper passes the check through unchanged.
++    ScriptError deferred_serror;
++    assert(VerifyScript(CScript{}, spk, &witness, flags, DeferringSignatureChecker{checker}, &deferred_serror) == ret);
++    assert(deferred_serror == serror);
++}
++
++// script_flags with room for rescue proofs: a transaction, flags and every prevout, verified with the
++// real checker and verifier; taking restricting flags away from a pass, SCRIPT_VERIFY_P2MR_NO_RESCUE
++// among them, or adding them to a failure, never changes the result. The seed corpus comes from the
++// rescue vectors (test/util/p2mr_rescue_fuzz_seeds.py).
++FUZZ_TARGET(p2mr_rescue_script_flags)
++{
++    if (buffer.size() > 1'000'000) return;
++    SpanReader ds{buffer};
++    try {
++        const CTransaction tx(deserialize, TX_WITH_WITNESS, ds);
++        uint64_t raw_flags, raw_fuzzed;
++        ds >> raw_flags >> raw_fuzzed;
++        const script_verify_flags end{script_verify_flags::from_int(script_verify_flags::value_type{1} << static_cast<int>(script_verify_flag_name::SCRIPT_VERIFY_END_MARKER))};
++        script_verify_flags verify_flags{script_verify_flags::from_int(raw_flags & (end.as_int() - 1))};
++        script_verify_flags fuzzed_flags{script_verify_flags::from_int(raw_fuzzed & (end.as_int() - 1))};
++        if (!IsValidFlagCombination(verify_flags)) return;
++        // The upgrade hooks stay as they are (see script_flags).
++        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S);
++
++        std::vector<CTxOut> spent_outputs;
++        for (unsigned i = 0; i < tx.vin.size(); ++i) {
++            CTxOut prevout;
++            ds >> prevout;
++            if (!MoneyRange(prevout.nValue)) prevout.nValue = 1;
++            spent_outputs.push_back(prevout);
++        }
++        PrecomputedTransactionData txdata;
++        txdata.Init(tx, std::move(spent_outputs));
++        txdata.m_p2mr_rescue_network_id = RegtestNetworkId();
++
++        for (unsigned i = 0; i < tx.vin.size(); ++i) {
++            const CTxOut& prevout = txdata.m_spent_outputs.at(i);
++            const TransactionSignatureChecker checker{&tx, i, prevout.nValue, txdata, MissingDataBehavior::ASSERT_FAIL};
++            ScriptError serror;
++            const bool ret = VerifyScript(tx.vin.at(i).scriptSig, prevout.scriptPubKey, &tx.vin.at(i).scriptWitness, verify_flags, checker, &serror);
++            assert(ret == (serror == SCRIPT_ERR_OK));
++            script_verify_flags changed{ret ? verify_flags & ~fuzzed_flags : verify_flags | fuzzed_flags};
++            if (!IsValidFlagCombination(changed)) continue;
++            ScriptError serror_changed;
++            const bool ret_changed = VerifyScript(tx.vin.at(i).scriptSig, prevout.scriptPubKey, &tx.vin.at(i).scriptWitness, changed, checker, &serror_changed);
++            assert(ret_changed == ret);
++            // And NO_RESCUE alone: lifting it from a pass keeps it a pass.
++            if (ret && (verify_flags & SCRIPT_VERIFY_P2MR_NO_RESCUE)) {
++                assert(VerifyScript(tx.vin.at(i).scriptSig, prevout.scriptPubKey, &tx.vin.at(i).scriptWitness, verify_flags & ~SCRIPT_VERIFY_P2MR_NO_RESCUE, checker, &serror_changed));
++            }
++        }
++    } catch (const std::ios_base::failure&) {
++        return;
++    }
++}
+diff --git a/test/util/p2mr_rescue_fuzz_seeds.py b/test/util/p2mr_rescue_fuzz_seeds.py
+new file mode 100644
+index 0000000..21291f8
+--- /dev/null
++++ b/test/util/p2mr_rescue_fuzz_seeds.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Write seed inputs for the fuzz target p2mr_rescue_script_flags from the rescue vectors.
++
++Each seed is what the target reads: a transaction with its witnesses, the flags to verify with and
++the flags to take away or add (little-endian uint64 each), then every spent output. The vectors are
++valid rescue spends with every prevout (src/test/data/p2mr_rescue_vectors.json); each is written with
++the flags of a block where the rescue lane is open, and again below it (SCRIPT_VERIFY_P2MR_NO_RESCUE),
++so that the target starts from a pass and from a failure.
++
++    test/util/p2mr_rescue_fuzz_seeds.py <output directory>
++
++Then, for example: FUZZ=p2mr_rescue_script_flags build_fuzz/bin/fuzz <output directory>
++"""
++import json
++import os
++import struct
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, os.path.join(HERE, "..", "functional"))
++
++from test_framework.messages import CTxOut  # noqa: E402
++from test_framework.script import CScript  # noqa: E402
++
++# Bit positions of script_verify_flag_name (src/script/interpreter.h).
++FLAG_BITS = {
++    "P2SH": 0, "DERSIG": 2, "NULLDUMMY": 4, "CHECKLOCKTIMEVERIFY": 9, "CHECKSEQUENCEVERIFY": 10, "WITNESS": 11,
++    "TAPROOT": 17, "P2MR": 21, "P2MR_MLDSA44": 22, "P2MR_TRIPWIRE": 23, "P2MR_EC_DISABLED": 24,
++    "P2MR_SLHDSA128S": 25, "P2MR_NO_RESCUE": 26,
++}
++
++
++def flags(*names):
++    return sum(1 << FLAG_BITS[n] for n in names)
++
++
++def main():
++    out = sys.argv[1]
++    os.makedirs(out, exist_ok=True)
++    with open(os.path.join(HERE, "..", "..", "src", "test", "data", "p2mr_rescue_vectors.json"), encoding="utf-8") as f:
++        vectors = json.load(f)["vectors"]
++    block = flags("P2SH", "DERSIG", "NULLDUMMY", "CHECKLOCKTIMEVERIFY", "CHECKSEQUENCEVERIFY", "WITNESS", "TAPROOT",
++                  "P2MR", "P2MR_MLDSA44", "P2MR_TRIPWIRE", "P2MR_SLHDSA128S")
++    count = 0
++    for v in vectors:
++        tx = bytes.fromhex(v["tx"])
++        spent = b"".join(CTxOut(o["amount"], CScript(bytes.fromhex(o["script_pubkey"]))).serialize() for o in v["spent_outputs"])
++        for name, verify, fuzzed in [
++            ("open", block, flags("P2MR_EC_DISABLED", "P2MR_NO_RESCUE")),
++            ("open-ec-disabled", block | flags("P2MR_EC_DISABLED"), flags("DERSIG", "NULLDUMMY")),
++            ("closed", block | flags("P2MR_NO_RESCUE"), flags("P2MR_EC_DISABLED")),
++        ]:
++            with open(os.path.join(out, f"{v['name']}-{name}"), "wb") as f:
++                f.write(tx + struct.pack("<QQ", verify, fuzzed) + spent)
++            count += 1
++    print(f"wrote {count} seeds to {out}")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.43.0
+
