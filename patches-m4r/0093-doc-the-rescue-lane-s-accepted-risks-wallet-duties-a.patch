@@ -1,0 +1,218 @@
+From 6c4c14d699dac5d4efed9d7f0f2b7876087c858f Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 24 Oct 2026 18:05:03 +0000
+Subject: [PATCH 93/93] doc: the rescue lane's accepted risks, wallet duties
+ and provenance after review
+
+Two reviews of the final proof system by AI models found no forgery, no
+malleability and no way around the rules, and asked for documentation:
+doc/p2mr-rescue.md now records the accepted risks (NIST category 1 against
+known quantum attacks, security in the quantum random oracle model only
+conjectured, a seed of at least 128 bits, no external review), what
+wallets and operators must do that the node cannot check, why network_id
+is untagged, what limits an input to one rescue check, the weight's
+measurements at 130,000 on two machines, and where a cross build's
+functional tests take their prover.
+
+src/rescue/README.md names the republished ark0-rescue commit 3c90cd4,
+the same tree as f5a2bc0, and SPEC.md v0.2 revision 3 (wording only);
+the test tools are built only natively. When no prover is found, the test
+framework's message also names VOLEITH_PROVE.
+---
+ doc/p2mr-rescue.md                            | 61 ++++++++++++++++---
+ src/rescue/README.md                          | 20 +++---
+ test/functional/test_framework/p2mr_rescue.py |  4 +-
+ 3 files changed, 66 insertions(+), 19 deletions(-)
+
+diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
+index 80d847f..d7ea7d5 100644
+--- a/doc/p2mr-rescue.md
++++ b/doc/p2mr-rescue.md
+@@ -7,10 +7,12 @@ the spender knows the seed the key was derived from, without revealing the seed.
+ the M4 series of the Ark-0 test signet. It is not part of BIP 360 or BIP 361, it is not proposed for
+ Bitcoin, and it does not make any network quantum-resistant.
+ 
+-The proof system is that of ark0-rescue `SPEC.md` v0.2 revision 2 (version byte `0x02`), statement
+-`0x01`: knowledge of `x` with `HMAC-SHA256(K, x || suffix) = y`. Its security rests on an argument in the
+-classical random oracle model with a 128-bit target; its security against quantum attackers is
+-conjectured, not proven, and it has had no external review.
++The proof system is that of ark0-rescue `SPEC.md` v0.2 (version byte `0x02`; revision 3 changes only
++the wording of revision 2), statement `0x01`: knowledge of `x` with `HMAC-SHA256(K, x || suffix) = y`.
++Its security rests on an argument in the classical random oracle model with a 128-bit target; its
++security against quantum attackers is conjectured, not proven. It has had no external review. Two
++reviews by AI models of the final version, on 2026-10-24, found no forgery, no malleability and no way
++around the rules below (ark0-rescue `NOTES.md`).
+ 
+ **It relaxes the rules: a hard fork.** A leaf such as `<P> OP_CHECKSIG` frozen by the tripwire has no
+ valid witness under the earlier rules; the lane makes some valid. A node without this build refuses
+@@ -27,6 +29,17 @@ safety depends on them staying disabled, that is, on no reorganization undoing t
+ The mempool takes rescue spends only when the checks are disabled for the next block (see
+ [Policy](#policy)); the rule itself does not depend on it.
+ 
++**Accepted risks.** For a test network, this build accepts as a recorded decision:
++
++- strength at NIST category 1 against known quantum attacks: about `2^64` Grover iterations, for `Δ`
++  or for a hidden seed of a proof (`SPEC.md` sections 13.5 and 13.6);
++- security in the quantum random oracle model as a conjecture only;
++- that a wallet's seed has at least 128 bits of entropy (`SPEC.md` section 13.1): a weaker seed makes
++  the lane weaker than the proof system;
++- no external review of the proof system or of its implementations.
++
++A larger margin needs a larger security parameter, which the proof size does not allow.
++
+ ## Where the lane applies
+ 
+ A check is a rescue check when all of these hold, rule R1:
+@@ -98,6 +111,9 @@ pk_commitment  = TaggedHash("P2MR/Rescue/Key", 0x00 || P)
+ m              = rescue_sighash || network_id || pk_commitment
+ ```
+ 
++`network_id` is an untagged SHA-256, unlike the two tagged hashes beside it: the three parts of `m`
++have fixed lengths and positions, so none can be read as another.
++
+ The message commits to everything a BIP 341 `SIGHASH_ALL` message does, but not to the annex,
+ which holds the proof. Like a BIP 341 signature, it does not commit to the other inputs' scriptSigs,
+ to the control block, or to witness elements the script does not check: a third party can change
+@@ -127,8 +143,8 @@ driver, which adds the C++ runtime. Its C ABI is one function, `voleith_verify_s
+ returns 0 for any malformed input, and catches panics. Building the node needs `cargo` and `rustc`
+ 1.97.0; the crate's own prover is built for the functional tests only, and only in a native build
+ (`BUILD_TESTS=ON`): the prover tools are executables that cargo links with the build machine's own
+-linker. A cross build gets the node, the kernel and `test_bitcoin`, and its functional tests, which
+-run on the build machine, take a `voleith-prove` built natively there, through `VOLEITH_PROVE`.
++linker. A cross build gets the node, the kernel and `test_bitcoin`. Its functional tests run wherever
++its binaries run, and take, through `VOLEITH_PROVE`, a `voleith-prove` that runs there.
+ 
+ ## Validation weight
+ 
+@@ -143,11 +159,14 @@ run on the build machine, take a `voleith-prove` built natively there, through `
+ 
+ At 100,000, the first asked for 96,579 to 106,234 on the measuring machine, and in the second a block
+ of rescue checks after Schnorr checks took 1.005 to 1.014 times the Schnorr worst block. 130,000 gives
+-both a margin and stays within the bound. The weight must not exceed 130,333: the smallest valid
++both a margin and stays within the bound. At 130,000 both gates passed on two machines. On the
++measuring machine the first asked for at most 83,641 and the largest ratio of the second was 0.660;
++on the operator's machine (AMD EPYC, 8 CPUs) at most 68,055, measured with pauses between checks, and
++0.661. The weight must not exceed 130,333: the smallest valid
+ rescue input (`|K| = 1`, template R1 at depth one) has a witness of 130,333 bytes and a budget of
+ 130,383, which has to pay for the 50 and the rescue weight. At 130,000 that input has 333 units of
+-budget left over. A second rescue check in the same input never fits the budget of an input that
+-carries one proof.
++budget left over. R3 is what limits an input to one rescue check: in template R1 a second one would
++not fit the budget anyway, but an input whose script is large enough could pay for it.
+ 
+ ## Activation
+ 
+@@ -205,6 +224,30 @@ marked invalid: `bitcoin-cli reconsiderblock <hash of that block>` lets it conti
+ "A transaction with a rescue record" is one structural test, shared by items 2, 4 and 5: an input
+ whose witness has at least two elements, the last of which starts with `0x50 0x01`. It reads no coin.
+ 
++## Wallets and operators
++
++The node cannot check what follows; ark0-rescue `SPEC.md` section 12.1 item 4 requires it of every
++rescue.
++
++- Rescue all frozen outputs of a key together, in one transaction, so that none of them waits on the
++  freeze alone once `d` is public. A standard transaction holds at most three rescue inputs
++  ([Policy](#policy), item 3); a key with more frozen outputs needs one transaction that the block
++  producer includes directly, and a block holds about 30 rescue inputs.
++- Before the first rescue, move by an ordinary spend every output that the same key `P` can spend
++  another way: a leaf of version `0xc0`, a P2TR output with the same key, a legacy or witness v0
++  script, or an output on another network. The freeze covers an output only where `P` is checked in
++  a leaf of version `0xe0`, regardless of when the output was created.
++- Never reuse the key, `d` or the seed on another network or protocol, and pay nothing more to `P`
++  once it is burned.
++- Make a rescue only once the block that triggered the freeze has enough confirmations (the mempool
++  refuses it before the checks are disabled, [Policy](#policy) item 2), and do not extend a branch
++  that undoes that block: after such a reorganization `d` is public while the checks work again. A
++  block producer that includes a rescue transaction directly, outside the mempool, must check that
++  the checks are disabled itself.
++- Proofs are made off the node, with the prover of ark0-rescue. Its Rust prover is written to be
++  constant time and to clear its secrets, but no external review has checked that; use it only with
++  seeds used on this signet alone.
++
+ ## RPC and logs
+ 
+ `gettripwireinfo` has a `rescue` object where the lane has a height: `height`, `active_next_block`,
+diff --git a/src/rescue/README.md b/src/rescue/README.md
+index 42961ac..e4a39c5 100644
+--- a/src/rescue/README.md
++++ b/src/rescue/README.md
+@@ -2,24 +2,24 @@
+ 
+ The verifier of the P2MR rescue lane ([doc/p2mr-rescue.md](../../doc/p2mr-rescue.md)): the crate
+ `voleith` of ark0-rescue, which implements the VOLE-in-the-head proofs of its `SPEC.md` v0.2
+-revision 2 (version byte `0x02`, statement `0x01`), and the crates it depends on. CMake builds it into
++(version byte `0x02`, statement `0x01`), and the crates it depends on. CMake builds it into
+ a static library that holds the verifier and its C ABI only (`CMakeLists.txt`, here).
+ 
+ ## Source
+ 
+ | | |
+ |---|---|
+-| repository | ark0-rescue, as kept on branch `main` of `duncan0k/workbench` (private) |
+-| commit | `f5a2bc0c9a6b40684a9975c3435ff332ba5a5050`, "rust: the fixture name without basename; narrow two descriptions" (2026-10-24), the reviewed crate; it contains `ff4ea00`, vendored before |
++| repository | ark0-rescue, branch `main` of its repository; internal until it is published. Its history was republished on 2026-10-24 under the project's author name, with every tree unchanged |
++| commit | `3c90cd4f298beb0d52b3c8c8d82f29d3dbb714ba`, "rust: the fixture name without basename; narrow two descriptions" (2026-10-24), the reviewed crate: the republished `f5a2bc0`, with the same tree |
+ | directory | `rust/`, git tree `833d94e8fa20d46e4d1780ba2a18f64e95f707e5` |
+ | here | `voleith/`, all 53 files of that tree, unmodified |
+-| protocol | `SPEC.md` v0.2 revision 2 of the same commit; the vectors and the three implementations (Python, Rust, Go) of that repository agree on it |
++| protocol | `SPEC.md` v0.2, revision 2 at that commit; revision 3 (wording only) at `39e8d35332501a10c8e676320194d2f8dbd9946c`. The vectors and the three implementations (Python, Rust, Go) of that repository agree on it |
+ 
+ The crate has the cargo feature `prover`, on by default, which the node's build turns off
+ (`--no-default-features`): no prover code is compiled into the library. The crate's own
+ `check-verifier-only.sh` shows how to check this with `nm`.
+ 
+-From `ff4ea00` (vendored first) to `f5a2bc0`, what the verifier computes is unchanged. Its SHAKE256
++From the first vendored version (2026-10-23) to this one, what the verifier computes is unchanged. Its SHAKE256
+ is now in `src/sym.rs`, built on the Keccak-f[1600] permutation of the `keccak` crate, in place of
+ the `sha3` crate. The library depends only on `keccak` and `zeroize`; `sha3` stays a dev-dependency,
+ the reference for that sponge's test. The rest of the range is the command-line tools, their tests,
+@@ -36,8 +36,8 @@ published by older versions of cargo: `block-buffer`, `digest`, `generic-array`)
+ `src/lib.rs` to parse it, and that file is kept and listed too. Cargo reads their manifests to resolve the lock file and compiles
+ none of them. They are the dev-dependencies of the crate's tests and benchmarks (`sha3`, `serde_json`,
+ `secp256k1` and theirs) and the target-specific dependencies of `getrandom` on other systems. The
+-full `cargo vendor` output is 46 packages, 2,505 files; this is 7.8 MB in 637 files (with `ff4ea00`,
+-13 packages whole and 754 files). To regenerate it:
++full `cargo vendor` output is 46 packages, 2,505 files; this is 7.8 MB in 637 files (with the first
++vendored version, 13 packages whole and 754 files). To regenerate it:
+ 
+ ```
+ cd voleith && CARGO_HOME=$(mktemp -d) cargo +1.97.0 vendor --locked --versioned-dirs ../vendor-new
+@@ -45,7 +45,7 @@ python3 ../stub-vendor.py ../vendor-new cfg-if,cpufeatures,getrandom,keccak,libc
+ diff -r ../vendor-new ../vendor        # no output
+ ```
+ 
+-On 2026-10-24, for `f5a2bc0`, this gave `vendor/` itself.
++On 2026-10-24, for `3c90cd4`, this gave `vendor/` itself.
+ 
+ Compiled, and kept whole:
+ 
+@@ -152,7 +152,9 @@ link (libgcc_s, or libgcc_eh with `-static-libgcc`).
+ 
+ With `-DBUILD_TESTS=ON`, a second build of the same crate with `--features cli --bins` makes the
+ crate's command-line tools, `voleith-prove` and `voleith-verify`, for the functional tests, which
+-prove rescue spends as they run. They are not linked into anything and not installed.
++prove rescue spends as they run. They are not linked into anything and not installed. They are built
++only in a native build: cargo links them with the build machine's own linker, so a cross build has
++none, and its functional tests take a `voleith-prove` through `VOLEITH_PROVE`.
+ 
+ ## Files
+ 
+diff --git a/test/functional/test_framework/p2mr_rescue.py b/test/functional/test_framework/p2mr_rescue.py
+index e2446b3..24571dc 100644
+--- a/test/functional/test_framework/p2mr_rescue.py
++++ b/test/functional/test_framework/p2mr_rescue.py
+@@ -120,7 +120,9 @@ def find_prover(config=None):
+     builddir = config["environment"]["BUILDDIR"] if config else os.environ["BUILDDIR"]
+     exeext = config["environment"].get("EXEEXT", "") if config else ""
+     found = glob.glob(os.path.join(builddir, "src", "rescue", "cargo-target-tools", "*", "release", "voleith-prove" + exeext))
+-    assert len(found) == 1, f"voleith-prove not found under {builddir} (build with -DBUILD_TESTS=ON)"
++    assert len(found) == 1, (f"voleith-prove not found under {builddir}: build natively with -DBUILD_TESTS=ON, or set "
++                             "VOLEITH_PROVE to a voleith-prove that runs here (a cross build, and a depends build "
++                             "whose host differs from the build machine's, have no test tools)")
+     return found[0]
+ 
+ 
+-- 
+2.43.0
+
