@@ -468,9 +468,8 @@ Thirteen patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing
 `patches-m2/` and `patches-m3/`, in that order. On the Ark-0 signet the rules apply from **height 32000**
 (`ARK0_SLHDSA128S_HEIGHT`), and each check with a signature uses a validation weight of **5,000**
 (`VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK`); neither will change. The height covers this opcode only:
-other rules of the network come with heights of their own. At about 870 blocks a day, the rate of recent
-weeks, block 32000 is expected around 2026-10-24 23:40 UTC; even at the block producer's maximum of 960
-blocks a day it cannot come before 2026-10-24 12:00 UTC.
+other rules of the network come with heights of their own. The chain reached height 32000 on 2026-10-24
+at 21:10 UTC (`contrib/k3s/ARK0-MIGRATION.md`, "Height 32000: the M4-S rule applies (2026-10-24)").
 
 They add `OP_CHECKSLHDSA128S` (byte `0xf1`, `OP_SUCCESS241`), an SLH-DSA-SHA2-128s (FIPS 205)
 signature check in P2MR leaves that are executed, of leaf version `0xc0` and, once it executes, `0xe0`.

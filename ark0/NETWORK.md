@@ -410,10 +410,9 @@ M4-S here: a second post-quantum signature check in P2MR leaves,
 `OP_CHECKMLDSA44`, and the two rest on different assumptions: ML-DSA on the
 hardness of lattice problems, SLH-DSA on its hash function alone. The nodes
 built with `patches-m4/` enforce it, the operator's among them, and
-`doc/p2mr-slhdsa128s.md` in the patched tree specifies it. At about 870
-blocks a day, the rate of recent weeks, the chain reaches height 32000
-around 2026-10-24 23:40 UTC. It cannot do so before 2026-10-24 12:00 UTC,
-even if blocks came every 90 seconds, the producer's configured pause.
+`doc/p2mr-slhdsa128s.md` in the patched tree specifies it. The chain reached
+height 32000 on 2026-10-24 at 21:10 UTC (`contrib/k3s/ARK0-MIGRATION.md`,
+"Height 32000: the M4-S rule applies (2026-10-24)").
 
 In a P2MR leaf that is executed (leaf version `0xc0`, or `0xe0` from height
 30000, at depth one or more), byte `0xf1` becomes `OP_CHECKSLHDSA128S`. It
