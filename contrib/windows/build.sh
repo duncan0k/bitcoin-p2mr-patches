@@ -3,7 +3,7 @@
 # or machine: Bitcoin Core v31.1 (9be056a) with the eight patch sets up to the M4-R series (patches-m4r)
 # applied as JOIN.md applies them, built with Core's own depends system and its CMake toolchain file
 # (doc/build-windows.md), and the rescue verifier of patches-m4r with the Rust toolchain that series pins.
-# The patch repository is the development tag m4r-rc2, not published yet, from the git bundle the pod
+# The patch repository is the development tag m4r-rc3, not published yet, from the git bundle the pod
 # mounts at /in. No GUI, wallet, ZMQ, IPC or USDT: the witness program only talks RPC.
 #
 # PHASE=full  also runs test_bitcoin.exe and an end-to-end sync of bitcoind.exe under Wine.
@@ -23,11 +23,11 @@ SRC=$W/src
 CORE_TAG=v31.1
 CORE_COMMIT=9be056a8a72b624dae9623b2f7bded92c2a21c91
 PATCH_REPO=/in/bitcoin-p2mr-patches.bundle
-PATCH_TAG=m4r-rc2
-PATCH_COMMIT=c2b9810ea0d918958165d90f11a8c366fda361de
+PATCH_TAG=m4r-rc3
+PATCH_COMMIT=d2b34052eb8238f6579542e89ac74433dc8a681c
 PATCH_SETS=(patches patches-m05 patches-spacing patches-m1 patches-m2 patches-m3 patches-m4 patches-m4r)
-# The tree the patch sets give on top of CORE_COMMIT: the reviewed series (0001-0092).
-SERIES_TREE=73fb00139bfa761c281acf2bb5bd22ee32a7eda9
+# The tree the patch sets give on top of CORE_COMMIT: the reviewed series (0001-0093).
+SERIES_TREE=f1119deaf426df34f91cd5c8e00c57a6e1610fb6
 HOST_TRIPLET=x86_64-w64-mingw32
 RUST_VERSION=1.97.0
 RUST_TARGET=x86_64-pc-windows-gnu
