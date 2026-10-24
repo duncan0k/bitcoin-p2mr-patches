@@ -46,7 +46,7 @@ patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0'
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
 patches-m4/         13 further patches, the experimental M4-S series, on Ark-0 from height 32000 (see below)
-patches-m4r/        12 further patches, the experimental M4-R1 rescue lane, a hard fork, not active on Ark-0 (see below)
+patches-m4r/        14 further patches, the experimental M4-R1 rescue lane, a hard fork, not active on Ark-0 (see below)
 patches-m4r-killswitch/ 1 patch on top of patches-m4r/: the rescue lane's kill switch, not part of the series
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
@@ -652,6 +652,8 @@ it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series, is it
 | 88 | doc: describe the P2MR rescue lane | `doc/p2mr-rescue.md` |
 | 89 | test: rename the context constant of slhdsa128s_tests, a type in windows.h | `CONTEXT` of `src/test/slhdsa128s_tests.cpp` (from `patches-m4/`) becomes `TEST_CONTEXT`, which a MinGW build of `test_bitcoin` needs: `windows.h` defines a type `CONTEXT` |
 | 90 | consensus: set the validation weight of a rescue check to 130,000 | `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` = 130,000, from the two gates of `contrib/m4r-measure` (at 100,000 the single-check gate asked for 96,579 to 106,234 and the whole-block gate failed by a hair), within the bound of 130,333; the `two_checks` vector and the R4 case with more padding; `doc/p2mr-rescue.md` |
+| 91 | build: relink an Apple shared kernel after the verifier changes, and no test tools in a cross build | the Rust archive a `LINK_DEPENDS` of a shared kernel on Apple platforms, which links it by `-hidden-l`; the Rust test tools only in a native build, a cross build's functional tests taking a native `voleith-prove` through `VOLEITH_PROVE` |
+| 92 | test: copy the rescue record before appending it to its own annex | `vector::insert` with iterators into the vector itself, which the standard does not allow |
 
 It is a hard fork. A node built without `patches-m4r/` (an M3 or M4-S node) refuses the first block with
 a rescue spend and stops; upgraded later, it continues after `bitcoin-cli reconsiderblock <hash>` of that
@@ -659,7 +661,7 @@ block. `feature_p2mr_rescue.py` shows both with an M4-S build as the late node
 (`M4S_BITCOIND=<its bitcoind>`). Bitcoin Core's wallet does not make rescue spends: the proofs are made
 off the node, with the prover of ark0-rescue.
 
-`patches-m4r-killswitch/` holds the kill switch of the design (section 11), patch 91, which is **not** part
+`patches-m4r-killswitch/` holds the kill switch of the design (section 11), patch 93, which is **not** part
 of the series: a soft fork that closes the lane again from a height (`p2mr_rescue_end`), with the mempool
 following it, prepared and tested in case the proof system or its verifier fails. It applies on top of
 `patches-m4r/`, with `SHA256SUMS-m4r-killswitch`.
@@ -685,14 +687,14 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
        ../bitcoin-p2mr-patches/patches-m4/*.patch ../bitcoin-p2mr-patches/patches-m4r/*.patch
 ```
 
-The series is exported from the Core tree, where the twelve M4-R commits sit on the seven earlier patch
+The series is exported from the Core tree, where the fourteen M4-R commits sit on the seven earlier patch
 sets as `git am` applies them, and the kill switch on top of them; `10a625c` is the last commit of
 `patches-m4/` there:
 
 ```bash
-git format-patch --start-number 79 10a625c..a610562 -o patches-m4r
+git format-patch --start-number 79 10a625c..4c5cf03 -o patches-m4r
 (cd patches-m4r && sha256sum -b *.patch) > SHA256SUMS-m4r
-git format-patch --start-number 91 a610562..2c28674 -o patches-m4r-killswitch
+git format-patch --start-number 93 4c5cf03..c0e3084 -o patches-m4r-killswitch
 (cd patches-m4r-killswitch && sha256sum -b *.patch) > SHA256SUMS-m4r-killswitch
 ```
 

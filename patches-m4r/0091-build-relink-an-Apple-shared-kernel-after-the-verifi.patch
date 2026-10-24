@@ -1,0 +1,89 @@
+From f33613bf386b695981e1993e51dcea618d9e88a9 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 24 Oct 2026 14:42:06 +0000
+Subject: [PATCH 91/92] build: relink an Apple shared kernel after the verifier
+ changes, and no test tools in a cross build
+
+On Apple platforms a shared bitcoinkernel links the Rust archive by
+-L<dir> -hidden-lvoleith, so CMake knew no file dependency on it, and
+add_dependencies only orders the build: after a change to a Rust source
+alone the archive was rebuilt but the kernel kept the old verifier. The
+archive is now a LINK_DEPENDS of the kernel.
+
+With BUILD_TESTS=ON a cross build also built the Rust test tools,
+executables for the target that cargo links with the build machine's cc,
+so the default build failed to link them. They are built only natively:
+the functional tests they serve run on the build machine, and take a
+natively built voleith-prove through VOLEITH_PROVE.
+---
+ doc/p2mr-rescue.md        | 5 ++++-
+ src/kernel/CMakeLists.txt | 4 ++++
+ src/rescue/CMakeLists.txt | 7 +++++--
+ src/rescue/README.md      | 2 +-
+ 4 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
+index 1ee95ea..80d847f 100644
+--- a/doc/p2mr-rescue.md
++++ b/doc/p2mr-rescue.md
+@@ -125,7 +125,10 @@ the system libraries it needs. As with upstream's static kernel, a program links
+ driver, which adds the C++ runtime. Its C ABI is one function, `voleith_verify_s1`
+ (`src/rescue/voleith/include/voleith.h`), which checks every length before it reads a pointer,
+ returns 0 for any malformed input, and catches panics. Building the node needs `cargo` and `rustc`
+-1.97.0; the crate's own prover is built for the functional tests only.
++1.97.0; the crate's own prover is built for the functional tests only, and only in a native build
++(`BUILD_TESTS=ON`): the prover tools are executables that cargo links with the build machine's own
++linker. A cross build gets the node, the kernel and `test_bitcoin`, and its functional tests, which
++run on the build machine, take a `voleith-prove` built natively there, through `VOLEITH_PROVE`.
+ 
+ ## Validation weight
+ 
+diff --git a/src/kernel/CMakeLists.txt b/src/kernel/CMakeLists.txt
+index 9d87d24..280ccfb 100644
+--- a/src/kernel/CMakeLists.txt
++++ b/src/kernel/CMakeLists.txt
+@@ -127,6 +127,10 @@ if(bitcoinkernel_link_type STREQUAL "SHARED_LIBRARY" AND APPLE)
+   target_include_directories(bitcoinkernel PRIVATE $<TARGET_PROPERTY:voleith,INTERFACE_INCLUDE_DIRECTORIES>)
+   target_link_libraries(bitcoinkernel PRIVATE $<TARGET_PROPERTY:voleith,INTERFACE_LINK_LIBRARIES>)
+   target_link_options(bitcoinkernel PRIVATE "LINKER:-L,${voleith_dir}" "LINKER:-hidden-lvoleith")
++  # Linked by -l, the archive is no file CMake knows the kernel depends on, and add_dependencies only
++  # orders the build: without this the kernel would keep the old verifier after a change to a Rust
++  # source alone.
++  set_property(TARGET bitcoinkernel APPEND PROPERTY LINK_DEPENDS ${voleith_location})
+ else()
+   target_link_libraries(bitcoinkernel PRIVATE voleith)
+ endif()
+diff --git a/src/rescue/CMakeLists.txt b/src/rescue/CMakeLists.txt
+index f065322..51334a5 100644
+--- a/src/rescue/CMakeLists.txt
++++ b/src/rescue/CMakeLists.txt
+@@ -169,8 +169,11 @@ endif()
+ 
+ # A test-only build of the crate's own prover and its command-line tools (feature `cli`), for the
+ # functional tests, which prove rescue spends as they run. Nothing of it is linked into a binary of
+-# the node, and it is not installed.
+-if(BUILD_TESTS)
++# the node, and it is not installed. Only in a native build: the tools are executables, which cargo
++# links with the build machine's own linker, and the functional tests run on the build machine. A
++# cross build gets the node, the kernel and test_bitcoin; its functional tests take a voleith-prove
++# built natively, through VOLEITH_PROVE.
++if(BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
+   set(VOLEITH_TOOLS_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/cargo-target-tools)
+   set(VOLEITH_PROVE ${VOLEITH_TOOLS_TARGET_DIR}/${VOLEITH_RUST_TARGET}/release/voleith-prove${CMAKE_EXECUTABLE_SUFFIX})
+   set(VOLEITH_VERIFY ${VOLEITH_TOOLS_TARGET_DIR}/${VOLEITH_RUST_TARGET}/release/voleith-verify${CMAKE_EXECUTABLE_SUFFIX})
+diff --git a/src/rescue/README.md b/src/rescue/README.md
+index e197274..42961ac 100644
+--- a/src/rescue/README.md
++++ b/src/rescue/README.md
+@@ -161,7 +161,7 @@ from here (`sha256sum -c` checks them):
+ 
+ ```
+ 8c287bee1ed47ac2b80521491c6face5d7507a1eb648e7fe7c9c4eda69f0920a  .gitattributes
+-41e9932e5d770bf3b1723baaa2e146d1df8666e782862b4aa82cf97a885464df  CMakeLists.txt
++089e185aa144181dcf2bbbf7d2c3eec012e2e3628e68810201e4d0ab8134c057  CMakeLists.txt
+ 6a04fce6d4437a8a460ea39351870d6c21a6202bae8bbb4274f0766a39b24a1c  cargo-build.cmake
+ cdc0955822e0b17b1e9893182b4a20ebfa84b5b51f3e5b9358cf92932bf54bb2  rust-toolchain.toml
+ 033fc015c77837e092008455597a22bbf27afeb2fc11bebd62c08c636f1e1768  stub-vendor.py
+-- 
+2.43.0
+

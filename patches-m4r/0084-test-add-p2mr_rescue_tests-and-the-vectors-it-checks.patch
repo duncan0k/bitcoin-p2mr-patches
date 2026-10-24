@@ -1,7 +1,7 @@
 From 655de70c39bffb26ce0268bcc66ad1ed233d9db0 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:10 +0000
-Subject: [PATCH 84/90] test: add p2mr_rescue_tests and the vectors it checks,
+Subject: [PATCH 84/92] test: add p2mr_rescue_tests and the vectors it checks,
  with their generator
 
 The vectors are eight transactions with nine rescue inputs, made once by

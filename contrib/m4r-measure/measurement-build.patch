@@ -320,7 +320,7 @@ index 422cf7f..8688628 100644
  
  #include <compat/compat.h>
 diff --git a/src/rescue/CMakeLists.txt b/src/rescue/CMakeLists.txt
-index f065322..c076098 100644
+index 51334a5..c6ea2c3 100644
 --- a/src/rescue/CMakeLists.txt
 +++ b/src/rescue/CMakeLists.txt
 @@ -80,6 +80,11 @@ set(voleith_rustflags

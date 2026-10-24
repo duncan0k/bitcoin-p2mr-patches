@@ -1,7 +1,7 @@
 From 732d5a56bc4f1438061d58ef9e7a0c58a0aaf2e0 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Sat, 24 Oct 2026 11:43:31 +0000
-Subject: [PATCH 89/90] test: rename the context constant of slhdsa128s_tests,
+Subject: [PATCH 89/92] test: rename the context constant of slhdsa128s_tests,
  a type in windows.h
 
 slhdsa128s_tests.cpp names a constant at namespace scope CONTEXT, and

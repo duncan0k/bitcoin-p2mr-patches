@@ -1,4 +1,4 @@
-From 2c286740ae1faf17ff6a9801c1bb5aa35d4f9135 Mon Sep 17 00:00:00 2001
+From c0e3084b884eca0e7c6da523b6133b8d75dc4626 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:31 +0000
 Subject: [PATCH] consensus: close the P2MR rescue lane again from a height,
@@ -48,10 +48,10 @@ below it.
  create mode 100755 test/functional/feature_p2mr_rescue_killswitch.py
 
 diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
-index 1ee95ea..c5b75a6 100644
+index 80d847f..71bdca2 100644
 --- a/doc/p2mr-rescue.md
 +++ b/doc/p2mr-rescue.md
-@@ -240,3 +240,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
+@@ -243,3 +243,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
    vectors.
  - `bench_bitcoin -filter='.*P2MRRescue.*'`: the verifier, valid and in its most expensive invalid
    form, and the whole path of a check.

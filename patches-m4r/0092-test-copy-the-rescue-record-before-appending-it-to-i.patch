@@ -1,0 +1,30 @@
+From 4c5cf03a9e933b985f6cbb4a8da98e8576c2665b Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 24 Oct 2026 14:42:06 +0000
+Subject: [PATCH 92/92] test: copy the rescue record before appending it to its
+ own annex
+
+p2mr_rescue_tests built a two-record annex with vector::insert given
+iterators into the vector itself, which the standard does not allow.
+Copy the record first.
+---
+ src/test/p2mr_rescue_tests.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/test/p2mr_rescue_tests.cpp b/src/test/p2mr_rescue_tests.cpp
+index f388319..a0c5c5e 100644
+--- a/src/test/p2mr_rescue_tests.cpp
++++ b/src/test/p2mr_rescue_tests.cpp
+@@ -771,7 +771,8 @@ BOOST_AUTO_TEST_CASE(failures)
+     CHECK_ERR(verify(Changed(r1, 0, [](std::vector<valtype>& stack) { stack.back().pop_back(); })), SCRIPT_ERR_P2MR_RESCUE_ANNEX);
+     CHECK_ERR(verify(Changed(r1, 0, [](std::vector<valtype>& stack) {
+                   valtype& annex{stack.back()};
+-                  annex.insert(annex.end(), annex.begin() + 1, annex.end());
++                  const valtype record(annex.begin() + 1, annex.end());
++                  annex.insert(annex.end(), record.begin(), record.end());
+               })),
+               SCRIPT_ERR_P2MR_RESCUE_ANNEX);
+     CHECK_ERR(verify(Changed(r1, 0, [](std::vector<valtype>& stack) { stack.back() = {0x50}; })), SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
+-- 
+2.43.0
+
