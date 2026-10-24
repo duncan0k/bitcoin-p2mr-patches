@@ -30,17 +30,23 @@ mempool, at -par=1 and the default -par, in three builds:
             its statement and message, and keeps its own result. Its all-valid blocks bound every
             invalid block of the same layout (README.md): rescue, rescue-tail, mixed, schnorr;
   portable  the same with M4R_PORTABLE=1 as well, every GF(2^128) product on the portable path, as on a
-            CPU without PCLMULQDQ: rescue, rescue-tail, schnorr.
+            CPU without PCLMULQDQ: rescue, rescue-tail, mixed, schnorr. On a CPU without PCLMULQDQ the
+            hook build is portable already; the results record the CPU's own capability and the forced
+            switch apart.
 
-Counts: each block once more, by bitcoind_m4r_measure at -par=1 (one thread, in order) with the hook off
-(and on, for the hook kinds); its counters of complete verifications (rescue proofs, worst-case hook
-proofs, Schnorr, ML-DSA-44, SLH-DSA) must equal what the layout gives. The hook and portable runs are
-counted too, and their valid blocks must give the same counts.
+Counts: each block once more, by bitcoind_m4r_measure at -par=1 (one thread, in order) with its counters
+on (M4R_COUNT=1) and the hook off (and on, for the hook kinds); its counts of complete verifications
+(rescue proofs, worst-case hook proofs, Schnorr, ML-DSA-44, SLH-DSA) must equal what the layout gives.
+The timed runs leave the counters off, so that they cost nothing there; the series' own count of rescue
+proofs, which a release node keeps too, is still checked in them.
 
 Gate: for each build and -par, the maximum connect time (submitblock) of every block kind is at most
---max-ratio (1 by default) times the median connect time of the schnorr block of the same build and
--par. The gate needs the whole matrix (26 cells) with --rounds samples each, at least 2; anything less
-prints INCOMPLETE and exits with 2; a failing ratio prints FAIL with the figures and exits with 1.
+--max-ratio (1 by default) times the median connect time of the release build's schnorr block at the
+same -par: the Schnorr worst block of a node of the series on this machine. The median of each build's
+own schnorr block is reported as well. The gate needs the whole matrix (28 cells) with --rounds samples
+each, at least 2, every time finite and positive; anything less, and any run that fails (a node that does
+not start or exits, a timeout, an exception), prints INCOMPLETE with the reason and exits with 2; a
+failing ratio prints FAIL with the figures and exits with 1.
 
 Usage:
   python3 wholeblock.py --core <patched tree> --bitcoind-release <bitcoind> \\
@@ -52,8 +58,10 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import re
+import socket
 import statistics
 import subprocess
 import sys
@@ -66,12 +74,15 @@ INVALID_KINDS = {"rescue-invalid-last", "rescue-tail-invalid-last"}
 BUILD_KINDS = {
     "release": ALL_KINDS,
     "hook": ["rescue", "rescue-tail", "mixed", "schnorr"],
-    "portable": ["rescue", "rescue-tail", "schnorr"],
+    "portable": ["rescue", "rescue-tail", "mixed", "schnorr"],
 }
 ALL_BUILDS = list(BUILD_KINDS)
 ALL_PARS = ["1", "default"]
 MIN_ROUNDS = 2
 REFERENCE = "schnorr"
+REFERENCE_BUILD = "release"
+# Symbols every bitcoind of the series has, to know that `nm` reads a symbol table at all.
+KNOWN_SYMBOLS = ("AppInitMain", "VerifyP2MRRescueProof")
 H3 = 50  # the tripwire height, which the rescue lane follows on regtest
 HOOK_SYMBOLS = re.compile(r"M4RMeasure|m4r_measure|voleith_m4r")
 
@@ -95,88 +106,10 @@ def parse_args():
 
 
 ARGS = parse_args()
-sys.path.insert(0, str(Path(ARGS.core) / "test" / "functional"))
-
-from test_framework.authproxy import AuthServiceProxy  # noqa: E402
-from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase  # noqa: E402
-from test_framework.key import compute_xonly_pubkey, sign_schnorr  # noqa: E402
-from test_framework.messages import (  # noqa: E402
-    COutPoint,
-    CTransaction,
-    CTxIn,
-    CTxInWitness,
-    CTxOut,
-    MAX_BLOCK_WEIGHT,
-    ser_compact_size,
-)
-from test_framework.p2mr import p2mr_construct  # noqa: E402
-from test_framework.p2mr_mldsa44 import (  # noqa: E402
-    LEAF_FAIL,
-    MLDSA44_PUBKEY_CHUNK_SIZES,
-    MLDSA44_SIGNATURE_SIZE,
-    NO_CODESEPARATOR,
-    OP_CHECKMLDSA44,
-    mldsa44_keygen,
-    mldsa44_sig_chunks,
-    mldsa44_sign_input,
-    split_chunks,
-)
-from test_framework.p2mr_rescue import (  # noqa: E402
-    P2MR_LEAF_TRIPWIRED,
-    RESCUE_S1_PROOF_SIZE,
-    RESCUE_STATEMENT_HMAC,
-    WALLET_V1_SCHNORR_K,
-    network_id_regtest,
-    prove,
-    rescue_annex,
-    rescue_key,
-    rescue_message,
-    rescue_pub,
-    rescue_sighash,
-    rescue_token,
-    rescue_y,
-)
-from test_framework.p2mr_slhdsa128s import (  # noqa: E402
-    OP_CHECKSLHDSA128S,
-    SLHDSA128S_SIGNATURE_SIZE,
-    VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
-    slhdsa128s_keygen,
-    slhdsa128s_sig_chunks,
-    slhdsa128s_sign_input,
-)
-from test_framework.script import (  # noqa: E402
-    CScript,
-    LEAF_VERSION_TAPSCRIPT,
-    OP_7,
-    OP_15,
-    OP_CHECKSIG,
-    OP_CHECKSIGVERIFY,
-    OP_DROP,
-    OP_DUP,
-    OP_PICK,
-    OP_TRUE,
-    OP_VERIFY,
-    SIGHASH_DEFAULT,
-    TaprootSignatureHash,
-)
-
-COINBASE_MATURITY = 100
-VALIDATION_WEIGHT_PER_MLDSA44_CHECK = 250
-# The validation weight of a rescue check (src/script/script.h), on top of the 50 every non-empty
-# signature pays; read from the tree, so that the gate measures the value the series has.
-RESCUE_WEIGHT = int(re.search(r"VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK\{(\d+)\}",
-                              (Path(ARGS.core) / "src" / "script" / "script.h").read_text()).group(1))
-SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha384(b"m4r-measure slh-dsa key").digest())
-MLDSA_PUB, MLDSA_SEC = mldsa44_keygen(hashlib.sha256(b"m4r-measure ml-dsa-44 key").digest())
-MLDSA_PUB_CHUNKS = split_chunks(MLDSA_PUB, MLDSA44_PUBKEY_CHUNK_SIZES)
-SCHNORR_SEC = hashlib.sha256(b"m4r-measure schnorr key").digest()
-SCHNORR_PUB = compute_xonly_pubkey(SCHNORR_SEC)[0]
-RESCUE_X = hashlib.sha256(b"m4r-measure rescue seed").digest()
-RESCUE_YV = rescue_y(WALLET_V1_SCHNORR_K, RESCUE_X, 0)
-RESCUE_P = rescue_key(RESCUE_YV)
-RESCUE_TOKEN = rescue_token(WALLET_V1_SCHNORR_K, 0, RESCUE_YV)
-RESCUE_PUB = rescue_pub(WALLET_V1_SCHNORR_K, 0, RESCUE_YV)
 COUNTERS = ("rescue", "rescue_worst", "schnorr", "mldsa44", "slhdsa128s")
+# The series' own counters (P2MRRescueProofVerifications, SLHDSA128SVerifyLibraryCalls), which count in
+# every build; the others are the measurement build's, on only in its counting runs (M4R_COUNT=1).
+SERIES_COUNTERS = ("rescue", "slhdsa128s")
 
 
 def witness_size(stack):
@@ -290,17 +223,6 @@ class Kind:
         return tx
 
 
-SLH_CHECK = [OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]
-KINDS = {
-    "slh": Kind("slh", VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, [520] * 15 + [56], [], SLH_CHECK, [SLH_PUB, OP_CHECKSLHDSA128S]),
-    "mldsa": Kind("mldsa", VALIDATION_WEIGHT_PER_MLDSA44_CHECK, [520] * 4 + [340], list(MLDSA_PUB_CHUNKS),
-                  [OP_7, OP_PICK] * 8 + [OP_CHECKMLDSA44, OP_VERIFY], [OP_CHECKMLDSA44]),
-    "schnorr": Kind("schnorr", 50, [64], [], [OP_DUP, SCHNORR_PUB, OP_CHECKSIGVERIFY], [SCHNORR_PUB, OP_CHECKSIG]),
-}
-assert sum(KINDS["slh"].sig_stack_sizes) == SLHDSA128S_SIGNATURE_SIZE
-assert sum(KINDS["mldsa"].sig_stack_sizes) == MLDSA44_SIGNATURE_SIZE
-
-
 class Rescue:
     """A rescue input: a leaf of version 0xe0 at depth one that makes `schnorr` Schnorr checks
     (OP_DUP <key> OP_CHECKSIGVERIFY, on one signature) and then one rescue check (<P> OP_CHECKSIG on the
@@ -396,47 +318,105 @@ def make_block(prev_hash, height, ntime, txs):
     return block
 
 
+class RunFailure(Exception):
+    """A run that cannot give a figure: the gate ends INCOMPLETE with this reason."""
+
+
+LIVE_NODES = []
+
+
+def free_port():
+    """A TCP port on 127.0.0.1 that nothing listens on now; the node is then checked to be the one that
+    answers on it (Node.__init__)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 class Node:
-    def __init__(self, binary, datadir, par, tripwire, worst=None, portable=None):
+    def __init__(self, binary, datadir, par, tripwire, worst=None, portable=None, count=False):
         self.datadir = Path(datadir)
         self.datadir.mkdir(parents=True)
-        self.port = 30000 + (os.getpid() % 2000) * 2
+        self.port = free_port()
+        self.p2p_port = free_port()
         args = [binary, "-regtest", f"-datadir={self.datadir}", "-maxsigcachesize=0", "-debug=bench", "-listen=0",
                 "-connect=0", "-dnsseed=0", "-server", "-rpcuser=m", "-rpcpassword=m", f"-rpcport={self.port}",
-                "-printtoconsole=0", f"-signettripwire={H3}@{tripwire}"]
+                f"-port={self.p2p_port}", "-rpcbind=127.0.0.1", "-rpcallowip=127.0.0.1", "-printtoconsole=0",
+                f"-signettripwire={H3}@{tripwire}"]
         if par != "default":
             args.append(f"-par={par}")
         env = dict(os.environ)
-        env.pop("M4R_WORST", None)
-        env.pop("M4R_PORTABLE", None)
+        for name in ("M4R_WORST", "M4R_PORTABLE", "M4R_COUNT"):
+            env.pop(name, None)
         if worst is not None:
             env["M4R_WORST"] = "1" if worst else "0"
             env["M4R_PORTABLE"] = "1" if portable else "0"
-        self.measure, self.worst, self.portable = worst is not None, worst, portable
+            env["M4R_COUNT"] = "1" if count else "0"
+        self.measure, self.worst, self.portable, self.count = worst is not None, worst, portable, count
+        self.binary = binary
         self.proc = subprocess.Popen(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        LIVE_NODES.append(self)
         url = f"http://m:m@127.0.0.1:{self.port}"
+        logpath = None
         for _ in range(1200):
+            if self.proc.poll() is not None:
+                self.kill()
+                raise RunFailure(f"{binary} exited ({self.proc.returncode}) while starting: {self.proc.stderr.read().decode()!r}")
             try:
-                AuthServiceProxy(url, timeout=10).getblockcount()
+                logpath = AuthServiceProxy(url, timeout=10).getrpcinfo()["logpath"]
                 break
             except Exception:
-                if self.proc.poll() is not None:
-                    raise RuntimeError(f"{binary} exited: {self.proc.stderr.read().decode()}")
                 time.sleep(0.1)
         else:
-            raise RuntimeError(f"{binary} did not answer RPC")
+            self.kill()
+            raise RunFailure(f"{binary} did not answer RPC on port {self.port} within 120 s")
+        # The node that answers must be this process: its log is in this node's own data directory.
+        if Path(logpath).resolve() != (self.datadir / "regtest" / "debug.log").resolve():
+            self.kill()
+            raise RunFailure(f"the RPC on port {self.port} is not the node just started (log {logpath}, expected under {self.datadir})")
         self.rpc = AuthServiceProxy(url, timeout=3600)
 
+    def alive(self, what):
+        if self.proc.poll() is not None:
+            self.kill()
+            raise RunFailure(f"{self.binary} exited ({self.proc.returncode}) {what}: {self.proc.stderr.read().decode()!r}")
+
+    def kill(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=60)
+        if self in LIVE_NODES:
+            LIVE_NODES.remove(self)
+
     def stop(self):
+        self.alive("before it was stopped")
         self.rpc.stop()
-        stderr = self.proc.communicate(timeout=600)[1].decode()
+        try:
+            stderr = self.proc.communicate(timeout=600)[1].decode()
+        except subprocess.TimeoutExpired:
+            self.kill()
+            raise RunFailure(f"{self.binary} did not stop within 600 s")
+        LIVE_NODES.remove(self)
+        if self.proc.returncode != 0:
+            raise RunFailure(f"{self.binary} stopped with status {self.proc.returncode}: {stderr!r}")
         if not self.measure:
-            return None
-        banner = f"rescue worst-case hook: {int(self.worst)}; portable multiplication: {int(self.portable)}"
-        if banner not in stderr:
-            raise RuntimeError(f"the measurement node did not report '{banner}': {stderr!r}")
+            return None, None
+        m = re.search(r"rescue worst-case hook: (\d); portable multiplication forced: (\d); CPU has PCLMULQDQ: (\d); "
+                      r"portable multiplication in use: (\d); counting: (\d)", stderr)
+        if not m:
+            raise RunFailure(f"the measurement node did not report its switches: {stderr!r}")
+        worst, forced, cpu_clmul, in_use, count = map(int, m.groups())
+        # The portable path is in use when forced, and on a CPU without PCLMULQDQ whatever the switch says.
+        if (worst, forced, in_use, count) != (int(self.worst), int(self.portable), int(self.portable or not cpu_clmul),
+                                              int(self.count)):
+            raise RunFailure(f"the measurement node reported hook {worst}, forced {forced}, CPU PCLMULQDQ {cpu_clmul}, "
+                             f"portable in use {in_use}, counting {count}; expected hook {int(self.worst)}, forced "
+                             f"{int(self.portable)}, counting {int(self.count)}")
         m = re.search(r"counters: rescue=(\d+) rescue_worst=(\d+) schnorr=(\d+) mldsa44=(\d+) slhdsa128s=(\d+)", stderr)
-        return dict(zip(COUNTERS, map(int, m.groups())))
+        if not m:
+            raise RunFailure(f"the measurement node did not report its counters: {stderr!r}")
+        switches = {"hook": worst, "portable_forced": forced, "cpu_pclmulqdq": cpu_clmul, "portable_in_use": in_use}
+        return dict(zip(COUNTERS, map(int, m.groups()))), switches
 
     def bench_connect_ms(self):
         lines = (self.datadir / "regtest" / "debug.log").read_text().splitlines()
@@ -444,23 +424,25 @@ class Node:
         return connect[-1] if connect else None
 
 
-def run_block(binary, workdir, chain, block, par, tripwire, expect_valid, worst=None, portable=None):
-    node = Node(binary, workdir, par, tripwire, worst, portable)
+def run_block(binary, workdir, chain, block, par, tripwire, expect_valid, worst=None, portable=None, count=False):
+    node = Node(binary, workdir, par, tripwire, worst, portable, count)
     for b in chain:
         res = node.rpc.submitblock(b.serialize().hex())
-        assert res is None, res
+        if res is not None:
+            raise RunFailure(f"chain block {b.hash_hex} not accepted: {res}")
     tip = node.rpc.getbestblockhash()
     start = time.perf_counter()
     result = node.rpc.submitblock(block.serialize().hex())
     elapsed_ms = (time.perf_counter() - start) * 1000
+    node.alive("while connecting the block")
     best = node.rpc.getbestblockhash()
     bench = node.bench_connect_ms() if expect_valid else None
-    counters = node.stop()
+    counters, switches = node.stop()
     if expect_valid and not (result is None and best == block.hash_hex):
-        raise RuntimeError(f"block not connected: {result}")
+        raise RunFailure(f"block not connected: {result}")
     if not expect_valid and not (result is not None and "Invalid rescue proof" in result and best == tip):
-        raise RuntimeError(f"invalid block not rejected as expected: {result}")
-    return elapsed_ms, bench, counters
+        raise RunFailure(f"invalid block not rejected as expected: {result}")
+    return elapsed_ms, bench, counters, switches
 
 
 def expected_cells(builds, pars):
@@ -468,16 +450,200 @@ def expected_cells(builds, pars):
 
 
 def check_binaries():
-    """The release node must hold no symbol of the measurement build, the measurement node must."""
+    """The release node must hold no symbol of the measurement build, the measurement node must. A
+    stripped binary would pass the first check by having no symbols at all, so each must first show the
+    symbols every node of the series has."""
     for binary, want in ((ARGS.bitcoind_release, False), (ARGS.bitcoind_measure, True)):
-        out = subprocess.run(["nm", "-C", binary], capture_output=True, text=True, check=True).stdout
-        found = sorted({m.group(0) for m in HOOK_SYMBOLS.finditer(out)})
+        res = subprocess.run(["nm", "-C", binary], capture_output=True, text=True)
+        missing = [sym for sym in KNOWN_SYMBOLS if sym not in res.stdout]
+        if res.returncode != 0 or missing:
+            raise RunFailure(f"{binary}: nm finds no usable symbol table (exit {res.returncode}, missing {missing}); "
+                             "the measurement symbols cannot be checked")
+        found = sorted({m.group(0) for m in HOOK_SYMBOLS.finditer(res.stdout)})
         if bool(found) != want:
-            raise SystemExit(f"{binary}: measurement symbols {found or 'none'}; expected {'some' if want else 'none'}")
-        print(f"{binary}: measurement symbols: {', '.join(found) if found else 'none'}", flush=True)
+            raise RunFailure(f"{binary}: measurement symbols {found or 'none'}; expected {'some' if want else 'none'}")
+        print(f"{binary}: symbol table read ({', '.join(KNOWN_SYMBOLS)} present); measurement symbols: "
+              f"{', '.join(found) if found else 'none'}", flush=True)
 
 
-def main():
+def good(x):
+    return isinstance(x, (int, float)) and math.isfinite(x) and x > 0
+
+
+def summarize(runs, info, builds, pars, missing, rounds, max_ratio):
+    """The gate's verdict from the timed runs: every cell's largest connect time over the median of the
+    release build's schnorr block at the same -par. Returns (verdict, summary, failures, incomplete)."""
+    def median_of(build, par, name):
+        """The median of a cell's connect times, if every sample and the median itself are finite and
+        positive (two finite samples near the largest float give an infinite median)."""
+        times = [r["connect_ms"] for r in runs if r["build"] == build and r["par"] == par and r["block"] == name]
+        if not times or not all(good(t) for t in times):
+            return None
+        median = statistics.median(times)
+        return median if good(median) else None
+
+    summary = []
+    print("\nbuild | -par | block | weight | inputs | checks rescue/Schnorr/ML-DSA-44/SLH-DSA planned | counted (hook off) | "
+          "connect ms median | max | bench median | release schnorr median | max/release schnorr (gate) | "
+          "own schnorr median | max/own schnorr | gate")
+    gate_ok, complete = True, not missing and rounds >= MIN_ROUNDS
+    incomplete = []
+    failures = []
+    for build in builds:
+        for par in pars:
+            ref_median = median_of(REFERENCE_BUILD, par, REFERENCE)
+            own_median = median_of(build, par, REFERENCE)
+            if ref_median is None:
+                complete = False
+                incomplete.append(f"no finite, positive median of the {REFERENCE_BUILD} {REFERENCE} block at -par={par}")
+            for name in BUILD_KINDS[build]:
+                rows = [r for r in runs if r["build"] == build and r["par"] == par and r["block"] == name]
+                if len(rows) != rounds:
+                    complete = False
+                if not rows:
+                    continue
+                times = [r["connect_ms"] for r in rows]
+                if not all(good(t) for t in times):
+                    complete = False
+                    incomplete.append(f"{build}/-par={par}/{name}: connect times {times} are not all finite and positive")
+                    continue
+                benches = [r["bench_connect_ms"] for r in rows if r["bench_connect_ms"] is not None]
+                ratio = max(times) / ref_median if ref_median else None
+                own_ratio = max(times) / own_median if own_median else None
+                if (not good(statistics.median(times)) or (ref_median and not good(ratio))
+                        or (own_median and not good(own_ratio))):
+                    complete = False
+                    incomplete.append(f"{build}/-par={par}/{name}: median or ratio not finite and positive "
+                                      f"(median {statistics.median(times)}, ratio {ratio}, own ratio {own_ratio})")
+                    ratio = None
+                # The schnorr blocks are the reference, not a kind the gate bounds; the hook and portable
+                # builds' own schnorr blocks are reported only.
+                passed = None if name == REFERENCE or ratio is None else ratio <= max_ratio
+                p, c = info[name]["planned"], info[name]["counted"]
+                entry = {"build": build, "par": par, "block": name, "weight": info[name]["weight"], "inputs": info[name]["inputs"],
+                         "planned": p, "counted": c, "counted_hook": info[name].get("counted_hook"),
+                         "connect_ms_median": statistics.median(times), "connect_ms_max": max(times),
+                         "bench_connect_ms_median": statistics.median(benches) if benches else None,
+                         "reference_median_ms": ref_median, "ratio_max_to_reference_median": ratio,
+                         "own_schnorr_median_ms": own_median, "ratio_max_to_own_schnorr_median": own_ratio, "gate_pass": passed}
+                summary.append(entry)
+                fmt = lambda x, f="{:.1f}": "-" if x is None else f.format(x)  # noqa: E731
+                print(f"{build} | {par} | {name} | {entry['weight']} | {entry['inputs']} | "
+                      f"{p['rescue']}/{p['schnorr']}/{p['mldsa44']}/{p['slhdsa128s']} | "
+                      f"{c['rescue']}/{c['schnorr']}/{c['mldsa44']}/{c['slhdsa128s']} | {entry['connect_ms_median']:.1f} | "
+                      f"{entry['connect_ms_max']:.1f} | {fmt(entry['bench_connect_ms_median'])} | {fmt(ref_median)} | "
+                      f"{fmt(ratio, '{:.3f}')} | {fmt(own_median)} | {fmt(own_ratio, '{:.3f}')} | "
+                      f"{'-' if passed is None else ('pass' if passed else 'FAIL')}")
+                if passed is False:
+                    gate_ok = False
+                    failures.append(f"{build}/-par={par}/{name}: max {max(times):.1f} ms, {REFERENCE_BUILD} schnorr median "
+                                    f"{ref_median:.1f} ms, ratio {ratio:.3f} > {max_ratio}")
+    # Completeness first: a run without a valid measurement of every cell is INCOMPLETE, whatever its
+    # ratios; its FAIL lines are still printed.
+    verdict = "INCOMPLETE" if not complete else ("PASS" if gate_ok else "FAIL")
+    return verdict, summary, failures, incomplete
+
+
+def setup():
+    """Everything that reads the Core tree: its test framework, the series' weight from
+    src/script/script.h, the keys and the input kinds. It runs inside main()'s handler, so that a wrong
+    --core ends INCOMPLETE with the reason too."""
+    sys.path.insert(0, str(Path(ARGS.core) / "test" / "functional"))
+
+    from test_framework.authproxy import AuthServiceProxy
+    from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase
+    from test_framework.key import compute_xonly_pubkey, sign_schnorr
+    from test_framework.messages import (
+        COutPoint,
+        CTransaction,
+        CTxIn,
+        CTxInWitness,
+        CTxOut,
+        MAX_BLOCK_WEIGHT,
+        ser_compact_size,
+    )
+    from test_framework.p2mr import p2mr_construct
+    from test_framework.p2mr_mldsa44 import (
+        LEAF_FAIL,
+        MLDSA44_PUBKEY_CHUNK_SIZES,
+        MLDSA44_SIGNATURE_SIZE,
+        NO_CODESEPARATOR,
+        OP_CHECKMLDSA44,
+        mldsa44_keygen,
+        mldsa44_sig_chunks,
+        mldsa44_sign_input,
+        split_chunks,
+    )
+    from test_framework.p2mr_rescue import (
+        P2MR_LEAF_TRIPWIRED,
+        RESCUE_S1_PROOF_SIZE,
+        RESCUE_STATEMENT_HMAC,
+        WALLET_V1_SCHNORR_K,
+        network_id_regtest,
+        prove,
+        rescue_annex,
+        rescue_key,
+        rescue_message,
+        rescue_pub,
+        rescue_sighash,
+        rescue_token,
+        rescue_y,
+    )
+    from test_framework.p2mr_slhdsa128s import (
+        OP_CHECKSLHDSA128S,
+        SLHDSA128S_SIGNATURE_SIZE,
+        VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK,
+        slhdsa128s_keygen,
+        slhdsa128s_sig_chunks,
+        slhdsa128s_sign_input,
+    )
+    from test_framework.script import (
+        CScript,
+        LEAF_VERSION_TAPSCRIPT,
+        OP_7,
+        OP_15,
+        OP_CHECKSIG,
+        OP_CHECKSIGVERIFY,
+        OP_DROP,
+        OP_DUP,
+        OP_PICK,
+        OP_TRUE,
+        OP_VERIFY,
+        SIGHASH_DEFAULT,
+        TaprootSignatureHash,
+    )
+
+    COINBASE_MATURITY = 100
+    VALIDATION_WEIGHT_PER_MLDSA44_CHECK = 250
+    # The validation weight of a rescue check (src/script/script.h), on top of the 50 every non-empty
+    # signature pays; read from the tree, so that the gate measures the value the series has.
+    RESCUE_WEIGHT = int(re.search(r"VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK\{(\d+)\}",
+                                  (Path(ARGS.core) / "src" / "script" / "script.h").read_text()).group(1))
+    SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha384(b"m4r-measure slh-dsa key").digest())
+    MLDSA_PUB, MLDSA_SEC = mldsa44_keygen(hashlib.sha256(b"m4r-measure ml-dsa-44 key").digest())
+    MLDSA_PUB_CHUNKS = split_chunks(MLDSA_PUB, MLDSA44_PUBKEY_CHUNK_SIZES)
+    SCHNORR_SEC = hashlib.sha256(b"m4r-measure schnorr key").digest()
+    SCHNORR_PUB = compute_xonly_pubkey(SCHNORR_SEC)[0]
+    RESCUE_X = hashlib.sha256(b"m4r-measure rescue seed").digest()
+    RESCUE_YV = rescue_y(WALLET_V1_SCHNORR_K, RESCUE_X, 0)
+    RESCUE_P = rescue_key(RESCUE_YV)
+    RESCUE_TOKEN = rescue_token(WALLET_V1_SCHNORR_K, 0, RESCUE_YV)
+    RESCUE_PUB = rescue_pub(WALLET_V1_SCHNORR_K, 0, RESCUE_YV)
+    # The input kinds below look these names up as globals.
+    globals().update({name: value for name, value in locals().items() if not name.startswith("_")})
+    SLH_CHECK = [OP_15, OP_PICK] * 16 + [SLH_PUB, OP_CHECKSLHDSA128S, OP_VERIFY]
+    KINDS = {
+        "slh": Kind("slh", VALIDATION_WEIGHT_PER_SLHDSA128S_CHECK, [520] * 15 + [56], [], SLH_CHECK, [SLH_PUB, OP_CHECKSLHDSA128S]),
+        "mldsa": Kind("mldsa", VALIDATION_WEIGHT_PER_MLDSA44_CHECK, [520] * 4 + [340], list(MLDSA_PUB_CHUNKS),
+                      [OP_7, OP_PICK] * 8 + [OP_CHECKMLDSA44, OP_VERIFY], [OP_CHECKMLDSA44]),
+        "schnorr": Kind("schnorr", 50, [64], [], [OP_DUP, SCHNORR_PUB, OP_CHECKSIGVERIFY], [SCHNORR_PUB, OP_CHECKSIG]),
+    }
+    assert sum(KINDS["slh"].sig_stack_sizes) == SLHDSA128S_SIGNATURE_SIZE
+    assert sum(KINDS["mldsa"].sig_stack_sizes) == MLDSA44_SIGNATURE_SIZE
+    globals().update({name: value for name, value in locals().items() if not name.startswith("_")})
+
+
+def gate():
     pars = ARGS.par.split(",")
     builds = ARGS.builds.split(",")
     unknown = [b for b in builds if b not in ALL_BUILDS] + [p for p in pars if p not in ALL_PARS]
@@ -563,7 +729,7 @@ def main():
         return KINDS[kind].spend(checks, utxo)
 
     blocks = {}
-    for name in plans:
+    for name in list(plans):
         txs = [spend(kind, checks, outputs[name][i]) for i, (kind, checks) in enumerate(plans[name])]
         blocks[name] = make_block(prev, height, t0 + height, txs)
         if name in ("rescue", "rescue-tail"):
@@ -588,91 +754,88 @@ def main():
         print(f"block {name}: weight {block.get_weight()} ({MAX_BLOCK_WEIGHT - block.get_weight()} WU unused), "
               f"{len(block.vtx) - 1} inputs, checks planned {planned}", flush=True)
 
-    def check_counts(name, counters, hook, exact):
+    def check_counts(name, counters, hook, exact, counting=True):
         """The counters of a run against the plan: exact at -par=1 (one thread, in order: an invalid
         block's failing check is its last, so every check runs) and for valid blocks; at most the plan for
-        an invalid block checked in parallel, which stops at the first failure."""
+        an invalid block checked in parallel, which stops at the first failure. A timed run counts nothing
+        (counting=False) but the series' own counts, of rescue proofs and of SLH-DSA library calls, which run
+        in every build."""
         expected = dict(info[name]["planned"])
         expected["rescue_worst"] = expected["rescue"] if hook else 0
+        if not counting:
+            expected = {key: (expected[key] if key in SERIES_COUNTERS else 0) for key in COUNTERS}
         for key in COUNTERS:
-            ok = counters[key] == expected[key] if exact else counters[key] <= expected[key]
+            ok = counters[key] == expected[key] if exact or expected[key] == 0 else counters[key] <= expected[key]
             if not ok:
-                raise RuntimeError(f"{name}: counted {counters}, planned {expected} ({'exact' if exact else 'at most'})")
+                raise RunFailure(f"{name}: counted {counters}, planned {expected} ({'exact' if exact else 'at most'})")
 
     runs = []
+    switches_seen = []
     for name in ALL_KINDS:
         valid = name not in INVALID_KINDS
         for hook in (False, True):
             if hook and name not in BUILD_KINDS["hook"]:
                 continue
-            _, _, counters = run_block(ARGS.bitcoind_measure, work / f"count-{name}-hook{int(hook)}", chain, blocks[name], "1",
-                                       tripwire, valid, worst=hook, portable=False)
+            _, _, counters, switches = run_block(ARGS.bitcoind_measure, work / f"count-{name}-hook{int(hook)}", chain,
+                                                 blocks[name], "1", tripwire, valid, worst=hook, portable=False, count=True)
             check_counts(name, counters, hook, exact=True)
+            switches_seen.append(switches)
             info[name]["counted_hook" if hook else "counted"] = counters
             print(f"counted, hook {'on' if hook else 'off'}, {name}: {counters}", flush=True)
     for build, par, name in expected_cells(builds, pars):
         valid = name not in INVALID_KINDS
         for rnd in range(ARGS.rounds):
             if build == "release":
-                ms, bench, counters = run_block(ARGS.bitcoind_release, work / f"{build}-{name}-par{par}-r{rnd + 1}", chain,
-                                                blocks[name], par, tripwire, valid)
+                ms, bench, counters, switches = run_block(ARGS.bitcoind_release, work / f"{build}-{name}-par{par}-r{rnd + 1}",
+                                                          chain, blocks[name], par, tripwire, valid)
             else:
-                ms, bench, counters = run_block(ARGS.bitcoind_measure, work / f"{build}-{name}-par{par}-r{rnd + 1}", chain,
-                                                blocks[name], par, tripwire, valid, worst=True, portable=build == "portable")
-                check_counts(name, counters, True, exact=valid or par == "1")
+                ms, bench, counters, switches = run_block(ARGS.bitcoind_measure, work / f"{build}-{name}-par{par}-r{rnd + 1}",
+                                                          chain, blocks[name], par, tripwire, valid, worst=True,
+                                                          portable=build == "portable")
+                check_counts(name, counters, True, exact=valid or par == "1", counting=False)
+                switches_seen.append(switches)
             row = {"build": build, "block": name, "par": par, "round": rnd + 1, "connect_ms": ms, "bench_connect_ms": bench,
-                   "counters": counters}
+                   "counters": counters, "switches": switches}
             runs.append(row)
             print(json.dumps(row), flush=True)
+    cpu_clmul = sorted({sw["cpu_pclmulqdq"] for sw in switches_seen})
 
-    summary = []
-    print("\nbuild | -par | block | weight | inputs | checks rescue/Schnorr/ML-DSA-44/SLH-DSA planned | counted (hook off) | "
-          "connect ms median | max | bench median | schnorr median | max/schnorr median | gate")
-    gate_ok, complete = True, not missing and ARGS.rounds >= MIN_ROUNDS
-    failures = []
-    for build in builds:
-        for par in pars:
-            ref = [r["connect_ms"] for r in runs if r["build"] == build and r["par"] == par and r["block"] == REFERENCE]
-            ref_median = statistics.median(ref) if ref else None
-            for name in BUILD_KINDS[build]:
-                rows = [r for r in runs if r["build"] == build and r["par"] == par and r["block"] == name]
-                if len(rows) != ARGS.rounds or len(ref) != ARGS.rounds:
-                    complete = False
-                if not rows:
-                    continue
-                times = [r["connect_ms"] for r in rows]
-                benches = [r["bench_connect_ms"] for r in rows if r["bench_connect_ms"] is not None]
-                ratio = max(times) / ref_median if ref_median else None
-                passed = None if name == REFERENCE or ratio is None else ratio <= ARGS.max_ratio
-                p, c = info[name]["planned"], info[name]["counted"]
-                entry = {"build": build, "par": par, "block": name, "weight": info[name]["weight"], "inputs": info[name]["inputs"],
-                         "planned": p, "counted": c, "counted_hook": info[name].get("counted_hook"),
-                         "connect_ms_median": statistics.median(times), "connect_ms_max": max(times),
-                         "bench_connect_ms_median": statistics.median(benches) if benches else None,
-                         "reference_median_ms": ref_median, "ratio_max_to_reference_median": ratio, "gate_pass": passed}
-                summary.append(entry)
-                fmt = lambda x, f="{:.1f}": "-" if x is None else f.format(x)  # noqa: E731
-                print(f"{build} | {par} | {name} | {entry['weight']} | {entry['inputs']} | "
-                      f"{p['rescue']}/{p['schnorr']}/{p['mldsa44']}/{p['slhdsa128s']} | "
-                      f"{c['rescue']}/{c['schnorr']}/{c['mldsa44']}/{c['slhdsa128s']} | {entry['connect_ms_median']:.1f} | "
-                      f"{entry['connect_ms_max']:.1f} | {fmt(entry['bench_connect_ms_median'])} | {fmt(ref_median)} | "
-                      f"{fmt(ratio, '{:.3f}')} | {'-' if passed is None else ('pass' if passed else 'FAIL')}")
-                if passed is False:
-                    gate_ok = False
-                    failures.append(f"{build}/-par={par}/{name}: max {max(times):.1f} ms, schnorr median {ref_median:.1f} ms, "
-                                    f"ratio {ratio:.3f} > {ARGS.max_ratio}")
-    verdict = "FAIL" if not gate_ok else ("PASS" if complete else "INCOMPLETE")
+    verdict, summary, failures, incomplete = summarize(runs, info, builds, pars, missing, ARGS.rounds, ARGS.max_ratio)
     (work / "results.json").write_text(json.dumps({"rescue_weight": RESCUE_WEIGHT, "max_ratio": ARGS.max_ratio, "blocks": info,
-                                                   "runs": runs, "summary": summary, "rounds": ARGS.rounds,
-                                                   "missing_cells": missing, "gate": verdict}, indent=1))
-    print(f"\ngate (every block kind's maximum <= {ARGS.max_ratio} x the median of the schnorr block, per build and -par): {verdict}")
+                                                   "cpu_pclmulqdq": cpu_clmul, "runs": runs, "summary": summary,
+                                                   "rounds": ARGS.rounds, "missing_cells": missing, "incomplete": incomplete,
+                                                   "gate": verdict}, indent=1))
+    print(f"\nCPU has PCLMULQDQ: {cpu_clmul} (with none, the hook build is portable already)")
+    print(f"gate (every block kind's maximum <= {ARGS.max_ratio} x the median of the {REFERENCE_BUILD} build's schnorr block "
+          f"at the same -par): {verdict}")
     for line in failures:
         print("FAIL: " + line)
+    for line in incomplete:
+        print("INCOMPLETE: " + line)
     if missing:
         print("INCOMPLETE: not measured: " + ", ".join(f"{b}/-par={p}/{k}" for b, p, k in missing))
     if ARGS.rounds < MIN_ROUNDS:
         print(f"INCOMPLETE: --rounds {ARGS.rounds} is a trial run; the gate needs at least {MIN_ROUNDS}")
     return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[verdict]
+
+
+def main():
+    """The gate; every run that cannot finish (a node that does not start or exits, a timeout, a count
+    that differs, an exception) stops the nodes still running and ends INCOMPLETE (2) with the reason."""
+    try:
+        setup()
+        return gate()
+    except BaseException as e:  # noqa: B036 (KeyboardInterrupt too: stop the nodes first)
+        reason = f"{type(e).__name__}: {e}"
+        for node in list(LIVE_NODES):
+            try:
+                node.kill()
+            except Exception as kill_error:
+                print(f"note: could not stop {node.binary} ({kill_error})", file=sys.stderr)
+        print(f"\ngate: INCOMPLETE\nINCOMPLETE: the run failed: {reason}", flush=True)
+        if not isinstance(e, (RunFailure, Exception)):
+            raise
+        return 2
 
 
 if __name__ == "__main__":

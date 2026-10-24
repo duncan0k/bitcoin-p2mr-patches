@@ -1,7 +1,7 @@
 From 3ceac7d369ea7f5fcb258fac49cb07e85401c960 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:10 +0000
-Subject: [PATCH 86/88] test: add fuzz targets for the P2MR rescue lane
+Subject: [PATCH 86/90] test: add fuzz targets for the P2MR rescue lane
 
 - p2mr_rescue_token: the token and annex checks against their
   definition.

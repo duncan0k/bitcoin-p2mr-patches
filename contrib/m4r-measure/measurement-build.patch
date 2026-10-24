@@ -100,7 +100,7 @@ index faf1e8e..b752127 100644
  
  add_library(bitcoin_cli STATIC EXCLUDE_FROM_ALL
 diff --git a/src/bitcoind.cpp b/src/bitcoind.cpp
-index 323e757..4e6d943 100644
+index 323e757..137073c 100644
 --- a/src/bitcoind.cpp
 +++ b/src/bitcoind.cpp
 @@ -3,6 +3,16 @@
@@ -164,7 +164,7 @@ index 323e757..4e6d943 100644
      return true;
  }
  
-@@ -257,8 +297,33 @@ static bool AppInit(NodeContext& node)
+@@ -257,8 +297,41 @@ static bool AppInit(NodeContext& node)
      return fRet;
  }
  
@@ -173,11 +173,13 @@ index 323e757..4e6d943 100644
 +// build, in src/script/p2mr_rescue.cpp, src/pubkey.cpp, src/crypto/mldsa44.cpp and the measurement
 +// copy of the rescue verifier.
 +extern int m4r_measure_worst;
++extern int m4r_measure_count;
 +uint64_t M4RMeasureWorstVerifications();
 +uint64_t M4RMeasureSchnorrVerifications();
 +uint64_t M4RMeasureMLDSA44Verifications();
 +extern "C" void voleith_m4r_set_portable(int on);
 +extern "C" int voleith_m4r_portable();
++extern "C" int voleith_m4r_cpu_clmul();
 +#endif
 +
  MAIN_FUNCTION
@@ -190,15 +192,21 @@ index 323e757..4e6d943 100644
 +        const char* worst{std::getenv("M4R_WORST")};
 +        if (worst && std::string{worst} == "1") m4r_measure_worst = 1;
 +        const char* portable{std::getenv("M4R_PORTABLE")};
-+        voleith_m4r_set_portable(portable && std::string{portable} == "1");
++        const bool forced{portable && std::string{portable} == "1"};
++        voleith_m4r_set_portable(forced);
++        // M4R_COUNT=1 turns on the counters of complete verifications, for the gate's counting runs;
++        // the timed runs leave them off.
++        const char* count{std::getenv("M4R_COUNT")};
++        if (count && std::string{count} == "1") m4r_measure_count = 1;
 +        std::cerr << "MEASUREMENT-ONLY NODE (contrib/m4r-measure), not for any network; rescue worst-case hook: " << m4r_measure_worst
-+                  << "; portable multiplication: " << voleith_m4r_portable() << std::endl;
++                  << "; portable multiplication forced: " << int{forced} << "; CPU has PCLMULQDQ: " << voleith_m4r_cpu_clmul()
++                  << "; portable multiplication in use: " << voleith_m4r_portable() << "; counting: " << m4r_measure_count << std::endl;
 +    }
 +#endif
      NodeContext node;
      int exit_status;
      std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
-@@ -286,5 +351,10 @@ MAIN_FUNCTION
+@@ -286,5 +359,10 @@ MAIN_FUNCTION
      Interrupt(node);
      Shutdown(node);
  
@@ -210,17 +218,21 @@ index 323e757..4e6d943 100644
      return node.exit_status;
  }
 diff --git a/src/crypto/mldsa44.cpp b/src/crypto/mldsa44.cpp
-index 2e34324..3bddd36 100644
+index 2e34324..48112b0 100644
 --- a/src/crypto/mldsa44.cpp
 +++ b/src/crypto/mldsa44.cpp
-@@ -11,6 +11,14 @@
+@@ -11,6 +11,18 @@
  static_assert(MLDSA44_PUBLICKEYBYTES == MLDSA44_PUBKEY_SIZE);
  static_assert(MLDSA44_BYTES == MLDSA44_SIGNATURE_SIZE);
  
 +#ifdef M4R_MEASURE
 +#include <atomic>
 +#include <cstdint>
-+// MEASUREMENT ONLY (contrib/m4r-measure): complete ML-DSA-44 verifications, for the gate's counts.
++// MEASUREMENT ONLY (contrib/m4r-measure): the counters of complete verifications of the gate count
++// only while m4r_measure_count is set (M4R_COUNT=1, read once at startup by bitcoind_m4r_measure), in
++// the gate's counting runs; in its timed runs they cost one predictable branch and no atomic operation.
++int m4r_measure_count{0};
++// MEASUREMENT ONLY: complete ML-DSA-44 verifications, for the gate's counts.
 +static std::atomic<uint64_t> g_m4r_mldsa44_verifications{0};
 +uint64_t M4RMeasureMLDSA44Verifications() { return g_m4r_mldsa44_verifications.load(std::memory_order_relaxed); }
 +#endif
@@ -228,12 +240,12 @@ index 2e34324..3bddd36 100644
  bool MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey,
                     std::span<const unsigned char> msg,
                     std::span<const unsigned char> ctx,
-@@ -18,5 +26,8 @@ bool MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey,
+@@ -18,5 +30,8 @@ bool MLDSA44Verify(std::span<const unsigned char, MLDSA44_PUBKEY_SIZE> pubkey,
  {
      // Zero on success; any other value (an invalid signature, or a context
      // longer than 255 bytes) is a failure.
 +#ifdef M4R_MEASURE
-+    g_m4r_mldsa44_verifications.fetch_add(1, std::memory_order_relaxed);
++    if (m4r_measure_count) g_m4r_mldsa44_verifications.fetch_add(1, std::memory_order_relaxed);
 +#endif
      return bitcoin_mldsa_verify(sig.data(), msg.data(), msg.size(), ctx.data(), ctx.size(), pubkey.data()) == 0;
  }
@@ -256,7 +268,7 @@ index d0bc3ec..f4948d5 100644
      // ********************************************************* Step 13: finished
  
 diff --git a/src/pubkey.cpp b/src/pubkey.cpp
-index 264f861..0b79926 100644
+index 264f861..3eaade8 100644
 --- a/src/pubkey.cpp
 +++ b/src/pubkey.cpp
 @@ -17,6 +17,10 @@
@@ -270,12 +282,14 @@ index 264f861..0b79926 100644
  
  using namespace util::hex_literals;
  
-@@ -233,9 +237,18 @@ bool XOnlyPubKey::IsFullyValid() const
+@@ -233,9 +237,20 @@ bool XOnlyPubKey::IsFullyValid() const
      return secp256k1_xonly_pubkey_parse(secp256k1_context_static, &pubkey, m_keydata.data());
  }
  
 +#ifdef M4R_MEASURE
-+// MEASUREMENT ONLY (contrib/m4r-measure): BIP 340 verifications, for the gate's counts.
++// MEASUREMENT ONLY (contrib/m4r-measure): BIP 340 verifications, for the gate's counts; counted only
++// while m4r_measure_count is set (src/crypto/mldsa44.cpp).
++extern int m4r_measure_count;
 +static std::atomic<uint64_t> g_m4r_schnorr_verifications{0};
 +uint64_t M4RMeasureSchnorrVerifications() { return g_m4r_schnorr_verifications.load(std::memory_order_relaxed); }
 +#endif
@@ -284,7 +298,7 @@ index 264f861..0b79926 100644
  {
      assert(sigbytes.size() == 64);
 +#ifdef M4R_MEASURE
-+    g_m4r_schnorr_verifications.fetch_add(1, std::memory_order_relaxed);
++    if (m4r_measure_count) g_m4r_schnorr_verifications.fetch_add(1, std::memory_order_relaxed);
 +#endif
      secp256k1_xonly_pubkey pubkey;
      if (!secp256k1_xonly_pubkey_parse(secp256k1_context_static, &pubkey, m_keydata.data())) return false;
@@ -305,37 +319,91 @@ index 422cf7f..8688628 100644
  #include <qt/bitcoin.h>
  
  #include <compat/compat.h>
+diff --git a/src/rescue/CMakeLists.txt b/src/rescue/CMakeLists.txt
+index f065322..c076098 100644
+--- a/src/rescue/CMakeLists.txt
++++ b/src/rescue/CMakeLists.txt
+@@ -80,6 +80,11 @@ set(voleith_rustflags
+   "--remap-path-prefix=${voleith_bin}=/p2mr-rescue-build"
+   "-Cdebuginfo=0"
+ )
++# MEASUREMENT ONLY (contrib/m4r-measure): the crate's measurement code (the portable switch of
++# clmul.rs and ffi.rs) is compiled only in the M4R_MEASURE configuration.
++if(M4R_MEASURE)
++  list(APPEND voleith_rustflags "--cfg=m4r_measure" "--check-cfg=cfg(m4r_measure)")
++endif()
+ # CARGO_ENCODED_RUSTFLAGS separates the flags with 0x1f, so paths may contain spaces.
+ string(ASCII 31 voleith_sep)
+ list(JOIN voleith_rustflags "${voleith_sep}" voleith_encoded_rustflags)
 diff --git a/src/rescue/voleith/src/clmul.rs b/src/rescue/voleith/src/clmul.rs
-index 65b7f52..8d219bd 100644
+index 65b7f52..88c1ee3 100644
 --- a/src/rescue/voleith/src/clmul.rs
 +++ b/src/rescue/voleith/src/clmul.rs
-@@ -20,9 +20,15 @@ use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x, _mm_stor
- /// with `-C target-feature=+pclmulqdq` it is a compile-time constant.
- #[inline]
- pub fn available() -> bool {
--    std::arch::is_x86_feature_detected!("pclmulqdq") && std::arch::is_x86_feature_detected!("sse2")
-+    !M4R_PORTABLE.load(core::sync::atomic::Ordering::Relaxed)
-+        && std::arch::is_x86_feature_detected!("pclmulqdq")
-+        && std::arch::is_x86_feature_detected!("sse2")
- }
+@@ -8,7 +8,7 @@
+ //! PCLMULQDQ runs in a fixed number of cycles independent of its operands,
+ //! and nothing here branches on or indexes by the operands.
  
-+/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch): when set, `available()`
-+/// says no, so that every product takes the portable path, as on a CPU without PCLMULQDQ.
-+pub static M4R_PORTABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+-#![allow(unsafe_code)]
++#![allow(unsafe_code, unexpected_cfgs)]
+ 
+ #[cfg(target_arch = "x86")]
+ use core::arch::x86::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
+@@ -18,7 +18,7 @@ use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x, _mm_stor
+ /// Whether the running CPU has PCLMULQDQ (and SSE2, which the loads and
+ /// stores need). The detection result is cached by the standard library;
+ /// with `-C target-feature=+pclmulqdq` it is a compile-time constant.
+-#[inline]
++#[inline] #[cfg(not(m4r_measure))]
+ pub fn available() -> bool {
+     std::arch::is_x86_feature_detected!("pclmulqdq") && std::arch::is_x86_feature_detected!("sse2")
+ }
+@@ -67,3 +67,24 @@ pub fn mul(a: u128, b: u128) -> Option<u128> {
+         None
+     }
+ }
 +
- /// Carry-less product of two 128-bit polynomials as (low, high) halves.
- ///
- /// # Safety
++/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch; compiled only with
++/// `--cfg m4r_measure`, which the M4R_MEASURE configuration alone passes): `available()` also says no
++/// while M4R_PORTABLE is set, so that every product takes the portable path, as on a CPU without
++/// PCLMULQDQ.
++#[cfg(m4r_measure)]
++#[inline]
++pub fn available() -> bool {
++    !M4R_PORTABLE.load(core::sync::atomic::Ordering::Relaxed) && cpu_has_clmul()
++}
++
++/// MEASUREMENT ONLY: whether the running CPU itself has PCLMULQDQ and SSE2, whatever M4R_PORTABLE says.
++#[cfg(m4r_measure)]
++#[inline]
++pub fn cpu_has_clmul() -> bool {
++    std::arch::is_x86_feature_detected!("pclmulqdq") && std::arch::is_x86_feature_detected!("sse2")
++}
++
++/// MEASUREMENT ONLY: when set, `available()` says no.
++#[cfg(m4r_measure)]
++pub static M4R_PORTABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 diff --git a/src/rescue/voleith/src/ffi.rs b/src/rescue/voleith/src/ffi.rs
-index 5a24160..c16e07a 100644
+index 5a24160..c2d30be 100644
 --- a/src/rescue/voleith/src/ffi.rs
 +++ b/src/rescue/voleith/src/ffi.rs
-@@ -29,6 +29,22 @@ unsafe fn slice<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
-     Some(unsafe { core::slice::from_raw_parts(ptr, len) })
- }
+@@ -4,7 +4,7 @@
+ //! caller's pointers into slices. Lengths are checked before any pointer is
+ //! read, and no panic crosses the boundary.
  
-+/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch): make every GF(2^128)
-+/// product take the portable path (`on` non-zero), as on a CPU without PCLMULQDQ, or not.
+-#![allow(unsafe_code)]
++#![allow(unsafe_code, unexpected_cfgs)]
+ 
+ use core::ffi::c_int;
+ use std::panic::{catch_unwind, AssertUnwindSafe};
+@@ -78,3 +78,33 @@ pub unsafe extern "C" fn voleith_verify_s1(
+         _ => 0,
+     }
+ }
++
++/// MEASUREMENT ONLY (contrib/m4r-measure of the node, measurement-build.patch; compiled only with
++/// `--cfg m4r_measure`): make every GF(2^128) product take the portable path (`on` non-zero), as on a
++/// CPU without PCLMULQDQ, or not.
++#[cfg(m4r_measure)]
 +#[no_mangle]
 +pub extern "C" fn voleith_m4r_set_portable(on: c_int) {
 +    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -344,17 +412,25 @@ index 5a24160..c16e07a 100644
 +    let _ = on;
 +}
 +
-+/// MEASUREMENT ONLY: whether the products take the portable path (1) or not (0).
++/// MEASUREMENT ONLY: whether the products take the portable path (1) or not (0), forced or because the
++/// CPU has no PCLMULQDQ.
++#[cfg(m4r_measure)]
 +#[no_mangle]
 +pub extern "C" fn voleith_m4r_portable() -> c_int {
 +    c_int::from(!crate::gf128::has_clmul())
 +}
 +
- /// Verify a statement 0x01 proof: K (`k`, `k_len` bytes), the suffix byte,
- /// y (32 bytes at `y`), the message (`msg`, `msg_len` bytes) and the proof
- /// (`proof`, `proof_len` bytes). Returns 1 if the proof is valid and 0
++/// MEASUREMENT ONLY: whether the running CPU has PCLMULQDQ (1) or not (0), whatever the switch says.
++#[cfg(m4r_measure)]
++#[no_mangle]
++pub extern "C" fn voleith_m4r_cpu_clmul() -> c_int {
++    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
++    return c_int::from(crate::clmul::cpu_has_clmul());
++    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
++    return 0;
++}
 diff --git a/src/script/p2mr_rescue.cpp b/src/script/p2mr_rescue.cpp
-index c722821..a7bc1ce 100644
+index c722821..1ea0cc2 100644
 --- a/src/script/p2mr_rescue.cpp
 +++ b/src/script/p2mr_rescue.cpp
 @@ -12,6 +12,9 @@
@@ -367,7 +443,7 @@ index c722821..a7bc1ce 100644
  #include <atomic>
  #include <cassert>
  #include <cstring>
-@@ -102,11 +105,36 @@ namespace {
+@@ -102,11 +105,38 @@ namespace {
  std::atomic<uint64_t> g_proof_verifications{0};
  } // namespace
  
@@ -380,6 +456,7 @@ index c722821..a7bc1ce 100644
 +// of any invalid proof that reaches R7, and a block of valid proofs at least the work of the same block
 +// with any of them invalid, since validation stops at the first failure.
 +int m4r_measure_worst{0};
++extern int m4r_measure_count; // src/crypto/mldsa44.cpp: the counters count only while it is set
 +namespace {
 +std::atomic<uint64_t> g_worst_verifications{0};
 +} // namespace
@@ -397,8 +474,9 @@ index c722821..a7bc1ce 100644
 +            std::fill(worst.end() - 16, worst.end(), 0xff);
 +            const int worst_result{voleith_verify_s1(token.k.data(), token.k.size(), token.suffix, token.y.data(),
 +                                                     m.data(), m.size(), worst.data(), worst.size())};
-+            // Kept, so that the call is not taken for dead code.
-+            g_worst_verifications.fetch_add(1 + (worst_result & 0), std::memory_order_relaxed);
++            // The call is to the library, outside this translation unit, so it is always made; its
++            // result is counted (as one) in the counting runs.
++            if (m4r_measure_count) g_worst_verifications.fetch_add(1 + (worst_result & 0), std::memory_order_relaxed);
 +        }
 +#endif
          // The library checks every length before it reads a pointer, returns 0 for any malformed
