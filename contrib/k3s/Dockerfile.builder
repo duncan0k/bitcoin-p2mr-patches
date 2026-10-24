@@ -39,6 +39,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #   python3-zmq      ... except interface_zmq.py, which skips itself without it
 #   bsdextrautils    hexdump, used by a few of the tool_* tests
 #   procps           ps, used when a test framework failure has to be triaged
+#   xz-utils         unpacks the Rust toolchain below
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -57,16 +58,44 @@ RUN set -eux; \
         procps \
         python3 \
         python3-zmq \
+        xz-utils \
     ; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /opt/p2mr; \
-    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /opt/p2mr/packages.txt; \
+    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /opt/p2mr/packages.txt
+
+# The Rust toolchain of the rescue verifier (patches-m4r: src/rescue/, which pins 1.97.0), in
+# /opt/rust: the standalone components for this host, each checked against its xz_hash in
+# channel-rust-1.97.0.toml, whose signature is by the Rust release key
+# 108F 6620 5EAE B0AA A8DD 5E1C 85AB 96E6 FA1B E5FE. The configuration finds this rustc and cargo
+# on PATH and runs the toolchain's own binaries; no rustup.
+RUN set -eux; \
+    mkdir /tmp/rust-dist; \
+    cd /tmp/rust-dist; \
+    for c in \
+        "rustc 0a8787303c88b018af61b5c53a0c7024d516d175e623eeab35a35eab11dbcad0" \
+        "cargo 5c5bc94af02797b699bb7d4e85b356192eab9fb50376053a1e6edf509fcf7129" \
+        "rust-std 0c43618128a7a6b96b0b04c04cf7b28dd52fb0991a74c9615fbd1a684ff88712" \
+    ; do \
+        f="${c%% *}-1.97.0-x86_64-unknown-linux-gnu"; \
+        curl -fsSL --retry 5 --retry-all-errors "https://static.rust-lang.org/dist/$f.tar.xz" -o "$f.tar.xz"; \
+        echo "${c#* }  $f.tar.xz" | sha256sum -c -; \
+        tar -xJf "$f.tar.xz"; \
+        "./$f/install.sh" --prefix=/opt/rust --disable-ldconfig > /dev/null; \
+    done; \
+    cd /; \
+    rm -rf /tmp/rust-dist
+ENV PATH=/opt/rust/bin:$PATH
+
+RUN set -eux; \
     { \
         echo "base_image=${BASE_IMAGE}"; \
         echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
         echo "cmake=$(cmake --version | head -1)"; \
         echo "gxx=$(g++ --version | head -1)"; \
         echo "python=$(python3 --version)"; \
+        echo "rustc=$(rustc -V)"; \
+        echo "cargo=$(cargo -V)"; \
     } > /opt/p2mr/toolchain.txt
 
 # ccache defaults; the Job overrides CCACHE_DIR to a directory on the work PVC.
