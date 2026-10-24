@@ -88,14 +88,16 @@ RUN set -eux; \
 ENV PATH=/opt/rust/bin:$PATH
 
 RUN set -eux; \
+    rustc_version=$(rustc -V); \
+    cargo_version=$(cargo -V); \
     { \
         echo "base_image=${BASE_IMAGE}"; \
         echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
         echo "cmake=$(cmake --version | head -1)"; \
         echo "gxx=$(g++ --version | head -1)"; \
         echo "python=$(python3 --version)"; \
-        echo "rustc=$(rustc -V)"; \
-        echo "cargo=$(cargo -V)"; \
+        echo "rustc=$rustc_version"; \
+        echo "cargo=$cargo_version"; \
     } > /opt/p2mr/toolchain.txt
 
 # ccache defaults; the Job overrides CCACHE_DIR to a directory on the work PVC.
