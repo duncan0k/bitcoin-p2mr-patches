@@ -461,9 +461,13 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
   commitment to the message it signs. On a signet with a single block
   signer, the rule says nothing about how miners or a wider network would
   adopt it.
-- **Wallets.** Bitcoin Core's wallet does not make or sign SLH1 leaves, and
-  neither does the operator's web wallet yet. A wallet that does should hand
-  out such addresses only once the chain is six blocks past height 32000.
+- **Wallets.** Bitcoin Core's wallet does not make or sign SLH1 leaves. Once
+  the chain is six blocks past height 32000, the operator's web wallet,
+  <https://wallet.ark0.si>, adds a fourth address, the SLH1 address, to its
+  other three: a tree of exactly two leaves of version `0xc0` at depth one,
+  SLH1 and `OP_RETURN`. It makes the key from its seed (`WEB-WALLET.md`) and
+  signs in the browser. Another wallet that makes such addresses should also
+  hand them out only from then on.
 - **What a node logs and reports.** A node built with `patches-m4/` logs
   this line when it starts:
 
@@ -641,7 +645,8 @@ chain instead, see `JOIN.md`.
 | `REPRODUCE.md` | step-by-step reproduction, with the output each step produced |
 | `JOIN.md` | how to get a node, prebuilt or built, connect it to the public node and follow the live chain |
 | `WEB-WALLET.md` | how the operator's web wallet makes its keys and addresses from a seed, and the limits of that derivation |
-| `web-wallet-vectors.json` | test vectors for `WEB-WALLET.md` |
+| `web-wallet-vectors.json` | test vectors for the other keys and addresses in `WEB-WALLET.md`, and for the login |
+| `web-wallet-slh-vectors.json` | test vectors for the SLH-DSA-SHA2-128s key and the SLH1 address in `WEB-WALLET.md` |
 | `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |

@@ -4,13 +4,17 @@ The operator's web wallet, <https://wallet.ark0.si>, keeps one 32-byte seed in
 the browser's local storage and makes every key it uses from that seed. This
 file says how, so that anyone can recompute a wallet's keys and addresses from
 its backup code with code of their own. `web-wallet-vectors.json` has test
-vectors: each value was computed twice, by the wallet's own code and by a
-separate Python implementation, and the two agree. The last section lists
-three limits of this derivation.
+vectors, and `web-wallet-slh-vectors.json` has those for the SLH-DSA-SHA2-128s
+key and the SLH1 address. Each value was computed twice, by the wallet's own
+code and by a separate Python implementation, and the two agree, apart from
+the signatures made with fresh randomness: each of those was made by one
+implementation and verified by the other. The last section lists three limits
+of this derivation.
 
 None of this is a consensus rule. The derivation is fixed: another label would
 give other keys from the same seed, and another login text another seed from
-the same account.
+the same account. The SLH-DSA-SHA2-128s key, added for M4-S, has a label of
+its own and changes no other key or address of a seed.
 
 ## Where the seed comes from
 
@@ -50,6 +54,14 @@ and `||` joins byte strings.
   addresses use its x-only public key.
 - **ML-DSA-44 (FIPS 204):** `xi = HMAC("ark0-wallet v1 mldsa44", seed)`, and
   the key pair is `ML-DSA.KeyGen_internal(xi)` (Algorithm 6).
+- **SLH-DSA-SHA2-128s (FIPS 205):** `SK.seed`, `SK.prf` and `PK.seed`, 16
+  bytes each and in that order, are the first 48 bytes of
+  `HMAC("ark0-wallet v1 slhdsa128s", seed || c)` for the one-byte counter
+  `c` = 0, followed by the same for `c` = 1. The key pair is
+  `slh_keygen_internal(SK.seed, SK.prf, PK.seed)` (Algorithm 18), and its
+  public key is `PK.seed || PK.root`, 32 bytes. The wallet signs with pure
+  SLH-DSA, `slh_sign` (Algorithm 22), with the context string
+  `P2MR/SLHDSA128S/EXP0` and fresh randomness each time.
 - **Declaration keys:** key `i`, for `i` from 0 to 255, is
   `ML-DSA.KeyGen_internal(HMAC("ark0-wallet v1 declaration", seed || i))`,
   with `i` as one byte. They sign the migration-readiness declaration on the
@@ -57,7 +69,7 @@ and `||` joins byte strings.
 
 ## The addresses
 
-All three are P2MR outputs (witness version 2, bech32m, `tb1z...` on Ark-0)
+All four are P2MR outputs (witness version 2, bech32m, `tb1z...` on Ark-0)
 whose witness program is the root of a tree of exactly two leaves at depth
 one: `TapBranch` of the two `TapLeaf` hashes, as in BIP-341, with no key path
 and no tweak.
@@ -72,31 +84,47 @@ and no tweak.
 - **Mixed address:** template S3 of `doc/p2mr-tripwire.md` in the patched
   tree: leaf version `0xe0`, the leaves `<x-only key> OP_CHECKSIG` and S1. The
   wallet shows it once the chain is six blocks past height 30000 (M3).
+- **SLH1 address:** leaf version `0xc0`, the leaves SLH1,
+  `20 <32-byte public key> f1` (the public key in one push, then
+  `OP_CHECKSLHDSA128S`, byte `0xf1`), and `OP_RETURN`. The wallet shows it
+  once the chain is six blocks past height 32000 (M4-S).
 
-`NETWORK.md`, "Rule change at height 8600 (M1)", says why the first two trees
-have an `OP_RETURN` leaf: a single leaf would sit at depth zero and be spent
-without being executed.
+`NETWORK.md`, "Rule change at height 8600 (M1)", says why the Schnorr,
+ML-DSA-44 and SLH1 trees have an `OP_RETURN` leaf: a single leaf would sit at
+depth zero and be spent without being executed.
 
 ## The vectors
 
 `web-wallet-vectors.json` has two seeds and one login. For each it gives the
 backup code, the Schnorr secret key and x-only public key, the ML-DSA-44
 `xi`, public key and its SHA-256, the `xi` of declaration keys 0 and 255 and
-the SHA-256 of key 0's public key, and the three addresses. The login gives
+the SHA-256 of key 0's public key, and the Schnorr, ML-DSA-44 and mixed
+addresses. The login gives
 the version 2 text, a test account (its secret key is SHA-256 of a fixed
 text), the account's signature of the text as RFC 6979 makes it, the same
 signature with a high `s`, which must give the same seed, and the wallet both
 open.
 
+`web-wallet-slh-vectors.json` has the same two seeds. For each it gives the
+SLH-DSA-SHA2-128s key (the two HMACs, the 48 bytes and their three fields,
+`PK.root`, and the public and secret keys) and the SLH1 address (the leaf
+script, the hashes of both leaves, the Merkle root, the scriptPubKey, the SLH1
+leaf's control block and the address). It also gives three signatures of one
+32-byte message: one made with fixed randomness, which another implementation
+must make again byte for byte, and two made with fresh randomness, one by each
+of the two implementations, which can only be verified.
+
 ## Limits
 
 1. **One key of each kind, and no new addresses.** A seed gives one Schnorr
-   key and one ML-DSA-44 key for spending. Every coin the wallet receives
-   goes to one of the same three addresses, so its payments are linked on the
-   chain, and a key that is broken or leaked opens every coin under it.
-2. **The two keys are shared between addresses.** The ML-DSA-44 key is in
+   key, one ML-DSA-44 key and one SLH-DSA-SHA2-128s key for spending. Every
+   coin the wallet receives goes to one of the same four addresses, so its
+   payments are linked on the chain, and a key that is broken or leaked opens
+   every coin under it.
+2. **Two of the keys are shared between addresses.** The ML-DSA-44 key is in
    the ML-DSA-44 address and in the mixed address; the Schnorr key is in the
-   Schnorr address and in the mixed address's Schnorr leaf. A spend through a
+   Schnorr address and in the mixed address's Schnorr leaf. The
+   SLH-DSA-SHA2-128s key is in the SLH1 address only. A spend through a
    leaf that holds a key shows that key. Until a tripwire output is spent, a
    Schnorr signature alone also spends the mixed address. After that, M3 makes
    elliptic curve signature checks fail only in leaves of version `0xe0`, so
@@ -108,12 +136,13 @@ open.
    any chain, that key is public. Whoever can work out the private key from
    the public key can make the same signature again (the page accepted only a
    signature that came out the same twice, as deterministic RFC 6979 signing
-   gives), and with it get every key of the wallet, the ML-DSA-44 and
-   declaration keys too. Anyone who gets the signature itself, for example a
-   site that has the account sign the same text, gets the seed too, without
-   breaking any key. The page stopped offering the login on 2026-10-14.
+   gives), and with it get every key of the wallet, the ML-DSA-44,
+   SLH-DSA-SHA2-128s and declaration keys too. Anyone who gets the signature
+   itself, for example a site that has the account sign the same text, gets
+   the seed too, without breaking any key. The page stopped offering the
+   login on 2026-10-14.
    It marks a wallet it knows was opened this way. When a wallet was restored
    from a backup code, or kept from before the page recorded how it was
-   opened, the page cannot tell; on that wallet's ML-DSA-44 and mixed address
-   cards it says that a wallet first opened by logging in has no post-quantum
-   protection.
+   opened, the page cannot tell; on that wallet's ML-DSA-44, mixed and SLH1
+   address cards it says that a wallet first opened by logging in has no
+   post-quantum protection.

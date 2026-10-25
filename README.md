@@ -164,8 +164,8 @@ at the rule change at height 8600 (M1), with the block the nodes refused after i
 and `evidence/`; checking it takes a node that follows the live chain.
 
 `ark0/WEB-WALLET.md` says how the operator's web wallet, <https://wallet.ark0.si>, makes its keys and
-addresses from a seed, with test vectors in `ark0/web-wallet-vectors.json`, and lists the limits of that
-derivation.
+addresses from a seed, with test vectors in `ark0/web-wallet-vectors.json` and
+`ark0/web-wallet-slh-vectors.json`, and lists the limits of that derivation.
 
 ## Follow-up series: M0.5 wallet support (`patches-m05/`)
 
