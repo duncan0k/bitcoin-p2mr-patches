@@ -2,11 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
-// The single-check gate of the M4-R validation weight (docs/m4r/m4r-rescue-design-2026-10-23.md,
-// section 2.5): per-sample wall and thread CPU times of voleith_verify_s1, through the C ABI of the
-// node's own static library, for the three inputs the design names, and of BIP 340 verification
-// with the node's libsecp256k1, each run continuously and with a pause before every sample. Never
-// part of a node. See README.md.
+// The single-check gate of the M4-R validation weight (doc/p2mr-rescue.md of the patched tree,
+// "Validation weight"): per-sample wall and thread CPU times of voleith_verify_s1, through the C
+// ABI of the node's own static library, for the three inputs that section names, and of BIP 340
+// verification with the node's libsecp256k1, each run continuously and with a pause before every
+// sample. Never part of a node. See README.md.
 
 #include <secp256k1.h>
 #include <secp256k1_extrakeys.h>

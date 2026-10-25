@@ -16,7 +16,10 @@ whose elliptic curve signature checks stop working once one of two
 designated outputs is spent; see "Rule change at height 30000 (M3)". Since
 2026-10-19 they also carry the M4-S series in `patches-m4/`, which from
 height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
-change at height 32000 (M4-S)".
+change at height 32000 (M4-S)". Since [ROLL DATE] they also carry the M4-R
+series in `patches-m4r/`, which from height 63000 opens a rescue lane in P2MR
+leaves of version `0xe0`, a hard fork; see "Rule change at height 63000
+(M4-R)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -74,6 +77,13 @@ chain with a node of your own.
   built with `patches-m4/` also check a second post-quantum signature scheme,
   SLH-DSA-SHA2-128s, in outputs that opt into it. Outputs that do not opt in
   are unchanged. See "Rule change at height 32000 (M4-S)" below.
+- **Not a general way to recover frozen coins (M4-R).** From height 63000 the
+  nodes built with `patches-m4r/` also accept, in leaves of version `0xe0`, a
+  zero-knowledge proof of the seed behind a key in place of its disabled
+  elliptic curve signature. It helps only keys derived from a seed the way the
+  proof states, its proof system has had no external review, and it relaxes
+  the rules: a node without the series stops at the first block that uses it.
+  See "Rule change at height 63000 (M4-R)" below.
 
 ### What the evidence does not prove
 
@@ -487,6 +497,106 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
   will not change.** The series is in `patches-m4/` (`README.md`,
   "Experimental M4-S series").
 
+## Rule change at height 63000 (M4-R)
+
+From height 63000 Ark-0 has one more experimental rule, called milestone
+M4-R here: a rescue lane in P2MR leaves of version `0xe0`. M3 disables the
+elliptic curve signature checks in those leaves once a tripwire output is
+spent, which leaves an output whose leaf checks one key with no way to be
+spent. The lane gives it one: in place of the signature, the spender proves in
+zero knowledge that they know the seed the key was derived from. The nodes
+built with `patches-m4r/` enforce it, the operator's among them, and
+`doc/p2mr-rescue.md` in the patched tree specifies it. The height was
+announced with the release of the build, about four weeks ahead.
+
+In a P2MR leaf of version `0xe0` that is executed (from height 30000, at depth
+one or more), an `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a
+32-byte key whose signature element is a **rescue token** is a rescue check.
+The token carries the statement: a context string `K`, a suffix and `y`, where
+`y = HMAC-SHA256(K, x || suffix)` for the seed `x`. The input's annex carries
+the proof, a VOLE-in-the-head proof of 130,218 bytes. The check passes when
+`y` is the secret key of the checked key and the proof verifies. The proof is
+bound to the transaction by a signature message that commits to what a BIP 341
+`SIGHASH_ALL` message commits to, and to this network by the SHA-256 of its
+signet challenge. An input makes at most one rescue check.
+
+- **It relaxes the rules: a hard fork.** A frozen leaf such as `<P>
+  OP_CHECKSIG` has no valid witness under the earlier rules; the lane makes
+  some valid. A node without `patches-m4r/` (an M3 or M4-S build) refuses the
+  first block that contains a rescue spend, marks it invalid and stops
+  following the chain there. Once upgraded, it continues after `bitcoin-cli
+  reconsiderblock <hash of that block>`. Every node that is to follow Ark-0
+  past that block needs this build; upgrade before height 63000.
+- **Below height 63000, and outside such leaves, nothing changes.** Below the
+  height a token is a signature like any other, which can never be valid, so
+  a node with this build checks every block below it as an M4-S node does and
+  needs no reindex when it upgrades. Leaf version `0xc0`, P2TR, witness v0 and
+  legacy scripts, `OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S` are not affected.
+- **From the height on, a token counts whatever the state of the checks.**
+  Whether or not the tripwire has disabled the elliptic curve checks, a rescue
+  check is decided by its proof. The mempool is stricter: it takes a rescue
+  spend only when the checks are disabled for the next block.
+- **Publishing a rescue spend publishes the key.** `y` is the Schnorr secret
+  key of the spent output. While the elliptic curve checks in the leaf work,
+  anyone who sees a rescue spend can spend the same output with an ordinary
+  signature. Once they are disabled, the output stays safe only as long as no
+  reorganization undoes the tripwire spend.
+- **Each rescue check costs 130,000 units of validation weight.** BIP 342
+  gives every input a budget of its witness size plus 50. The smallest valid
+  rescue input has a witness of 130,333 bytes, so it pays for its check, and a
+  block holds about 30 of them. The value rests on measurements, on two
+  machines, of the slowest a check can be made to run compared with a Schnorr
+  check, and of whole blocks of rescue checks against the slowest block of
+  Schnorr checks (`README.md`, "Experimental M4-R series").
+- **One template is relayed,** R1: a leaf `<32-byte key> OP_CHECKSIG` of
+  version `0xe0` at depth one or more, spent with exactly the token, the
+  script, the control block and the annex, with at most three rescue inputs
+  in a transaction. Over P2P a node takes rescue spends only from peers with
+  `noban` permission; `sendrawtransaction` is not limited by this. Other uses
+  of the lane are valid in a block but not relayed.
+- **What it does not change.** Who produces blocks: the operator, as before.
+  M2's block signature and the tripwire rule itself are unchanged: an
+  ordinary elliptic curve signature in a leaf of version `0xe0` still fails
+  once the checks are disabled.
+- **What it rests on is narrow.** The proof system is that of
+  [ark0-rescue](https://github.com/duncan0k/ark0-rescue) `SPEC.md` v0.2,
+  statement `0x01`. Its security rests on an argument in the classical random
+  oracle model with a 128-bit target. Against quantum attackers it is only
+  conjectured, and its strength against the known quantum attacks is NIST
+  category 1 (about `2^64` Grover iterations). It has had no external review;
+  two reviews by AI models of the final version found no forgery, no
+  malleability and no way around the rules. A seed with less than 128 bits of
+  entropy makes the lane weaker than the proof system. The operator accepts
+  this for a test network; it is no basis for using the lane anywhere else.
+- **Wallets.** Bitcoin Core's wallet does not make rescue spends. The proofs
+  are made off the node, with the prover of ark0-rescue. A wallet has to
+  rescue all frozen outputs of a key in one transaction, first move every
+  output the same key can spend another way, and never reuse the key or the
+  seed (`doc/p2mr-rescue.md`, "Wallets and operators").
+- **The drill.** The operator holds two outputs of 100,000 sats in such a
+  leaf, made for this at height 30068
+  (`12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0` and
+  `:1`). After height 63000 it will rescue both in one transaction.
+- **What a node logs and reports.** A node built with `patches-m4r/` logs
+  this line when it starts:
+
+  ```
+  Signet P2MR rescue lane from height 63000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
+  ```
+
+  `bitcoin-cli getdeploymentinfo` lists `p2mr_rescue` as a buried deployment
+  with height 63000, and `gettripwireinfo` has a `rescue` object. When a block
+  joins the active chain, each rescue spend in it of the relayed form, template
+  R1, is logged with its outpoint, its transaction and its key.
+- **It is not part of BIP-360 or BIP-361**, and it is not a proposal for
+  Bitcoin.
+- **The height and the validation weight are rules of this network and will
+  not change.** If a way to forge proofs is found, or a verifier bug that
+  accepts an invalid one, the operator can close the lane again from a later
+  height with the soft fork in `patches-m4r-killswitch/`, prepared and tested
+  for that case; rescues already in the chain stay valid. The series is in
+  `patches-m4r/` (`README.md`, "Experimental M4-R series").
+
 ## Parameters
 
 | Parameter | Value |
@@ -509,6 +619,7 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
 | ML-DSA-44 block signature (M2) | from height 20000, by the key whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, see "Rule change at height 20000 (M2)" |
 | Leaf version `0xe0` (M3) | executed from height 30000, with the tripwire outputs `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` and `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0`, see "Rule change at height 30000 (M3)" |
 | `OP_CHECKSLHDSA128S` (M4-S) | from height 32000, 5,000 units of validation weight per check, see "Rule change at height 32000 (M4-S)" |
+| Rescue lane of leaf version `0xe0` (M4-R) | from height 63000, 130,000 units of validation weight per rescue check, a hard fork, see "Rule change at height 63000 (M4-R)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -518,11 +629,11 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is one of five consensus changes on this
-network besides P2MR; the others are M1, M2, M3 and M4-S (the four "Rule
-change" sections above). Producing blocks faster than ten minutes is what a
-signet is for: the signet solution decides who may produce a block, while
-proof of work still paces how fast, as the next paragraphs record.
+by the patch in `patches-spacing/`, is one of six consensus changes on this
+network besides P2MR; the others are M1, M2, M3, M4-S and M4-R (the five
+"Rule change" sections above). Producing blocks faster than ten minutes is
+what a signet is for: the signet solution decides who may produce a block,
+while proof of work still paces how fast, as the next paragraphs record.
 
 What the difference does over time was not written down here until it had
 been observed. Signet keeps Bitcoin's difficulty adjustment: every 2016

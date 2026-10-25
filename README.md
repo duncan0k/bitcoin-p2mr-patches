@@ -617,12 +617,12 @@ git format-patch --start-number 66 dde712f..55b5f56 -o patches-m4
 
 ## Experimental M4-R series (`patches-m4r/`)
 
-Ten patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
-`patches-m2/`, `patches-m3/` and `patches-m4/`, in that order. They add M4-R1, the rescue lane of
-`docs/m4r/m4r-rescue-design-2026-10-23.md` (v0.5): from a height `H4R`, in an executed P2MR leaf of
-version `0xe0`, an elliptic curve signature check whose signature element is a rescue token is checked
-by verifying a VOLE-in-the-head proof, carried in the input's annex, that the spender knows the seed
-behind the key. **It relaxes the rules: it is a hard fork** for nodes without it.
+Sixteen patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
+`patches-m2/`, `patches-m3/` and `patches-m4/`, in that order. They add M4-R1, a rescue lane for P2MR
+leaves of version `0xe0`: from a height `H4R`, in an executed leaf of that version, an elliptic curve
+signature check whose signature element is a rescue token is checked by verifying a VOLE-in-the-head
+proof, carried in the input's annex, that the spender knows the seed behind the key. **It relaxes the
+rules: it is a hard fork** for nodes without it.
 
 **Ark-0 opens the lane from height 63000.** `H4R` is fixed in the code as `ARK0_RESCUE_HEIGHT` (patch 94),
 announced at least four weeks before it; below it an Ark-0 node checks every block as an M4-S node does.
@@ -631,19 +631,20 @@ Regtest has the lane from the final tripwire height, and another custom signet f
 `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, is **130,000**, set from the two gates of `contrib/m4r-measure`
 (patch 90).
 
-The proof system is that of ark0-rescue `SPEC.md` v0.2 (version byte `0x02`, statement `0x01`; revision 3
-changes only the wording of revision 2), whose Rust crate the series vendors, unmodified, from commit `3c90cd4`
-(the reviewed crate, the republished `f5a2bc0` with the same tree) with its dependencies in
-`src/rescue/`, and builds into a static library with Rust 1.97.0: building the node now needs `cargo` and
-`rustc` 1.97.0. Its security rests on an argument in the classical random oracle model; it has had no
-external review. It is an experiment of the Ark-0 test signet; it is not part of BIP-360 or BIP-361, and
-it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series, is its specification.
+The proof system is that of [ark0-rescue](https://github.com/duncan0k/ark0-rescue) `SPEC.md` v0.2 (version
+byte `0x02`, statement `0x01`; revision 3 changes only the wording of revision 2), whose Rust crate the
+series vendors, unmodified, from commit `3c90cd4` (the reviewed crate, the republished `f5a2bc0` with the
+same tree) with its dependencies in `src/rescue/`, and builds into a static library with Rust 1.97.0:
+building the node now needs `cargo` and `rustc` 1.97.0. Its security rests on an argument in the classical
+random oracle model; it has had no external review. It is an experiment of the Ark-0 test signet; it is not
+part of BIP-360 or BIP-361, and it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series,
+is its specification.
 
 | # | Commit | Content |
 |---|---|---|
-| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `f5a2bc0`, the reviewed crate (first vendored at `ff4ea00`), in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
+| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `f5a2bc0`, the reviewed crate, in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
 | 80 | script: add the P2MR rescue lane to leaf version 0xe0 | `SCRIPT_VERIFY_P2MR_NO_RESCUE`, a restricting flag in neither static set; rules R1 to R8 before the tripwire rule; the token and annex; `SignatureHashP2MRRescue`; R5 with libsecp256k1; R7 through `voleith_verify_s1` with a 96-byte message; `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, 100,000, provisional here and set by 90; four new script errors; cache entries under a fifth salted hasher, padded with `R` |
-| 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset here and set to 63000 by 94 (never); `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
+| 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset here (never), set to 63000 by 94; `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
 | 82 | policy: relay rescue spends only in template R1, once the lane is open and the checks are disabled | the mempool's flags open the lane only at the tip itself; no rescue spend while elliptic curve checks still work for the next block; template R1 standard, its token exempt from the 80-byte limit; removal below the height; the P2P gate for peers without `noban`, before the orphan pool, with txid and wtxid answered |
 | 83 | rpc, validation: report the rescue lane in gettripwireinfo and log rescue spends | the `rescue` object of `gettripwireinfo`; a log line for each rescue spend once its block is in the active chain |
 | 84 | test: add p2mr_rescue_tests and the vectors it checks, with their generator | eight transactions with nine rescue inputs, proved once by the crate's prover; the rescue vectors of p2mr-ts, which agree byte for byte; the parameters, every rule, the flags in all combinations, the cache, the flag monotonicity with every prevout, the template |
@@ -664,24 +665,45 @@ block. `feature_p2mr_rescue.py` shows both with an M4-S build as the late node
 (`M4S_BITCOIND=<its bitcoind>`). Bitcoin Core's wallet does not make rescue spends: the proofs are made
 off the node, with the prover of ark0-rescue.
 
-`patches-m4r-killswitch/` holds the kill switch of the design (section 11), patch 95, which is **not** part
-of the series: a soft fork that closes the lane again from a height (`p2mr_rescue_end`), with the mempool
-following it, prepared and tested in case the proof system or its verifier fails. It applies on top of
+`patches-m4r-killswitch/` holds the kill switch, patch 95, which is **not** part of the series: a soft
+fork that closes the lane again from a height (`p2mr_rescue_end`), with the mempool following it,
+prepared and tested in case the proof system or its verifier fails. It applies on top of
 `patches-m4r/`, with `SHA256SUMS-m4r-killswitch`.
 
-`contrib/m4r-measure/` holds the measurement-only kit of the validation weight (the single-check gate and the
-whole-block gate; at 100,000 the whole-block gate failed by a hair, and patch 90 sets 130,000, at which both pass on
-the final series here: single-check C >= 83,641, largest whole-block ratio 0.660; indicative), never part of a node; `docs/m4r/C-R1-REPORT.md` reports the implementation,
-its checks and the open questions.
+`contrib/m4r-measure/` holds the measurement-only kit of the validation weight, never part of a node: the
+single-check gate and the whole-block gate. At 100,000 the whole-block gate failed by a hair; patch 90 sets
+130,000, at which both pass. On the measuring machine the single-check gate asked for at most 83,641 and the
+largest whole-block ratio was 0.660; on the operator's machine (AMD EPYC, 8 CPUs) 68,055 and 0.661. These are
+indicative: the kit's README says how they were measured and how to repeat them.
 
-Verification record (2026-10-24, Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 4 vCPUs): from a fresh clone of
-v31.1 with the 90 patches of the eight sets (also earlier with 88), `test_bitcoin` passed 795 of 801 test cases, 1 with a warning
-and 5 skipped as before (781 of 787 with the M4-S series alone); `feature_p2mr_rescue.py` (with an M4-S
-`M4S_BITCOIND`), `feature_p2mr_rescue_signet.py` and the 16 functional scripts of the earlier series
-passed; with `patches-m4r-killswitch/`, `feature_p2mr_rescue_killswitch.py` passed. The static library
-of the verifier was byte-identical in cold builds at two paths, and so was `bitcoind` once its debug
-sections (secp256k1's absolute paths) and build-id were removed; the Rust library adds no `NEEDED` entry
-and no prover symbol. `docs/m4r/C-R1-REPORT.md` has the details.
+Verification record (2026-10-25, the release pipeline of `contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust
+1.97.0 / 8 CPUs, the files in `patches-m4r/` as published): from a fresh clone of v31.1 with the 94
+patches of the eight sets, `test_bitcoin` passed 795 of 801 test cases, 5 skipped as before; the 14 P2MR
+functional scripts passed, `feature_p2mr_rescue.py` among them with the M4-S release's `bitcoind` as the
+late node, and so did the default functional suite with the extended tests, 283 passed and 17 skipped. A
+second build, from a fresh clone with an empty compiler cache, produced the same five binaries, byte for
+byte. On a second machine (Ubuntu 24.04 / 4 vCPUs), from clean clones: the same unit test result, both
+rescue functional tests and `rpc_blockchain.py`; an Ark-0 node with no peers logged the lane from height
+63000 and listed `p2mr_rescue` at that height; and with `patches-m4r-killswitch/` its own functional test
+passed. Earlier, the static library of the verifier was byte-identical in cold builds at two paths, and so
+was `bitcoind` once its debug sections (secp256k1's absolute paths) and build id were removed; the Rust
+library adds no `NEEDED` entry and no prover symbol.
+
+Review status: Codex (gpt-6.1-sol at maximum effort) reviewed the design ten times, in seven rounds,
+before it was frozen, and the series in nine rounds more; each patch after those had a review of its own.
+gpt-6-astra (extra-high effort) then gated the series in two parts, the verifier with its build and the
+static kernel, and the rule with its activation, policy and tests, and passed both, the first in its
+second round. The reviews found that the log of rescue spends, which compared every 32-byte push of a
+script with the token by an elliptic curve operation, could make a block that cost nothing in weight take
+minutes to connect; the log now looks only at template R1 and makes no curve operation. They also found
+gaps in shielding the Rust build from the environment, rebuilds that a removed or back-dated vendored file
+did not trigger, a static kernel installed without the Rust archive, and Apple's shared kernel exporting
+Rust symbols; the series fixes each. Two cryptographic reviews of the final proof system, by gpt-6-astra
+and by Claude (Fable 5.1), stood in for the external review that has not been done. Neither found a
+forgery, a malleable proof or a way around the rules. One asked that a rescue count only once the
+elliptic curve checks are disabled; the series leaves that to the mempool and to the wallet
+(`doc/p2mr-rescue.md`, "Where the lane applies", "Policy" and "Wallets and operators"). Patch 94 had both
+reviews again and passed them with no finding.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
@@ -703,7 +725,7 @@ git format-patch --start-number 95 cdb1259..79b74fa -o patches-m4r-killswitch
 
 ## Prebuilt node
 
-The release `ark0-node-m4s` of this repository carries the build the Ark-0 nodes run, all seven patch
+The release `ark0-node-m4r` of this repository carries the build the Ark-0 nodes run, all eight patch
 sets: the five binaries for x86_64 Linux in an archive, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
@@ -712,12 +734,13 @@ binaries need from the system.
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
-`patches-m4/` as published, produced the same five binaries byte for byte. That image comes from
+`patches-m4r/` as published, produced the same five binaries byte for byte. That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
-(snapshot.ubuntu.com serves past ones). And the build path, `/work/src`, is part of the binaries, so a
-rebuild elsewhere has to use it too.
+(snapshot.ubuntu.com serves past ones). Its Rust 1.97.0 is the official release: the image checks each
+component against the hash that the channel manifest, signed by the Rust release key, gives for it.
+And the build path, `/work/src`, is part of the binaries, so a rebuild elsewhere has to use it too.
 
 The releases of the witness program (below) carry builds of the M3 node for its systems, inside its
 archives and without the wallet, GUI, ZMQ, IPC and USDT: `bitcoind.exe` for 64-bit Windows; from

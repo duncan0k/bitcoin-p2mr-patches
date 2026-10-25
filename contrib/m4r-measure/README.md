@@ -1,10 +1,10 @@
 # m4r-measure: the gates of the M4-R validation weight
 
-Measurement only, never part of a node. It measures what
-`docs/m4r/m4r-rescue-design-2026-10-23.md`, section 2.5, asks of
-`VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` (C), with two gates. The series set C = 130,000 from them
-(patch 0090); at 100,000 the whole-block gate failed by a hair. Both gates read C from the Core tree they
-are given, so they measure the value the series has:
+Measurement only, never part of a node. It measures, with two gates, the validation weight of a rescue
+check, `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` (C), as `doc/p2mr-rescue.md` of the patched tree
+describes it ("Validation weight"). The series set C = 130,000 from them (patch 0090); at 100,000 the
+whole-block gate failed by a hair. Both gates read C from the Core tree they are given, so they measure
+the value the series has:
 
 - the single-check gate, `C >= 1.5 x 50 x p99(rescue check) / median(Schnorr check)` (`measure.cpp`,
   `gate.py`);
@@ -233,7 +233,6 @@ The failure branch, the whole matrix with `--max-ratio 0.5`, printed `FAIL` for 
 **Single-check gate** (3 rounds of 300 rescue and 20,000 Schnorr samples): rescue check median about
 25 ms, Schnorr 37 to 44 µs. The paused runs, which gate, give C ≥ 96,579 at most (continuous up to
 104,539); the portable multiplication gives 93,143 paused and 106,234 continuous. Peak RSS about 19 MB.
-See `docs/m4r/C-R1-REPORT.md`, section 7.
 
 **Whole-block gate**, kit of review round 1 (`--rounds 2`, the whole matrix of 28 cells, from a fresh
 clean clone; CPU with PCLMULQDQ): **FAIL**, exit 1. The blocks, by their actual weight:
