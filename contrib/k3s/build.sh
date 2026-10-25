@@ -40,6 +40,9 @@
 #   RUN_DEFAULT_FUNCTIONAL 1 = also run the default set (no test list)
 #   FUNCTIONAL_JOBS        --jobs for test_runner.py
 #   FUNCTIONAL_EXTRA_ARGS  appended to every test_runner.py invocation
+#   M4S_BITCOIND           absolute path of an M4-S bitcoind on the volume, the
+#                          late node of feature_p2mr_rescue.py; empty = the test
+#                          stands in for it with this build, the lane never open
 #
 set -euo pipefail
 
@@ -60,6 +63,15 @@ FUNCTIONAL_TESTS="${FUNCTIONAL_TESTS:-}"
 RUN_DEFAULT_FUNCTIONAL="${RUN_DEFAULT_FUNCTIONAL:-0}"
 FUNCTIONAL_JOBS="${FUNCTIONAL_JOBS:-16}"
 FUNCTIONAL_EXTRA_ARGS="${FUNCTIONAL_EXTRA_ARGS:-}"
+M4S_BITCOIND="${M4S_BITCOIND:-}"
+
+# A late node that cannot start would only fail its test, after the whole build.
+if [ -n "$M4S_BITCOIND" ]; then
+    [ "${M4S_BITCOIND#/}" != "$M4S_BITCOIND" ] && [ -f "$M4S_BITCOIND" ] && [ -x "$M4S_BITCOIND" ] \
+        || { echo "M4S_BITCOIND=$M4S_BITCOIND is not the absolute path of an executable file" >&2; exit 1; }
+    # On its own, so that set -e stops the run when the file cannot be read.
+    M4S_SHA256="$(sha256sum < "$M4S_BITCOIND" | cut -d' ' -f1)"
+fi
 
 SRC="$WORK/src"
 LOGDIR="$WORK/logs/$RUN_ID"
@@ -86,6 +98,7 @@ RUN_START=$(date +%s)
   echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "patch sets  : $PATCH_SETS"
   echo "build jobs  : $BUILD_JOBS"
+  [ -z "$M4S_BITCOIND" ] || echo "m4s bitcoind: $M4S_BITCOIND, sha256 $M4S_SHA256"
   echo "toolchain   :"
   sed 's/^/              /' /opt/p2mr/toolchain.txt 2>/dev/null || true
   echo

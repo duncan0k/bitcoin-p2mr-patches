@@ -196,6 +196,7 @@ tests.
 | `RUN_DEFAULT_FUNCTIONAL` | `0` | `1` also runs the default set |
 | `FUNCTIONAL_JOBS` | `16` | `test_runner.py --jobs` |
 | `FUNCTIONAL_EXTRA_ARGS` | empty | appended to every `test_runner.py` call |
+| `M4S_BITCOIND` | empty | absolute path of an M4-S `bitcoind` on the volume, the late node of `feature_p2mr_rescue.py`; empty, the test stands in for it with this build |
 | `CPU` / `MEMORY` | `32` / `48Gi` | request and limit of the build container |
 | `WAIT` | `1` | `0` returns as soon as the Job is created |
 

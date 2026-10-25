@@ -37,6 +37,7 @@ FUNCTIONAL_TESTS="${FUNCTIONAL_TESTS:-feature_p2mr.py feature_p2mr_signet.py p2p
 RUN_DEFAULT_FUNCTIONAL="${RUN_DEFAULT_FUNCTIONAL:-0}"
 FUNCTIONAL_JOBS="${FUNCTIONAL_JOBS:-16}"
 FUNCTIONAL_EXTRA_ARGS="${FUNCTIONAL_EXTRA_ARGS:-}"
+M4S_BITCOIND="${M4S_BITCOIND:-}"
 CPU="${CPU:-32}"
 MEMORY="${MEMORY:-48Gi}"
 WAIT="${WAIT:-1}"
@@ -97,6 +98,7 @@ sed -e "s|__RUN_ID__|$RUN_ID|g" \
     -e "s|__RUN_DEFAULT_FUNCTIONAL__|$RUN_DEFAULT_FUNCTIONAL|g" \
     -e "s|__FUNCTIONAL_JOBS__|$FUNCTIONAL_JOBS|g" \
     -e "s|__FUNCTIONAL_EXTRA_ARGS__|$FUNCTIONAL_EXTRA_ARGS|g" \
+    -e "s|__M4S_BITCOIND__|$M4S_BITCOIND|g" \
     -e "s|__CPU__|$CPU|g" \
     -e "s|__MEMORY__|$MEMORY|g" \
     "$HERE/build.yaml" | $KUBECTL apply -f - > /dev/null

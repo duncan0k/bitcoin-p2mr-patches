@@ -59,6 +59,8 @@ spec:
             - { name: RUN_DEFAULT_FUNCTIONAL, value: "__RUN_DEFAULT_FUNCTIONAL__" }
             - { name: FUNCTIONAL_JOBS, value: "__FUNCTIONAL_JOBS__" }
             - { name: FUNCTIONAL_EXTRA_ARGS, value: "__FUNCTIONAL_EXTRA_ARGS__" }
+            # An M4-S bitcoind on the volume, the late node of feature_p2mr_rescue.py.
+            - { name: M4S_BITCOIND, value: "__M4S_BITCOIND__" }
             - { name: CCACHE_DIR, value: "/work/ccache" }
             - { name: CCACHE_MAXSIZE, value: "20G" }
           resources:
