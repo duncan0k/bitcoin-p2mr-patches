@@ -3276,4 +3276,5 @@ This settles what the M4-S roll above listed under "What this roll does not show
 not verify, in the mempool and in a block, and accept one whose signature does. It does not show that
 the signature check is right in general; the ACVP vectors of patch 67 and the other tests of the series
 cover that. The operator's web wallet does not make SLH1 addresses yet; its support for them will come
-with its own review and release.
+with its own review and release. (Added on 2026-10-25: the web wallet has made SLH1 addresses since
+08:38 UTC that day; `ark0/WEB-WALLET.md` says how it makes their key and address.)
