@@ -173,7 +173,7 @@ contrib/k3s/run-build.sh
 The patch set names are directories under `/work/patches`, applied in the order
 given. `seed.sh` publishes `patches/` as `master`, `patches-m05/` as `m05`,
 `patches-spacing/` as `spacing`, `patches-m1/` as `m1`, `patches-m2/` as `m2`,
-`patches-m3/` as `m3` and `patches-m4/` as `m4`.
+`patches-m3/` as `m3`, `patches-m4/` as `m4` and `patches-m4r/` as `m4r`.
 
 ## Configuration
 
