@@ -2,7 +2,7 @@
 # Copyright (c) 2026 duncan0k
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Run the single-check gate (design section 2.5) and print the requirement it gives:
+"""Run the single-check gate (`doc/p2mr-rescue.md`, "Validation weight") and print the requirement it gives:
 
     C >= 1.5 x 50 x p99(rescue) / median(Schnorr)
 

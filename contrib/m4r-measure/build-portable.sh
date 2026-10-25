@@ -5,7 +5,7 @@
 #
 # A measurement-only copy of the vendored verifier that never uses PCLMULQDQ: clmul::available()
 # returns false, so every GF(2^128) product takes the portable path, as on a CPU without the
-# instruction (the "weak hardware" row of the design's section 2.5). Never part of a node.
+# instruction. Never part of a node.
 #
 # Usage: bash build-portable.sh <Core tree> <output dir>
 set -euo pipefail

@@ -11,12 +11,13 @@ the value the series has:
 - the whole-block gate (`wholeblock.py`, with the measurement build of `build.sh`): every kind of block
   filled to the block weight limit connects no slower than the Schnorr worst block of the same machine.
 
-The figures in this README are **indicative**: they come from one cloud VM. The release figures come
-from the operator's machines.
+The figures in this README are **indicative**: they come from one cloud VM. The figures of the
+operator's machine (AMD EPYC, 8 CPUs), made with this kit, are in `doc/p2mr-rescue.md` ("Validation
+weight").
 
 ## Single-check gate
 
-It covers three rescue inputs, as the design names them:
+It covers the three rescue inputs that `doc/p2mr-rescue.md` names:
 
 - `rescue-worst-invalid`: a valid proof with `chall3` set to `ff..ff`, the most XOR work a verification
   does (ark0-rescue SPEC.md section 11), which is then invalid;
@@ -34,8 +35,7 @@ gate. Given the Core tree, `gate.py` checks that requirement against the tree's 
 that is not finite and positive (the Schnorr medians are the denominators), or anything fails. It also prints the peak resident set size of the process, an upper bound of the verifier's.
 
 `build-portable.sh` makes a copy of the vendored crate whose `clmul::available()` returns false, so
-that every GF(2^128) product takes the portable path, as on a CPU without PCLMULQDQ: the design's
-"weak hardware" row.
+that every GF(2^128) product takes the portable path, as on a CPU without PCLMULQDQ.
 
 ```
 B=<Core build dir>; S=<Core source dir>
@@ -107,8 +107,8 @@ node then verifies the proof itself and keeps the proof's own result. So in the 
   block with failing checks does no more than the work up to its first failure.
 
 The all-valid `rescue-tail` block of the hook build therefore does at least the work of every block of
-the same layout in which any rescue checks fail. The deferred-failure version of the design is one of
-those: every check finishes R7, and the failures are collected only after all checks have run. The same
+the same layout in which any rescue checks fail. That includes the layout in which every check
+finishes R7 and the failures are collected only after all checks have run. The same
 holds for `rescue` and `mixed`. The release blocks `rescue-invalid-last` and `rescue-tail-invalid-last`
 are only a control: they show that the block is rejected for the proof (`Invalid rescue proof`), and
 what that costs in a node without the hook.
@@ -199,9 +199,9 @@ whole matrix, since a partial run is `INCOMPLETE` whatever its ratios.
 ## Results (indicative)
 
 These come from a cloud VM: Intel Xeon @ 2.80 GHz, 4 vCPUs, AVX-512, PCLMULQDQ, no SHA extensions;
-GCC 13.3, kernel 6.18. The release figures come from the operator's machines, with this kit.
+GCC 13.3, kernel 6.18. The operator's figures, made with this kit, are in `doc/p2mr-rescue.md`.
 
-### At C = 130,000 (the final series, patches 0001–0090, Core tree `8dc2d002…`, from a clean clone)
+### At C = 130,000 (patches 0001–0090, Core tree `8dc2d002…`, from a clean clone; the later patches change neither the verifier nor the weight)
 
 **Single-check gate** (`gate.py`, 3 rounds, checked against the tree's C): **PASS**, exit 0. The
 paused runs ask for C ≥ 83,641 at most, a margin of 1.554. The continuous runs ask for up to 98,760.

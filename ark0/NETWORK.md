@@ -79,11 +79,13 @@ chain with a node of your own.
   are unchanged. See "Rule change at height 32000 (M4-S)" below.
 - **Not a general way to recover frozen coins (M4-R).** From height 63000 the
   nodes built with `patches-m4r/` also accept, in leaves of version `0xe0`, a
-  zero-knowledge proof of the seed behind a key in place of its disabled
-  elliptic curve signature. It helps only keys derived from a seed the way the
-  proof states, its proof system has had no external review, and it relaxes
-  the rules: a node without the series stops at the first block that uses it.
-  See "Rule change at height 63000 (M4-R)" below.
+  zero-knowledge proof that the spender knows the seed behind a key in place of
+  an elliptic curve signature (the mempool takes it only once the tripwire has
+  disabled those signatures). It helps only keys whose secret key is
+  `HMAC-SHA256(K, x || suffix)` of a seed `x`, as the Ark-0 web wallet derives
+  its Schnorr keys; its proof system has had no external review; and it relaxes
+  the rules: an M3 or M4-S node stops at the first block that uses it. See
+  "Rule change at height 63000 (M4-R)" below.
 
 ### What the evidence does not prove
 
@@ -485,8 +487,9 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
   deployment with height 32000, and from that height `P2MR_SLHDSA128S`
   among the script flags.
 - **It is a soft fork.** A node without `patches-m4/` treats the byte as
-  `OP_SUCCESS241`, accepts every block a node with it accepts and keeps
-  following the chain, but does not check these signatures and does not relay
+  `OP_SUCCESS241`, accepts every block an M4-S node accepts and keeps
+  following the chain (an M3 build only up to the first rescue spend of M4-R,
+  below), but does not check these signatures and does not relay
   spends that use the opcode: to such a node they are non-standard. A node that
   accepted blocks at or above height 32000 before it upgraded has not checked
   them; one start with `-reindex-chainstate` (`-reindex` on a pruned node)
@@ -501,59 +504,76 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
 
 From height 63000 Ark-0 has one more experimental rule, called milestone
 M4-R here: a rescue lane in P2MR leaves of version `0xe0`. M3 disables the
-elliptic curve signature checks in those leaves once a tripwire output is
-spent, which leaves an output whose leaf checks one key with no way to be
-spent. The lane gives it one: in place of the signature, the spender proves in
+elliptic curve signature checks in those leaves from the block after a
+tripwire output is spent, so a leaf such as `<P> OP_CHECKSIG` has no valid
+witness any more, and an output with no other way to be spent is frozen. The
+lane gives such a leaf one: in place of the signature, the spender proves in
 zero knowledge that they know the seed the key was derived from. The nodes
 built with `patches-m4r/` enforce it, the operator's among them, and
 `doc/p2mr-rescue.md` in the patched tree specifies it. The height was
-announced with the release of the build, about four weeks ahead.
+announced on [ROLL DATE], with the release of the build, about four weeks
+ahead. At about 890 blocks a day, the rate of recent weeks, the chain reaches
+height 63000 around 2026-11-28 14:00 UTC. It cannot do so before 2026-11-26
+04:00 UTC, even if blocks came every 90 seconds, the producer's configured
+pause.
 
-In a P2MR leaf of version `0xe0` that is executed (from height 30000, at depth
-one or more), an `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a
-32-byte key whose signature element is a **rescue token** is a rescue check.
+From height 63000, in an executed P2MR leaf of version `0xe0` at depth one or
+more, an `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a 32-byte
+key whose signature element is a **rescue token** is a rescue check.
 The token carries the statement: a context string `K`, a suffix and `y`, where
 `y = HMAC-SHA256(K, x || suffix)` for the seed `x`. The input's annex carries
 the proof, a VOLE-in-the-head proof of 130,218 bytes. The check passes when
 `y` is the secret key of the checked key and the proof verifies. The proof is
-bound to the transaction by a signature message that commits to what a BIP 341
-`SIGHASH_ALL` message commits to, and to this network by the SHA-256 of its
-signet challenge. An input makes at most one rescue check.
+bound to the transaction by a signature message that commits to everything a
+BIP 341 `SIGHASH_ALL` message commits to except the annex, which holds the
+proof, and to this network by the SHA-256 of its signet challenge. As with a
+BIP 341 signature, a third party can change what it does not cover, such as
+the control block, which changes the wtxid. An input makes at most one rescue
+check, so a leaf with two keys that need rescuing, a 2-of-2 for example,
+cannot be rescued.
 
 - **It relaxes the rules: a hard fork.** A frozen leaf such as `<P>
   OP_CHECKSIG` has no valid witness under the earlier rules; the lane makes
-  some valid. A node without `patches-m4r/` (an M3 or M4-S build) refuses the
-  first block that contains a rescue spend, marks it invalid and stops
-  following the chain there. Once upgraded, it continues after `bitcoin-cli
-  reconsiderblock <hash of that block>`. Every node that is to follow Ark-0
-  past that block needs this build; upgrade before height 63000.
+  some valid. A node built with `patches-m3/` but without `patches-m4r/` (an
+  M3 or M4-S build) refuses the first block that contains a rescue spend, marks
+  it invalid and stops following the chain there. Once upgraded, it continues
+  after `bitcoin-cli reconsiderblock <hash of that block>`. A build without
+  `patches-m3/` does not run these leaves; it takes the block and keeps
+  following, checking less. Every M3 or M4-S node that is to follow Ark-0 past
+  that block needs this build; upgrade before height 63000.
 - **Below height 63000, and outside such leaves, nothing changes.** Below the
   height a token is a signature like any other, which can never be valid, so
-  a node with this build checks every block below it as an M4-S node does and
-  needs no reindex when it upgrades. Leaf version `0xc0`, P2TR, witness v0 and
+  a node with this build checks every block below it as an M4-S node does, and
+  an M4-S node needs no reindex when it upgrades (an M3 node still needs the
+  `-reindex-chainstate` that M4-S asks for, `JOIN.md` section 5). Leaf version
+  `0xc0`, P2TR, witness v0 and
   legacy scripts, `OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S` are not affected.
-- **From the height on, a token counts whatever the state of the checks.**
+- **From the height on, a token counts whether or not the checks are
+  disabled.**
   Whether or not the tripwire has disabled the elliptic curve checks, a rescue
   check is decided by its proof. The mempool is stricter: it takes a rescue
   spend only when the checks are disabled for the next block.
 - **Publishing a rescue spend publishes the key.** `y` is the Schnorr secret
-  key of the spent output. While the elliptic curve checks in the leaf work,
-  anyone who sees a rescue spend can spend the same output with an ordinary
-  signature. Once they are disabled, the output stays safe only as long as no
+  key of the key the leaf checks. While the elliptic curve checks in the leaf
+  work, anyone who sees a rescue spend can spend the same output with an
+  ordinary signature. Once they are disabled, the output stays safe only as long as no
   reorganization undoes the tripwire spend.
-- **Each rescue check costs 130,000 units of validation weight.** BIP 342
+- **Each rescue check costs 130,000 units of validation weight,** after the
+  50 that BIP 342 charges for the signature. BIP 342
   gives every input a budget of its witness size plus 50. The smallest valid
   rescue input has a witness of 130,333 bytes, so it pays for its check, and a
   block holds about 30 of them. The value rests on measurements, on two
   machines, of the slowest a check can be made to run compared with a Schnorr
   check, and of whole blocks of rescue checks against the slowest block of
   Schnorr checks (`README.md`, "Experimental M4-R series").
-- **One template is relayed,** R1: a leaf `<32-byte key> OP_CHECKSIG` of
+- **One template is relayed, R1:** a leaf `<32-byte key> OP_CHECKSIG` of
   version `0xe0` at depth one or more, spent with exactly the token, the
   script, the control block and the annex, with at most three rescue inputs
   in a transaction. Over P2P a node takes rescue spends only from peers with
-  `noban` permission; `sendrawtransaction` is not limited by this. Other uses
-  of the lane are valid in a block but not relayed.
+  `noban` permission; `sendrawtransaction` is not limited by this. So a rescue
+  spend relayed from a node of one's own reaches the operator's nodes only if
+  they give that node `noban`. Other uses of the lane are valid in a block but
+  not relayed.
 - **What it does not change.** Who produces blocks: the operator, as before.
   M2's block signature and the tripwire rule itself are unchanged: an
   ordinary elliptic curve signature in a leaf of version `0xe0` still fails
@@ -561,20 +581,25 @@ signet challenge. An input makes at most one rescue check.
 - **What it rests on is narrow.** The proof system is that of
   [ark0-rescue](https://github.com/duncan0k/ark0-rescue) `SPEC.md` v0.2,
   statement `0x01`. Its security rests on an argument in the classical random
-  oracle model with a 128-bit target. Against quantum attackers it is only
-  conjectured, and its strength against the known quantum attacks is NIST
+  oracle model with a 128-bit target. Its security against quantum attackers
+  is only conjectured; against the known quantum attacks its strength is NIST
   category 1 (about `2^64` Grover iterations). It has had no external review;
   two reviews by AI models of the final version found no forgery, no
-  malleability and no way around the rules. A seed with less than 128 bits of
+  malleability of the proof encoding and no way around the rules. A seed with
+  less than 128 bits of
   entropy makes the lane weaker than the proof system. The operator accepts
   this for a test network; it is no basis for using the lane anywhere else.
 - **Wallets.** Bitcoin Core's wallet does not make rescue spends. The proofs
-  are made off the node, with the prover of ark0-rescue. A wallet has to
-  rescue all frozen outputs of a key in one transaction, first move every
-  output the same key can spend another way, and never reuse the key or the
-  seed (`doc/p2mr-rescue.md`, "Wallets and operators").
-- **The drill.** The operator holds two outputs of 100,000 sats in such a
-  leaf, made for this at height 30068
+  are made off the node, with the prover of ark0-rescue, and only with seeds
+  used on this signet alone. A wallet has to rescue all frozen outputs of a key
+  in one transaction (more than three need one that the block producer
+  includes directly), first move every output the same key can spend another
+  way, never reuse the key, its secret key or the seed on another network or
+  protocol, and pay nothing more to the key (`doc/p2mr-rescue.md`, "Wallets
+  and operators").
+- **The rescue drill.** The operator holds two outputs of 100,000 sats, each
+  with two leaves of version `0xe0`, `<R> OP_CHECKSIG` and `OP_RETURN`,
+  created for it at height 30068
   (`12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0` and
   `:1`). After height 63000 it will rescue both in one transaction.
 - **What a node logs and reports.** A node built with `patches-m4r/` logs
@@ -586,8 +611,12 @@ signet challenge. An input makes at most one rescue check.
 
   `bitcoin-cli getdeploymentinfo` lists `p2mr_rescue` as a buried deployment
   with height 63000, and `gettripwireinfo` has a `rescue` object. When a block
-  joins the active chain, each rescue spend in it of the relayed form, template
-  R1, is logged with its outpoint, its transaction and its key.
+  joins the active chain, each rescue spend in it through template R1 is
+  logged:
+
+  ```
+  P2MR rescue of <txid:vout> by <txid> in block <hash> (height <N>): statement 01, key <P>
+  ```
 - **It is not part of BIP-360 or BIP-361**, and it is not a proposal for
   Bitcoin.
 - **The height and the validation weight are rules of this network and will

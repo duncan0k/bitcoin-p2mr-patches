@@ -2,7 +2,8 @@
 # Copyright (c) 2026 duncan0k
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Whole-block gate of the P2MR rescue lane on regtest (design section 2.5; README.md, "Whole-block gate").
+"""Whole-block gate of the P2MR rescue lane on regtest (`doc/p2mr-rescue.md`, "Validation weight";
+README.md, "Whole-block gate").
 
 Builds, in Python with the functional test framework of the patched tree, a regtest chain and blocks
 filled to the maximum block weight by their actual weight:
