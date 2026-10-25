@@ -1,4 +1,4 @@
-From 4b019cdb0b97f793c33e26bea039cfaeea3c6995 Mon Sep 17 00:00:00 2001
+From 79b74fa69864cd3ed302573674d3ae9997d31337 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:31 +0000
 Subject: [PATCH] consensus: close the P2MR rescue lane again from a height,
@@ -48,10 +48,10 @@ below it.
  create mode 100755 test/functional/feature_p2mr_rescue_killswitch.py
 
 diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
-index d7ea7d5..79eb6da 100644
+index 42f0881..e528288 100644
 --- a/doc/p2mr-rescue.md
 +++ b/doc/p2mr-rescue.md
-@@ -286,3 +286,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
+@@ -293,3 +293,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
    vectors.
  - `bench_bitcoin -filter='.*P2MRRescue.*'`: the verifier, valid and in its most expensive invalid
    form, and the whole path of a check.
@@ -155,7 +155,7 @@ index b08d603..d6dbd44 100644
  }
  
 diff --git a/src/consensus/params.h b/src/consensus/params.h
-index b01a13d..e1783cd 100644
+index ab9e6db..39c5ed8 100644
 --- a/src/consensus/params.h
 +++ b/src/consensus/params.h
 @@ -36,8 +36,9 @@ enum BuriedDeployment : int16_t {
@@ -213,10 +213,10 @@ index 50b7c3b..bc7933e 100644
      return std::nullopt;
  }
 diff --git a/src/init.cpp b/src/init.cpp
-index d0bc3ec..574aa5a 100644
+index a83a0dc..3f6f6ef 100644
 --- a/src/init.cpp
 +++ b/src/init.cpp
-@@ -977,6 +977,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+@@ -978,6 +978,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                  chainparams.GetChainType() == ChainType::SIGNET ? "Signet" : "Regtest",
                  chainparams.GetConsensus().P2MRRescueHeight, HexStr(*Assert(chainparams.GetConsensus().p2mr_rescue_network_id)));
      }
@@ -227,7 +227,7 @@ index d0bc3ec..574aa5a 100644
      // Warn if unrecognized section name are present in the config file.
      bilingual_str warnings;
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index 822a5c7..5c03768 100644
+index a458aab..f9f53ad 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
 @@ -217,6 +217,7 @@ public:
@@ -289,10 +289,10 @@ index 822a5c7..5c03768 100644
          }
          // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index 9a7baf0..487b090 100644
+index 2ee729f..d366041 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
-@@ -89,6 +89,14 @@ inline constexpr int ARK0_RESCUE_HEIGHT{std::numeric_limits<int>::max()};
+@@ -89,6 +89,14 @@ inline constexpr int ARK0_RESCUE_HEIGHT{63000};
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
  

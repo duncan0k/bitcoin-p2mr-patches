@@ -1,7 +1,7 @@
 From f9e971a636eed6ca86a3464a5dc793bed271f26d Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:10 +0000
-Subject: [PATCH 87/93] bench: time the rescue verifier and the whole path of a
+Subject: [PATCH 87/94] bench: time the rescue verifier and the whole path of a
  rescue check
 
 The validation weight of a rescue check is fixed by measurement:

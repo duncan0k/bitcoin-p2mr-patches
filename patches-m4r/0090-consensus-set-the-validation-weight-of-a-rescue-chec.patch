@@ -1,7 +1,7 @@
 From a61056235a7b883361fb9f722fd0e61a3fd4e61f Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Sat, 24 Oct 2026 11:57:46 +0000
-Subject: [PATCH 90/93] consensus: set the validation weight of a rescue check
+Subject: [PATCH 90/94] consensus: set the validation weight of a rescue check
  to 130,000
 
 At the provisional 100,000 the single-check gate of contrib/m4r-measure

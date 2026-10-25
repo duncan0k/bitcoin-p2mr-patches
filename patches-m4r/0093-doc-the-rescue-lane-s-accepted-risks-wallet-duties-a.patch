@@ -1,7 +1,7 @@
 From 6c4c14d699dac5d4efed9d7f0f2b7876087c858f Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Sat, 24 Oct 2026 18:05:03 +0000
-Subject: [PATCH 93/93] doc: the rescue lane's accepted risks, wallet duties
+Subject: [PATCH 93/94] doc: the rescue lane's accepted risks, wallet duties
  and provenance after review
 
 Two reviews of the final proof system by AI models found no forgery, no

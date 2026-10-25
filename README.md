@@ -30,9 +30,9 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     `-signetslhdsa128s`. See "Experimental M4-S series" below.
   - The M4-R series in `patches-m4r/` adds a rescue lane to leaf version `0xe0`: from a height on,
     an elliptic curve signature check there can instead be passed with a zero-knowledge proof of the
-    seed behind the key, carried in the annex. It relaxes the rules, so it is a hard fork. Its
-    height on Ark-0 is not decided and the lane is closed there; regtest has it, and another custom
-    signet only if it sets `-signetrescue`. See "Experimental M4-R series" below.
+    seed behind the key, carried in the annex. It relaxes the rules, so it is a hard fork. Ark-0
+    opens it from height 63000; regtest has it, and another custom signet only if it sets
+    `-signetrescue`. See "Experimental M4-R series" below.
 
 ## Layout
 
@@ -46,7 +46,7 @@ patches-m2a/        the first four M2 patches alone: candidate A, without Ark-0'
 patches-m2b/        4 patches on top of patches-m2a/: candidate B, not used on Ark-0 (see below)
 patches-m3/         11 further patches, the experimental M3 series, on Ark-0 from height 30000 (see below)
 patches-m4/         13 further patches, the experimental M4-S series, on Ark-0 from height 32000 (see below)
-patches-m4r/        15 further patches, the experimental M4-R1 rescue lane, a hard fork, not active on Ark-0 (see below)
+patches-m4r/        16 further patches, the experimental M4-R1 rescue lane, a hard fork, open on Ark-0 from height 63000 (see below)
 patches-m4r-killswitch/ 1 patch on top of patches-m4r/: the rescue lane's kill switch, not part of the series
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
@@ -625,14 +625,16 @@ version `0xe0`, an elliptic curve signature check whose signature element is a r
 by verifying a VOLE-in-the-head proof, carried in the input's annex, that the spender knows the seed
 behind the key. **It relaxes the rules: it is a hard fork** for nodes without it.
 
-**Not active on Ark-0.** `H4R` is not decided: `ARK0_RESCUE_HEIGHT` is `std::numeric_limits<int>::max()`
-in this series, so an Ark-0 node built from it checks every block as an M4-S node does. Regtest has the
-lane from the final tripwire height, and another custom signet from `-signetrescue=<height>`, which needs
-`-signettripwire`. The validation weight of a rescue check, `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, is
-**100,000 and provisional**: it is fixed by measurement before release.
+**Ark-0 opens the lane from height 63000.** `H4R` is fixed in the code as `ARK0_RESCUE_HEIGHT` (patch 94),
+announced at least four weeks before it; below it an Ark-0 node checks every block as an M4-S node does.
+Regtest has the lane from the final tripwire height, and another custom signet from
+`-signetrescue=<height>`, which needs `-signettripwire`. The validation weight of a rescue check,
+`VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, is **130,000**, set from the two gates of `contrib/m4r-measure`
+(patch 90).
 
-The proof system is that of ark0-rescue `SPEC.md` v0.2 revision 2 (version byte `0x02`, statement `0x01`),
-whose Rust crate the series vendors, unmodified, from commit `f5a2bc0` (the reviewed crate) with its dependencies in
+The proof system is that of ark0-rescue `SPEC.md` v0.2 (version byte `0x02`, statement `0x01`; revision 3
+changes only the wording of revision 2), whose Rust crate the series vendors, unmodified, from commit `3c90cd4`
+(the reviewed crate, the republished `f5a2bc0` with the same tree) with its dependencies in
 `src/rescue/`, and builds into a static library with Rust 1.97.0: building the node now needs `cargo` and
 `rustc` 1.97.0. Its security rests on an argument in the classical random oracle model; it has had no
 external review. It is an experiment of the Ark-0 test signet; it is not part of BIP-360 or BIP-361, and
@@ -642,7 +644,7 @@ it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series, is it
 |---|---|---|
 | 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `f5a2bc0`, the reviewed crate (first vendored at `ff4ea00`), in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
 | 80 | script: add the P2MR rescue lane to leaf version 0xe0 | `SCRIPT_VERIFY_P2MR_NO_RESCUE`, a restricting flag in neither static set; rules R1 to R8 before the tripwire rule; the token and annex; `SignatureHashP2MRRescue`; R5 with libsecp256k1; R7 through `voleith_verify_s1` with a 96-byte message; `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, 100,000, provisional here and set by 90; four new script errors; cache entries under a fifth salted hasher, padded with `R` |
-| 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset (never); `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
+| 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset here and set to 63000 by 94 (never); `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
 | 82 | policy: relay rescue spends only in template R1, once the lane is open and the checks are disabled | the mempool's flags open the lane only at the tip itself; no rescue spend while elliptic curve checks still work for the next block; template R1 standard, its token exempt from the 80-byte limit; removal below the height; the P2P gate for peers without `noban`, before the orphan pool, with txid and wtxid answered |
 | 83 | rpc, validation: report the rescue lane in gettripwireinfo and log rescue spends | the `rescue` object of `gettripwireinfo`; a log line for each rescue spend once its block is in the active chain |
 | 84 | test: add p2mr_rescue_tests and the vectors it checks, with their generator | eight transactions with nine rescue inputs, proved once by the crate's prover; the rescue vectors of p2mr-ts, which agree byte for byte; the parameters, every rule, the flags in all combinations, the cache, the flag monotonicity with every prevout, the template |
@@ -655,6 +657,7 @@ it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series, is it
 | 91 | build: relink an Apple shared kernel after the verifier changes, and no test tools in a cross build | the Rust archive a `LINK_DEPENDS` of a shared kernel on Apple platforms, which links it by `-hidden-l`; the Rust test tools only in a native build, a cross build's functional tests taking a native `voleith-prove` through `VOLEITH_PROVE` |
 | 92 | test: copy the rescue record before appending it to its own annex | `vector::insert` with iterators into the vector itself, which the standard does not allow |
 | 93 | doc: the rescue lane's accepted risks, wallet duties and provenance after review | `doc/p2mr-rescue.md`: the accepted risks, what wallets and operators must do, why `network_id` is untagged, R3 as the one-check limit, the weight's measurements at 130,000 on two machines; `src/rescue/README.md`: the republished ark0-rescue commit `3c90cd4` (the tree of `f5a2bc0`) and `SPEC.md` v0.2 revision 3; the test framework's message names `VOLEITH_PROVE` |
+| 94 | consensus: open the P2MR rescue lane on Ark-0 at height 63000 | `ARK0_RESCUE_HEIGHT` = 63000, fixed in the code, about four weeks after the release; the test of the fixed height (the flags of heights 62999 and 63000 differ by exactly `SCRIPT_VERIFY_P2MR_NO_RESCUE`); `doc/p2mr-rescue.md`: Ark-0 from block 63000, what an operator of a node without the lane must know, and the single-check gate's paused and continuous figures |
 
 It is a hard fork. A node built without `patches-m4r/` (an M3 or M4-S node) refuses the first block with
 a rescue spend and stops; upgraded later, it continues after `bitcoin-cli reconsiderblock <hash>` of that
@@ -662,7 +665,7 @@ block. `feature_p2mr_rescue.py` shows both with an M4-S build as the late node
 (`M4S_BITCOIND=<its bitcoind>`). Bitcoin Core's wallet does not make rescue spends: the proofs are made
 off the node, with the prover of ark0-rescue.
 
-`patches-m4r-killswitch/` holds the kill switch of the design (section 11), patch 94, which is **not** part
+`patches-m4r-killswitch/` holds the kill switch of the design (section 11), patch 95, which is **not** part
 of the series: a soft fork that closes the lane again from a height (`p2mr_rescue_end`), with the mempool
 following it, prepared and tested in case the proof system or its verifier fails. It applies on top of
 `patches-m4r/`, with `SHA256SUMS-m4r-killswitch`.
@@ -688,14 +691,14 @@ git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m
        ../bitcoin-p2mr-patches/patches-m4/*.patch ../bitcoin-p2mr-patches/patches-m4r/*.patch
 ```
 
-The series is exported from the Core tree, where the fifteen M4-R commits sit on the seven earlier patch
+The series is exported from the Core tree, where the sixteen M4-R commits sit on the seven earlier patch
 sets as `git am` applies them, and the kill switch on top of them; `10a625c` is the last commit of
 `patches-m4/` there:
 
 ```bash
-git format-patch --start-number 79 10a625c..6c4c14d -o patches-m4r
+git format-patch --start-number 79 10a625c..cdb1259 -o patches-m4r
 (cd patches-m4r && sha256sum -b *.patch) > SHA256SUMS-m4r
-git format-patch --start-number 94 6c4c14d..4b019cd -o patches-m4r-killswitch
+git format-patch --start-number 95 cdb1259..79b74fa -o patches-m4r-killswitch
 (cd patches-m4r-killswitch && sha256sum -b *.patch) > SHA256SUMS-m4r-killswitch
 ```
 

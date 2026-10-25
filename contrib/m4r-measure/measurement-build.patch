@@ -250,10 +250,10 @@ index 2e34324..48112b0 100644
      return bitcoin_mldsa_verify(sig.data(), msg.data(), msg.size(), ctx.data(), ctx.size(), pubkey.data()) == 0;
  }
 diff --git a/src/init.cpp b/src/init.cpp
-index d0bc3ec..f4948d5 100644
+index a83a0dc..939bb61 100644
 --- a/src/init.cpp
 +++ b/src/init.cpp
-@@ -2311,6 +2311,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+@@ -2312,6 +2312,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
      if (!node.connman->Start(scheduler, connOptions)) {
          return false;
      }
