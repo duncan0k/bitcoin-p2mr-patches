@@ -3,7 +3,7 @@ Ark0Witness {version} for macOS
 Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
 things out; it may be reset at any time.
 
-This version's node follows Ark-0 past height 63000, where milestone M4-R opens a rescue
+This version's node follows Ark-0 past height 51000, where milestone M4-R opens a rescue
 lane; the node of version 0.2.0 and earlier stops at the first block that uses it.
 
 For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
