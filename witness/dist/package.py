@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Packs Ark0Witness reproducibly. The original Windows command remains supported:
+"""Packs Ark0Witness reproducibly:
 
-    python3 package.py <Ark0Witness.exe> <bitcoind.exe> <COPYING> <LICENSE-mldsa-native> <out.zip>
-
-    python3 package.py <platform> <witness> <bitcoind> <COPYING> <LICENSE-mldsa-native> <out>
+    python3 package.py <platform> <witness> <bitcoind> <licenses> <out>
 
 Platforms: windows (zip), macos (universal binaries, zip), linux-x86_64 and linux-aarch64 (tar.gz).
-The witness must be built with the SHA-256 of the supplied node (build.sh). COPYING and
-LICENSE-mldsa-native come from that platform's M3 release. Each platform has its own README template.
-File names, order, modes and timestamps are fixed. Windows keeps its original file list, CRLF text,
-zip attributes and level 9 deflation. Unix archives use executable modes and LF text; tar owners are
-0 with empty names, and the gzip header has mtime 0 and no filename. Identical inputs give identical bytes.
+The witness must be built with the SHA-256 of the supplied node (build.sh). <licenses> is a folder of the
+node's licenses: COPYING, LICENSE-mldsa-native and LICENSE-slhdsa-c as the M4-R release has them,
+LICENSE-rust for the Rust code compiled into that platform's build, and COPYRIGHT-rust-library.html as the
+Rust toolchain ships it. Each platform has its own README template.
+File names, order, modes and timestamps are fixed. Windows text files get CRLF line ends, zip attributes
+and level 9 deflation. Unix archives use executable modes and LF text; tar owners are 0 with empty names,
+and the gzip header has mtime 0 and no filename. The HTML file is packed as it is. Identical inputs give
+identical bytes.
 """
 import gzip
 import hashlib
@@ -38,12 +39,11 @@ def crlf(data: bytes) -> bytes:
 
 def main() -> None:
     args = sys.argv[1:]
-    platform = "windows"
-    if len(args) == 6:
-        platform, *args = args
-    if len(args) != 5 or platform not in {"windows", "macos", "linux-x86_64", "linux-aarch64"}:
+    if len(args) != 5 or args[0] not in {"windows", "macos", "linux-x86_64", "linux-aarch64"}:
         sys.exit(__doc__)
-    witness, node, copying, mldsa = (Path(p).read_bytes() for p in args[:4])
+    platform = args[0]
+    witness, node = (Path(p).read_bytes() for p in args[1:3])
+    licenses = Path(args[3])
     out = Path(args[4])
     template = "README.txt" if platform == "windows" else "README-macos.txt" if platform == "macos" else "README-linux.txt"
     readme = (HERE / template).read_text(encoding="ascii").format(
@@ -56,8 +56,11 @@ def main() -> None:
         (witness_name, witness),
         (node_name, node),
         ("README.txt", text(readme.encode("ascii"))),
-        ("COPYING.txt", text(copying)),
-        ("LICENSE-mldsa-native.txt", text(mldsa)),
+        ("COPYING.txt", text((licenses / "COPYING").read_bytes())),
+        ("LICENSE-mldsa-native.txt", text((licenses / "LICENSE-mldsa-native").read_bytes())),
+        ("LICENSE-slhdsa-c.txt", text((licenses / "LICENSE-slhdsa-c").read_bytes())),
+        ("LICENSE-rust.txt", text((licenses / "LICENSE-rust").read_bytes())),
+        ("COPYRIGHT-rust-library.html", (licenses / "COPYRIGHT-rust-library.html").read_bytes()),
         ("LICENSE-Ark0Witness.txt", text((HERE.parent / "LICENSE").read_bytes())),
     ]
     programs = {witness_name, node_name}

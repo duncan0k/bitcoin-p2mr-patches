@@ -1,9 +1,9 @@
 # Ark0Witness
 
-A small program for Windows, macOS and Linux for watching the Ark-0 M3 drill with a node of your own, without
-typing commands. Start it (on Windows and macOS with a double-click, on Linux from a terminal) and it:
+A small program for Windows, macOS and Linux for watching Ark-0 and its M3 tripwires with a node of your own,
+without typing commands. Start it (on Windows and macOS with a double-click, on Linux from a terminal) and it:
 
-- starts the Ark-0 node that ships next to it (`bitcoind`, the code of the M3 release built for that system)
+- starts the Ark-0 node that ships next to it (`bitcoind`, the code of the M4-R release built for that system)
   in the background, with the settings of [`ark0/JOIN.md`](../ark0/JOIN.md);
 - opens a page in your browser, served on 127.0.0.1 only, that shows what that node reports: how far it has
   synced, whether it is on Ark-0 (the hash of block 1264), block 30000 where M3 applies, the two tripwires,
@@ -107,7 +107,7 @@ sh build.sh linux-arm64 <SHA-256 of bitcoind>           # out/linux-arm64/ark0-w
 ```
 
 The build is reproducible: the same Go release and the same source give the same bytes, whatever the checkout
-and the system it runs on. Version 0.2.0 is built with go1.26.9. `dist/package.py` then packs the zip for
+and the system it runs on. Version 0.3.0 is built with go1.26.9. `dist/package.py` then packs the zip for
 Windows and for macOS and the tarballs for Linux, the same bytes on every run: the two programs, the README for
 that system (`dist/README*.txt`) with their SHA-256, and the licenses. The nodes are built by
 `contrib/windows/build.sh` and `contrib/cross/build.sh` at the root of this repository; the two macOS builds
@@ -119,7 +119,7 @@ are joined into one universal file by `contrib/cross/lipo.sh`.
 boundaries (Host, path, methods, content type, origin), the strings of the six languages and, with the test
 program standing in for bitcoind, how the node is started, trusted and stopped; on macOS and Linux also the
 data folder rules, the private copy, the signals and the left-over node.
-`test/e2e-linux.sh` runs the Linux build against the Linux M3 release, syncing from `node.ark0.si`.
+`test/e2e-linux.sh` runs the Linux build against the Linux M4-R release, syncing from `node.ark0.si`.
 The tests pass on Windows 11 and Windows 10 22H2, macOS 26 on Apple silicon (the Intel build under Rosetta
 too) and Linux x86_64. The program synced Ark-0 with its node on each of them; the Linux aarch64 node synced
 Ark-0 and passed Core's unit tests under qemu-user.

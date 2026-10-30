@@ -1,7 +1,10 @@
 Ark0Witness {version} for macOS
 
-Watch the Ark-0 M3 drill with a node of your own. Ark-0 is a test network for trying things out;
-it may be reset at any time.
+Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
+things out; it may be reset at any time.
+
+This version's node follows Ark-0 past height 63000, where milestone M4-R opens a rescue
+lane; the node of version 0.2.0 and earlier stops at the first block that uses it.
 
 For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
 
@@ -30,12 +33,19 @@ keeps its data (in the Finder, choose Go > Go to Folder and paste that path).
 Files
   Ark0Witness               the witness program: witness/ in
                             https://github.com/duncan0k/bitcoin-p2mr-patches
-  bitcoind                  the Ark-0 node, milestone M3: Bitcoin Core v31.1 with the patch
-                            sets of that repository (tag ark0-node-m3), for macOS 14 and
+  bitcoind                  the Ark-0 node, milestone M4-R: Bitcoin Core v31.1 with the patch
+                            sets of that repository (tag ark0-node-m4r), for macOS 14 and
                             later
   COPYING.txt               Bitcoin Core's license (MIT)
   LICENSE-mldsa-native.txt  license of the ML-DSA-44 verifier in bitcoind
                             (Apache-2.0 OR ISC OR MIT)
+  LICENSE-slhdsa-c.txt      license of the SLH-DSA-SHA2-128s verifier in bitcoind
+                            (Apache-2.0 OR ISC OR MIT, used under MIT)
+  LICENSE-rust.txt          the Rust code in bitcoind: the rescue verifier and the
+                            crates it compiles, with their licenses
+  COPYRIGHT-rust-library.html
+                            the notices of the Rust standard library, as Rust
+                            1.97.0 ships them
   LICENSE-Ark0Witness.txt   the witness program's license (MIT)
 
 Both programs are universal: one file holds the Apple silicon and the Intel build.
