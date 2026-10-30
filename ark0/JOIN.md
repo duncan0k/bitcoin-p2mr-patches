@@ -16,12 +16,12 @@ Before you start:
   apart, and a faucet at <https://faucet.ark0.si> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest one, milestone
-  M4-R, applies from height 63000 ("Rule change at height 63000 (M4-R)" in `NETWORK.md`), expected
-  around 2026-11-28 16:00 UTC and not before 2026-11-26 12:00 UTC. From there nodes accept, in P2MR
+  M4-R, applies from height 51000 ("Rule change at height 51000 (M4-R)" in `NETWORK.md`), expected
+  around 2026-11-15 05:00 UTC and not before 2026-11-14 00:00 UTC. From there nodes accept, in P2MR
   leaves of version `0xe0`, a zero-knowledge proof that the spender knows the seed behind a key in
   place of an elliptic curve signature. **It is a hard fork:** a node built with `patches-m3/` but
   without `patches-m4r/` stops following the chain at the first block that uses it, so upgrade
-  before height 63000 (section 1). The one before, M4-S, applies from height 32000 ("Rule change at
+  before height 51000 (section 1). The one before, M4-S, applies from height 32000 ("Rule change at
   height 32000 (M4-S)"). From there nodes check `OP_CHECKSLHDSA128S`, an SLH-DSA signature check in
   P2MR leaves. M3 applies from height 30000 ("Rule change at height 30000 (M3)"). From there nodes
   run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once one of
@@ -50,7 +50,7 @@ On Windows, macOS and Linux there is a way without commands: the witness program
 [`ark0-witness-0.2.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.2.0)
 runs a build of the node with the six patch sets up to `patches-m3/` and shows what it reports
 (`witness/README.md`). That build stops following Ark-0 at the first block with a rescue spend, from
-height 63000 on; a release of the witness program with the M4-R build is to follow before then. This
+height 51000 on; a release of the witness program with the M4-R build is to follow before then. This
 guide does not cover the witness program.
 
 ### Prebuilt binaries or image
@@ -157,7 +157,7 @@ described before M3, follows it as well, but does not run leaves of version `0xe
 rule from height 30000 on. One built without `patches-m4/`, as this guide described before M4-S,
 follows it too (up to the first rescue spend, below), but does not check `OP_CHECKSLHDSA128S` from
 height 32000 on. But one built without `patches-m4r/`, as this guide described before M4-R, stops at
-the first block with a rescue spend, which can come from height 63000 on (section 5).
+the first block with a rescue spend, which can come from height 51000 on (section 5).
 
 ## 2. Configure it
 
@@ -207,7 +207,7 @@ The chain is small, so the first sync takes minutes rather than hours.
   P2MR consensus rules active from height 1
   P2MR ML-DSA-44 rules active from height 8600
   P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)
-  Signet P2MR rescue lane from height 63000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
+  Signet P2MR rescue lane from height 51000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
   ```
 
 - `./build/bin/bitcoin-cli getblockhash 1264` returns
@@ -216,12 +216,12 @@ The chain is small, so the first sync takes minutes rather than hours.
 - `./build/bin/bitcoin-cli getdeploymentinfo` lists `p2mr` as a buried deployment, active
   from height 1, `p2mr_mldsa44` as one active from height 8600, `p2mr_tripwire` as one with
   height 30000, `p2mr_slhdsa128s` as one with height 32000 and `p2mr_rescue` as one with height
-  63000, and `P2MR` and `P2MR_MLDSA44` among the script flags (`P2MR_TRIPWIRE` too, from height
-  30000, `P2MR_SLHDSA128S` from height 32000, and `P2MR_NO_RESCUE` below height 63000).
+  51000, and `P2MR` and `P2MR_MLDSA44` among the script flags (`P2MR_TRIPWIRE` too, from height
+  30000, `P2MR_SLHDSA128S` from height 32000, and `P2MR_NO_RESCUE` below height 51000).
 - `./build/bin/bitcoin-cli gettripwireinfo` reports `height` 30000, `leaf_version` `e0`, the two
   tripwire outputs of "Rule change at height 30000 (M3)" in `NETWORK.md`, each `unspent`, and
   `ec_disabled_next_block` false. After the drill described there, the drill output is `missing`
-  and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 63000 and the network
+  and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network
   id of the startup line. A node that has not yet synced past height 15748, where both outputs
   were created, reports both as `missing`, and logs so at startup; that is expected.
 - `./build/bin/bitcoin-cli getpeerinfo` lists the public node, and once `getblockchaininfo`
@@ -346,11 +346,11 @@ do first.
   once with `-reindex-chainstate` so that it checks them (`-reindex` on a pruned node).
 - **`debug.log` has no `Signet P2MR rescue lane` line, or `getdeploymentinfo` does not list
   `p2mr_rescue`:** the node was built without `patches-m4r/`, or still runs the binary from before.
-  Rebuild it (section 1) and restart it before height 63000: from there a node built with
+  Rebuild it (section 1) and restart it before height 51000: from there a node built with
   `patches-m3/` but without `patches-m4r/` stops following the chain at the first block with a
   rescue spend. An M4-S node needs no reindex for this; an M3 node also needs one start with
   `-reindex-chainstate`, as in the previous item.
-- **Stuck at height 62999 or above, with the next block marked invalid:** the node ran without
+- **Stuck at height 50999 or above, with the next block marked invalid:** the node ran without
   `patches-m4r/` when that block came and refused its rescue spend. Rebuild it (section 1), restart
   it, and let it continue with `./build/bin/bitcoin-cli reconsiderblock <hash of that block>`; the
   hash is in `debug.log`, in the line `InvalidChainFound: invalid block=`.

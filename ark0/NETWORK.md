@@ -17,8 +17,8 @@ designated outputs is spent; see "Rule change at height 30000 (M3)". Since
 2026-10-19 they also carry the M4-S series in `patches-m4/`, which from
 height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
 change at height 32000 (M4-S)". Since 2026-10-30 they also carry the M4-R
-series in `patches-m4r/`, which from height 63000 opens a rescue lane in P2MR
-leaves of version `0xe0`, a hard fork; see "Rule change at height 63000
+series in `patches-m4r/`, which from height 51000 opens a rescue lane in P2MR
+leaves of version `0xe0`, a hard fork; see "Rule change at height 51000
 (M4-R)".
 
 It exists to answer one question with evidence rather than assertion: *do these
@@ -77,7 +77,7 @@ chain with a node of your own.
   built with `patches-m4/` also check a second post-quantum signature scheme,
   SLH-DSA-SHA2-128s, in outputs that opt into it. Outputs that do not opt in
   are unchanged. See "Rule change at height 32000 (M4-S)" below.
-- **Not a general way to recover frozen coins (M4-R).** From height 63000 the
+- **Not a general way to recover frozen coins (M4-R).** From height 51000 the
   nodes built with `patches-m4r/` also accept, in leaves of version `0xe0`, a
   zero-knowledge proof that the spender knows the seed behind a key in place of
   an elliptic curve signature (the mempool takes it only once the tripwire has
@@ -85,7 +85,7 @@ chain with a node of your own.
   `HMAC-SHA256(K, x || suffix)` of a seed `x`, as the Ark-0 web wallet derives
   its Schnorr keys; its proof system has had no external review; and it relaxes
   the rules: an M3 or M4-S node stops at the first block that uses it. See
-  "Rule change at height 63000 (M4-R)" below.
+  "Rule change at height 51000 (M4-R)" below.
 
 ### What the evidence does not prove
 
@@ -598,9 +598,9 @@ make the opcode push false, as `OP_CHECKSIG` does with an empty signature.
   will not change.** The series is in `patches-m4/` (`README.md`,
   "Experimental M4-S series").
 
-## Rule change at height 63000 (M4-R)
+## Rule change at height 51000 (M4-R)
 
-From height 63000 Ark-0 has one more experimental rule, called milestone
+From height 51000 Ark-0 has one more experimental rule, called milestone
 M4-R here: a rescue lane in P2MR leaves of version `0xe0`. M3 disables the
 elliptic curve signature checks in those leaves from the block after a
 tripwire output is spent, so a leaf such as `<P> OP_CHECKSIG` has no valid
@@ -609,13 +609,17 @@ lane gives such a leaf one: in place of the signature, the spender proves in
 zero knowledge that they know the seed the key was derived from. The nodes
 built with `patches-m4r/` enforce it, the operator's among them, and
 `doc/p2mr-rescue.md` in the patched tree specifies it. The height was
-announced on 2026-10-30, with the release of the build, about four weeks
-ahead. Counted from height 36980, at 10:17 UTC that day, at about 890 blocks
-a day, the rate of the two weeks before, the chain reaches height 63000
-around 2026-11-28 16:00 UTC. It cannot do so before 2026-11-26 12:00 UTC,
-even if blocks came every 90 seconds, the producer's configured pause.
+announced on 2026-10-30, with the release of the build, about two weeks
+ahead. Counted from height 37096, at 13:22 UTC that day, at about 890 blocks
+a day, the rate of the two weeks before, the chain reaches height 51000
+around 2026-11-15 05:00 UTC. It cannot do so before 2026-11-14 00:00 UTC,
+even if blocks came every 90 seconds, the producer's configured pause. A
+first build of the series, which set the lane's height at 63000, four weeks
+ahead, was published on 2026-10-30 and replaced the same day, before it was
+announced; a node that runs it stops at the first rescue spend from height
+51000, so it has to be replaced as well.
 
-From height 63000, in an executed P2MR leaf of version `0xe0` at depth one or
+From height 51000, in an executed P2MR leaf of version `0xe0` at depth one or
 more, an `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a 32-byte
 key whose signature element is a **rescue token** is a rescue check.
 The token carries the statement: a context string `K`, a suffix and `y`, where
@@ -638,8 +642,8 @@ cannot be rescued.
   after `bitcoin-cli reconsiderblock <hash of that block>`. A build without
   `patches-m3/` does not run these leaves; it takes the block and keeps
   following, checking less. Every M3 or M4-S node that is to follow Ark-0 past
-  that block needs this build; upgrade before height 63000.
-- **Below height 63000, and outside such leaves, nothing changes.** Below the
+  that block needs this build; upgrade before height 51000.
+- **Below height 51000, and outside such leaves, nothing changes.** Below the
   height a token is a signature like any other, which can never be valid, so
   a node with this build checks every block below it as an M4-S node does, and
   an M4-S node needs no reindex when it upgrades (an M3 node still needs the
@@ -699,16 +703,16 @@ cannot be rescued.
   with two leaves of version `0xe0`, `<R> OP_CHECKSIG` and `OP_RETURN`,
   created for it at height 30068
   (`12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0` and
-  `:1`). After height 63000 it will rescue both in one transaction.
+  `:1`). After height 51000 it will rescue both in one transaction.
 - **What a node logs and reports.** A node built with `patches-m4r/` logs
   this line when it starts:
 
   ```
-  Signet P2MR rescue lane from height 63000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
+  Signet P2MR rescue lane from height 51000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
   ```
 
   `bitcoin-cli getdeploymentinfo` lists `p2mr_rescue` as a buried deployment
-  with height 63000, and `gettripwireinfo` has a `rescue` object. When a block
+  with height 51000, and `gettripwireinfo` has a `rescue` object. When a block
   joins the active chain, each rescue spend in it through template R1 is
   logged:
 
@@ -746,7 +750,7 @@ cannot be rescued.
 | ML-DSA-44 block signature (M2) | from height 20000, by the key whose SHA256 is `eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad`, see "Rule change at height 20000 (M2)" |
 | Leaf version `0xe0` (M3) | executed from height 30000, with the tripwire outputs `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` and `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0`, see "Rule change at height 30000 (M3)" |
 | `OP_CHECKSLHDSA128S` (M4-S) | from height 32000, 5,000 units of validation weight per check, see "Rule change at height 32000 (M4-S)" |
-| Rescue lane of leaf version `0xe0` (M4-R) | from height 63000, 130,000 units of validation weight per rescue check, a hard fork, see "Rule change at height 63000 (M4-R)" |
+| Rescue lane of leaf version `0xe0` (M4-R) | from height 51000, 130,000 units of validation weight per rescue check, a hard fork, see "Rule change at height 51000 (M4-R)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the

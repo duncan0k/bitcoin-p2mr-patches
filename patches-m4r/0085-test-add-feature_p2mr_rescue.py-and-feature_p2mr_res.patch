@@ -1,4 +1,4 @@
-From 5b351d9eb0ebb705aea067df5d13942cb67be99f Mon Sep 17 00:00:00 2001
+From 8a0e24b89a6b56d9ea311fca8fced051bad86b49 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:10 +0000
 Subject: [PATCH 85/94] test: add feature_p2mr_rescue.py and
@@ -29,19 +29,19 @@ M4S_BITCOIND names its bitcoind, or this build with the lane never open.
 On a custom signet with -signetrescue: the network id of the challenge,
 a proof for regtest's refused, and the options.
 ---
- test/functional/feature_p2mr_rescue.py        | 792 ++++++++++++++++++
+ test/functional/feature_p2mr_rescue.py        | 794 ++++++++++++++++++
  test/functional/feature_p2mr_rescue_signet.py | 127 +++
  test/functional/test_runner.py                |   2 +
- 3 files changed, 921 insertions(+)
+ 3 files changed, 923 insertions(+)
  create mode 100644 test/functional/feature_p2mr_rescue.py
  create mode 100644 test/functional/feature_p2mr_rescue_signet.py
 
 diff --git a/test/functional/feature_p2mr_rescue.py b/test/functional/feature_p2mr_rescue.py
 new file mode 100644
-index 0000000..6b445c1
+index 0000000..353de98
 --- /dev/null
 +++ b/test/functional/feature_p2mr_rescue.py
-@@ -0,0 +1,792 @@
+@@ -0,0 +1,794 @@
 +#!/usr/bin/env python3
 +# Copyright (c) 2026 duncan0k
 +# Distributed under the MIT software license, see the accompanying
@@ -778,7 +778,9 @@ index 0000000..6b445c1
 +    def test_late_upgrade(self):
 +        self.log.info("The M4-S node stopped below the first rescue block, without a fork of its own")
 +        late = self.nodes[2]
-+        self.connect_nodes(0, 2)
++        # It drops node 0, an inbound peer, for the new rescue block, which can happen before
++        # connect_nodes() has seen the connection: node 0 only opens it.
++        self.nodes[0].addnode(f"127.0.0.1:{p2p_port(2)}", "onetry")
 +        # It has both rescue blocks at H4R, and refused them; it stays at H4R - 1 of either branch.
 +        self.wait_until(lambda: f"InvalidChainFound: invalid block={self.branch_rescue_hash}  height={H4R}" in late.debug_log_path.read_text())
 +        assert any(t["status"] == "invalid" for t in late.getchaintips())
@@ -981,5 +983,5 @@ index b6046ff..4673f0f 100755
      'feature_signet_pqblock.py',
      'wallet_p2mr.py',
 -- 
-2.43.0
+2.49.0.windows.1
 

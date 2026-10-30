@@ -1,4 +1,4 @@
-From 79b74fa69864cd3ed302573674d3ae9997d31337 Mon Sep 17 00:00:00 2001
+From d6c20ecefa02adcf287a0eedaf8a512d5c48e018 Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
 Date: Fri, 23 Oct 2026 22:45:31 +0000
 Subject: [PATCH] consensus: close the P2MR rescue lane again from a height,
@@ -48,7 +48,7 @@ below it.
  create mode 100755 test/functional/feature_p2mr_rescue_killswitch.py
 
 diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
-index 42f0881..e528288 100644
+index c2637d9..aba781f 100644
 --- a/doc/p2mr-rescue.md
 +++ b/doc/p2mr-rescue.md
 @@ -293,3 +293,16 @@ There is no RPC to make proofs or rescue transactions: proofs are made off the n
@@ -155,7 +155,7 @@ index b08d603..d6dbd44 100644
  }
  
 diff --git a/src/consensus/params.h b/src/consensus/params.h
-index ab9e6db..39c5ed8 100644
+index de9c408..657579e 100644
 --- a/src/consensus/params.h
 +++ b/src/consensus/params.h
 @@ -36,8 +36,9 @@ enum BuriedDeployment : int16_t {
@@ -213,7 +213,7 @@ index 50b7c3b..bc7933e 100644
      return std::nullopt;
  }
 diff --git a/src/init.cpp b/src/init.cpp
-index a83a0dc..3f6f6ef 100644
+index fb8fb52..4b6f4a7 100644
 --- a/src/init.cpp
 +++ b/src/init.cpp
 @@ -978,6 +978,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
@@ -227,7 +227,7 @@ index a83a0dc..3f6f6ef 100644
      // Warn if unrecognized section name are present in the config file.
      bilingual_str warnings;
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index a458aab..f9f53ad 100644
+index bebaf4c..8ae7908 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
 @@ -217,6 +217,7 @@ public:
@@ -289,10 +289,10 @@ index a458aab..f9f53ad 100644
          }
          // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index 2ee729f..d366041 100644
+index 584c32d..25816ac 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
-@@ -89,6 +89,14 @@ inline constexpr int ARK0_RESCUE_HEIGHT{63000};
+@@ -89,6 +89,14 @@ inline constexpr int ARK0_RESCUE_HEIGHT{51000};
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
  
@@ -601,5 +601,5 @@ index 4673f0f..12875e7 100755
      'feature_signet_pqblock.py',
      'wallet_p2mr.py',
 -- 
-2.43.0
+2.49.0.windows.1
 

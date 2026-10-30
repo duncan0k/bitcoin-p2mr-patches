@@ -3281,6 +3281,10 @@ with its own review and release. (Added on 2026-10-25: the web wallet has made S
 
 ## Executed on 2026-10-30 (M4-R roll)
 
+Replaced the same day. The build of this roll set the lane's height at 63000; before that height was
+announced, it gave way to one that sets it at 51000, rolled out as the next section records.
+This section stands as it was written: its heights, checks and way back are those of the first build.
+
 Both nodes moved onto one build that also carries `patches-m4r/`: from height 63000, an executed P2MR
 leaf of version `0xe0` whose elliptic curve signature checks the M3 tripwire has disabled can be spent
 with a rescue proof in place of the signature (`ark0/NETWORK.md` "Rule change at height 63000
@@ -3386,3 +3390,108 @@ Below height 63000 the roll is fully reversible: stop the producer, set the two 
 the producer. The external nodes get their `*.m4s` binaries back. From 63000 on, a node rolled back to
 the M4-S build stops following the chain at the first block with a rescue spend, so that is not a way
 back.
+
+## Executed on 2026-10-30 (M4-R roll, the lane at height 51000)
+
+Both nodes moved from the build of the previous section to one whose lane opens at height 51000, about
+two weeks ahead, in place of 63000; the series is otherwise the same but for one functional test
+(`README.md`, the end of "Experimental M4-R series"). The producer, the observe job and the soak job
+kept their image. Carried out between 13:17 and 13:20 UTC with the sequence of the previous section and
+a copy of its script, its names and checks moved to the new height. It ran through at its first
+attempt.
+
+### The builds
+
+| Run | Patch sets | Result |
+|---|---|---|
+| `de1-m4rrc2-1030` | `master m05 spacing m1 m2 m3 m4 m4r`, 94 commits, a fresh clone, patch 85 as first published | `series ok`; `test_bitcoin` 795 of 801 passed, 1 passed with a warning, 5 skipped; of the 14 functional scripts, `feature_p2mr_rescue` failed: the M4-S node dropped a connection the test was still checking (`README.md`, the end of "Experimental M4-R series"); the default functional suite passed, 280 tests, 17 skipped |
+| `de1-m4rrc3-1030` | the same with patch 85 amended, a fresh clone | `series ok`; `test_bitcoin` as above; 14 functional scripts passed, `feature_p2mr_rescue` with the M4-S release's `bitcoind` as the late node; the default functional suite passed, 280 tests, 17 skipped |
+| `de1-m4rcold2-1030` | the same from a fresh clone with an empty compiler cache, its patch files identical to those published in this repository | `series ok`; the unit tests, `feature_p2mr_rescue` (with the M4-S `bitcoind`), `feature_p2mr_rescue_signet`, `feature_p2mr_slhdsa128s` and `feature_p2mr_tripwire` passed; none of the 499 compilations found in the cache; the five binaries are those of `de1-m4rrc3-1030`, byte for byte |
+
+`bitcoind` hashes to `6d4a688b94a1d59dc972815f856c0d5f6853e556188fe304b1feece29ae76331`; `bitcoin-cli` is
+the same file as in the previous build.
+
+### Images
+
+| Workload | Tag | containerd manifest digest | imageID as the kubelet reports it |
+|---|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-28f575daf92f`, new | `sha256:39850fb22d45a0b9f82b4d98593d6b2d6cdeda7e26e7b55792f6d64733715245` | `sha256:3670a738300a7f9b4bad0eeee8317df731a88efe4386134d7436dc383315ff20` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-0954c5cca219`, kept | `sha256:299cb73b8842da748b30881e53c798fa3bc4be70e04fac604e0307daafec9409` | `sha256:19e997f0d4affb24783c7b1f2c4a7fa75d75a794f35662ae8fe89cf93100df58` |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-89a87bf7b3e0`, kept | `sha256:fa22126291b691f35259674fac6ddde64cf5ac8295a227f765bea77d694b80e8` | both nodes' way back to the build with 63000 |
+
+The release candidate's image,
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-rc3-28f575daf92f`
+(`sha256:1f429889ab2e47efe62371b8978dde4bec5b4ff409df88c1b1372b56aebb9312`), was the one checked
+first. As before, the tag above is a second build of an image from the same binaries, after the cold
+build, so its digest differs.
+
+### The sequence
+
+All times UTC.
+
+1. **Ahead of the stop.** No observe or soak run was in progress, and the roll applied no ConfigMap.
+   `kubectl kustomize` of the base, with this tree's `kustomization.yaml` in place of the live one,
+   differed from the live render in the two node images only.
+2. **13:17:51.** The script started and scaled the producer to zero; its pod was gone at 13:18:24. The
+   frozen tip, on both nodes: 37093,
+   `00000203004f16c4c5c6ff788b7fb82adaab71ffe92587e52b0f44156d1b356c`, with the same `getchaintips`
+   and the same `gettripwireinfo`.
+3. **13:18.** The two node tags in `kustomization.yaml` moved to the new build; the copy on the host is
+   this tree's file, checked by hash. `kubectl diff -k` of the maintenance overlay showed the two node
+   images and nothing else. A server-side dry run passed.
+4. **13:18:33.** The maintenance overlay applied. Both nodes were ready on the new image at 13:18:46.
+5. **Checks on the frozen tip**, both nodes: `imageID` equal to the new image's above; the startup line
+
+   ```
+   Signet P2MR rescue lane from height 51000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
+   ```
+
+   with the other startup lines as before; the frozen tip, and `getchaintips` the same as in step 2,
+   byte for byte; `gettripwireinfo` the same as in step 2 but for the `height` of its `rescue` object,
+   51000 in place of 63000; `getdeploymentinfo` with `p2mr_rescue` buried at 51000, not yet active.
+6. **13:18:55.** The base started the producer; its `kubectl diff -k` had been the producer's
+   `replicas` from 0 to 1, and the node pods did not roll again. It mined 37094.
+7. **Checks after the roll.** The producer's `imageID` as before the roll. The observe run at 13:25:01
+   saw both nodes on 37097 and the three pods ready with no restarts.
+
+### Before and after
+
+| | 13:18:24, producer at zero | 13:19:08, producer back | 13:25:01 |
+|---|---|---|---|
+| block count, both nodes | 37093 | 37094 | 37097 |
+| best hash, both | `00000203004f16c4…156d1b356c` | `00000144cee41488…cb2838c42b` | `000000a17850ef9e…0de718a188` |
+| connections, each node | 3 | 2 | 3 |
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 37093 | `00000203004f16c4c5c6ff788b7fb82adaab71ffe92587e52b0f44156d1b356c` | 13:17:07 | the frozen tip |
+| 37094 | `00000144cee41488265a692aa654dd65ccc1a08c2b31c1905a0115cb2838c42b` | 13:18:55 | the first block after the roll |
+| 37095 | `000001dc9b0e45cd77fd9c366d34cec02bd37ecac62bb6085c57b104d3eb3967` | 13:20:35 | |
+
+Node B carried the same height and hash at every reading.
+
+### The two external nodes
+
+Both moved onto the `bitcoind` and `bitcoin-cli` of the release package `ark0-node-m4r` as it is now
+published, checked against its `SHA256SUMS`; the binaries of the previous section are kept beside them
+as `*.m4r63`, and the M4-S ones still as `*.m4s`. The public node was restarted at 13:19:47 and the
+relay at 13:20:13. Each logged the M4-R line above, listed `p2mr_rescue` in `getdeploymentinfo` as
+buried at 51000 and gave the same `rescue` object, and followed the tip: at 13:20:51 all four nodes
+held 37095, `000001dc9b0e45cd77fd9c366d34cec02bd37ecac62bb6085c57b104d3eb3967`.
+
+### What this roll does not show yet
+
+The rule applies from height 51000. What to check then, on all four nodes: that `getdeploymentinfo`
+reports `p2mr_rescue` active, and that a rescue spend with a valid proof goes through while one with
+an invalid proof is refused. The operator plans such a spend of its own (`ark0/NETWORK.md`, "The
+rescue drill").
+
+### Rolling back this roll
+
+Below height 51000 the roll is fully reversible: stop the producer, set the two node pins back to
+`p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-89a87bf7b3e0`, the build with 63000, or to the M4-S
+build of the section before it, apply the maintenance overlay, and start the producer. The external
+nodes get their `*.m4r63` or `*.m4s` binaries back. From 51000 on, a node rolled back to either build
+stops following the chain at the first block with a rescue spend, so that is not a way back.

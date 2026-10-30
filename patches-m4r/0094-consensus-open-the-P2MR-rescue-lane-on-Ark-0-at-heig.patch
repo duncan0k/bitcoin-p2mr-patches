@@ -1,22 +1,24 @@
-From cdb1259e1965498eb9e5e8b003a7268f77cf0e14 Mon Sep 17 00:00:00 2001
+From 8ffbc4717500c86622779ecd634948b32a6e6f5c Mon Sep 17 00:00:00 2001
 From: duncan0k <dev@ark0.si>
-Date: Sun, 25 Oct 2026 08:08:35 +0000
+Date: Fri, 30 Oct 2026 11:55:00 +0000
 Subject: [PATCH 94/94] consensus: open the P2MR rescue lane on Ark-0 at height
- 63000
+ 51000
 
 H4R, the height from which the Ark-0 signet opens the rescue lane, is
-decided: 63000, the height at the release plus four weeks of blocks,
-rounded to the thousand, about four weeks after the release. It is fixed
-in the code as ARK0_RESCUE_HEIGHT, as 32000 was for OP_CHECKSLHDSA128S;
-the lane relaxes the rules (a hard fork), the height is announced at
-least four weeks before it, and it never changes once a build carrying
-it has left the network's own nodes.
+decided: 51000, the height at the release plus two weeks of blocks,
+rounded up to the thousand, about two weeks after the release. It is
+fixed in the code as ARK0_RESCUE_HEIGHT, as 32000 was for
+OP_CHECKSLHDSA128S; the lane relaxes the rules (a hard fork), the height
+is announced at least two weeks before it, and it never changes once a
+build carrying it has been announced. A first build of this patch, with
+63000 and four weeks, was published on 2026-10-30 and replaced the same
+day, before it was announced.
 
 ark0_lane_closed becomes ark0_rescue_height: the deployment is enabled
-at 63000, and the script flags of Ark-0 blocks at heights 62999 and 63000
+at 51000, and the script flags of Ark-0 blocks at heights 50999 and 51000
 differ by exactly SCRIPT_VERIFY_P2MR_NO_RESCUE; the default signet, the
 testnets and mainnet still never open the lane. doc/p2mr-rescue.md says
-Ark-0 opens the lane from block 63000, what an operator of a node
+Ark-0 opens the lane from block 51000, what an operator of a node
 without the lane must know, and that the single-check gate decides on
 its paused runs, with the continuous maxima of both machines.
 ---
@@ -29,7 +31,7 @@ its paused runs, with the continuous maxima of both machines.
  6 files changed, 63 insertions(+), 38 deletions(-)
 
 diff --git a/doc/p2mr-rescue.md b/doc/p2mr-rescue.md
-index d7ea7d5..42f0881 100644
+index d7ea7d5..c2637d9 100644
 --- a/doc/p2mr-rescue.md
 +++ b/doc/p2mr-rescue.md
 @@ -18,9 +18,10 @@ around the rules below (ark0-rescue `NOTES.md`).
@@ -39,10 +41,10 @@ index d7ea7d5..42f0881 100644
 -**Not active on Ark-0.** The height for the Ark-0 signet, `ARK0_RESCUE_HEIGHT`, is not decided: until
 -it is, it is `std::numeric_limits<int>::max()` and the lane stays closed there. Regtest and custom
 -signets given `-signetrescue` have it.
-+**Ark-0 opens the lane from block 63000.** The height for the Ark-0 signet, `ARK0_RESCUE_HEIGHT`, is
-+63000, fixed in the code; it is announced at least four weeks before it and never changes once a build
-+carrying it has left the network's own nodes. Regtest and custom signets given `-signetrescue` have a
-+height of their own.
++**Ark-0 opens the lane from block 51000.** The height for the Ark-0 signet, `ARK0_RESCUE_HEIGHT`, is
++51000, fixed in the code; it is announced at least two weeks before it and never changes once a build
++carrying it has been announced. Regtest and custom signets given `-signetrescue` have a height of their
++own.
  
  **Publishing a rescue spend publishes the key.** The token carries `y`, which is the Schnorr secret key
  `d` of the spent output. While elliptic curve checks in the leaf work, anyone who sees a rescue spend
@@ -79,7 +81,7 @@ index d7ea7d5..42f0881 100644
  |---|---|
  | mainnet, testnet3, testnet4, default signet | never |
 -| Ark-0 signet | `ARK0_RESCUE_HEIGHT`, not decided: never in this build |
-+| Ark-0 signet | `ARK0_RESCUE_HEIGHT`, 63000 |
++| Ark-0 signet | `ARK0_RESCUE_HEIGHT`, 51000 |
  | other custom signets | `-signetrescue=<height>`, with `-signetchallenge` and `-signettripwire`, at or above the tripwire height |
  | regtest | the final `p2mr_tripwire` height (after `-testactivationheight` and `-signettripwire`), or `-testactivationheight=p2mr_rescue@<height>`, at or above it |
  
@@ -96,12 +98,12 @@ index d7ea7d5..42f0881 100644
 +network whose blocks one party signs, it has no other chain to follow, as long as that party extends
 +only one chain. Once upgraded, it still has the block marked invalid, and continues after
 +`bitcoin-cli reconsiderblock <hash of that block>`, as `feature_p2mr_rescue.py` shows. On Ark-0 that
-+block can come from height 63000 on.
++block can come from height 51000 on.
  
  ## Policy
  
 diff --git a/src/consensus/params.h b/src/consensus/params.h
-index b01a13d..ab9e6db 100644
+index b01a13d..de9c408 100644
 --- a/src/consensus/params.h
 +++ b/src/consensus/params.h
 @@ -162,8 +162,8 @@ struct Params {
@@ -110,13 +112,13 @@ index b01a13d..ab9e6db 100644
       * are checked with SCRIPT_VERIFY_P2MR_NO_RESCUE. std::numeric_limits<int>::max() on every chain
 -     * but a custom signet given -signetrescue and regtest; on the Ark-0 signet it stays there until
 -     * ARK0_RESCUE_HEIGHT is decided. Never below P2MRTripwireHeight. */
-+     * but the Ark-0 signet (from ARK0_RESCUE_HEIGHT, 63000), a custom signet given -signetrescue,
++     * but the Ark-0 signet (from ARK0_RESCUE_HEIGHT, 51000), a custom signet given -signetrescue,
 +     * and regtest. Never below P2MRTripwireHeight. */
      int P2MRRescueHeight;
      /** The network id rescue proofs are bound to: SHA256 of the signet challenge on a signet,
       * SHA256("regtest") on regtest, unset elsewhere (doc/p2mr-rescue.md). */
 diff --git a/src/init.cpp b/src/init.cpp
-index d0bc3ec..a83a0dc 100644
+index d0bc3ec..fb8fb52 100644
 --- a/src/init.cpp
 +++ b/src/init.cpp
 @@ -969,9 +969,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
@@ -128,13 +130,13 @@ index d0bc3ec..a83a0dc 100644
 -    // needs the same height and network id: log them, so that operators can compare.
 +    // The P2MR rescue lane (doc/p2mr-rescue.md) is only open on a signet given -signetrescue, on
 +    // regtest, and on the Ark-0 signet from ARK0_RESCUE_HEIGHT, where a node logs "Signet P2MR rescue
-+    // lane from height 63000 ...". Every node of a network needs the same height and network id: log
++    // lane from height 51000 ...". Every node of a network needs the same height and network id: log
 +    // them, so that operators can compare.
      if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_RESCUE)) {
          LogInfo("%s P2MR rescue lane from height %d for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id %s",
                  chainparams.GetChainType() == ChainType::SIGNET ? "Signet" : "Regtest",
 diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
-index 822a5c7..a458aab 100644
+index 822a5c7..bebaf4c 100644
 --- a/src/kernel/chainparams.cpp
 +++ b/src/kernel/chainparams.cpp
 @@ -661,8 +661,8 @@ public:
@@ -143,13 +145,13 @@ index 822a5c7..a458aab 100644
          // accepts only with -signettripwire, at or above its height. On Ark-0 from
 -        // ARK0_RESCUE_HEIGHT, which is not decided yet: the lane stays closed there. The rescue
 -        // proofs of a signet are bound to its challenge, as every signet has the same genesis block.
-+        // ARK0_RESCUE_HEIGHT, 63000, fixed in the code. The rescue proofs of a signet are bound to
++        // ARK0_RESCUE_HEIGHT, 51000, fixed in the code. The rescue proofs of a signet are bound to
 +        // its challenge, as every signet has the same genesis block.
          if (options.rescue_height) {
              assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
              assert(options.tripwire && options.tripwire->height <= *options.rescue_height);
 diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
-index 9a7baf0..2ee729f 100644
+index 9a7baf0..584c32d 100644
 --- a/src/kernel/chainparams.h
 +++ b/src/kernel/chainparams.h
 @@ -78,13 +78,13 @@ static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT);
@@ -163,17 +165,17 @@ index 9a7baf0..2ee729f 100644
 - * build carrying it has left the network's own nodes.
 + * Height from which the Ark-0 signet opens the P2MR rescue lane (doc/p2mr-rescue.md), H4R.
 + *
-+ * 63000 is the height chosen for M4-R and fixed in the code. The lane relaxes the rules (a hard
-+ * fork): the height is announced at least four weeks before it, and never changes once a build
-+ * carrying it has left the network's own nodes.
++ * 51000 is the height chosen for M4-R and fixed in the code. The lane relaxes the rules (a hard
++ * fork): the height is announced at least two weeks before it, and never changes once a build
++ * carrying it has been announced.
   */
 -inline constexpr int ARK0_RESCUE_HEIGHT{std::numeric_limits<int>::max()};
-+inline constexpr int ARK0_RESCUE_HEIGHT{63000};
++inline constexpr int ARK0_RESCUE_HEIGHT{51000};
  // The lane rescues what the tripwire leaves froze: it comes after their height.
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
  static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
 diff --git a/src/test/p2mr_rescue_tests.cpp b/src/test/p2mr_rescue_tests.cpp
-index a0c5c5e..598e2fe 100644
+index a0c5c5e..d060d51 100644
 --- a/src/test/p2mr_rescue_tests.cpp
 +++ b/src/test/p2mr_rescue_tests.cpp
 @@ -306,19 +306,20 @@ struct RescueChainSetup : public TestChain100Setup {
@@ -184,12 +186,12 @@ index a0c5c5e..598e2fe 100644
 -// was fixed, and every block there is checked with SCRIPT_VERIFY_P2MR_NO_RESCUE. The default signet,
 -// the testnets and mainnet never open it.
 -BOOST_AUTO_TEST_CASE(ark0_lane_closed)
-+// H4R is a rule of the Ark-0 network, fixed in the code at 63000, above the heights of the tripwire
++// H4R is a rule of the Ark-0 network, fixed in the code at 51000, above the heights of the tripwire
 +// rules and of OP_CHECKSLHDSA128S. The default signet, the testnets and mainnet never open the lane.
 +BOOST_AUTO_TEST_CASE(ark0_rescue_height)
  {
 -    static_assert(ARK0_RESCUE_HEIGHT == NEVER);
-+    static_assert(ARK0_RESCUE_HEIGHT == 63000);
++    static_assert(ARK0_RESCUE_HEIGHT == 51000);
      static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
 +    static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
      CChainParams::SigNetOptions options;
@@ -198,9 +200,9 @@ index a0c5c5e..598e2fe 100644
      const Consensus::Params& consensus{ark0->GetConsensus()};
 -    BOOST_CHECK_EQUAL(consensus.P2MRRescueHeight, NEVER);
 -    BOOST_CHECK(!DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_RESCUE));
-+    BOOST_CHECK_EQUAL(consensus.P2MRRescueHeight, 63000);
++    BOOST_CHECK_EQUAL(consensus.P2MRRescueHeight, 51000);
 +    BOOST_CHECK(DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_RESCUE));
-+    BOOST_CHECK_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_P2MR_RESCUE), 63000);
++    BOOST_CHECK_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_P2MR_RESCUE), 51000);
      // Ark-0's network id is the SHA256 of its challenge.
      BOOST_CHECK(*consensus.p2mr_rescue_network_id == LoadVectors().ark0);
  
@@ -208,7 +210,7 @@ index a0c5c5e..598e2fe 100644
      };
      ChainstateManager chainman{m_interrupt, chainman_opts, blockman_opts};
      BOOST_CHECK(*chainman.m_validation_cache.m_p2mr_rescue_network_id == LoadVectors().ark0);
-+    // The script flags of blocks at heights 62999 and 63000 on Ark-0 differ by exactly
++    // The script flags of blocks at heights 50999 and 51000 on Ark-0 differ by exactly
 +    // SCRIPT_VERIFY_P2MR_NO_RESCUE. GetBlockScriptFlags only reads the block's height and hash and the
 +    // chain parameters, so two block index entries do.
      const uint256 hash{1};
@@ -220,8 +222,8 @@ index a0c5c5e..598e2fe 100644
 +    CBlockIndex before, at;
 +    before.phashBlock = &hash;
 +    at.phashBlock = &hash;
-+    before.nHeight = 62'999;
-+    at.nHeight = 63'000;
++    before.nHeight = 50'999;
++    at.nHeight = 51'000;
 +    const script_verify_flags flags_before{GetBlockScriptFlags(before, chainman)};
 +    const script_verify_flags flags_at{GetBlockScriptFlags(at, chainman)};
 +    BOOST_CHECK(flags_before & SCRIPT_VERIFY_P2MR_NO_RESCUE);
@@ -239,5 +241,5 @@ index a0c5c5e..598e2fe 100644
  
      for (const auto& params : {CChainParams::Main(), CChainParams::TestNet(), CChainParams::TestNet4(), CChainParams::SigNet({})}) {
 -- 
-2.43.0
+2.49.0.windows.1
 
