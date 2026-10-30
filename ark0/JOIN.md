@@ -47,11 +47,11 @@ prebuilt, as binaries or as a container image, or build it yourself; the rest of
 the same with either.
 
 On Windows, macOS and Linux there is a way without commands: the witness program of the release
-[`ark0-witness-0.2.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.2.0)
-runs a build of the node with the six patch sets up to `patches-m3/` and shows what it reports
-(`witness/README.md`). That build stops following Ark-0 at the first block with a rescue spend, from
-height 51000 on; a release of the witness program with the M4-R build is to follow before then. This
-guide does not cover the witness program.
+[`ark0-witness-0.3.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.3.0)
+runs a build of the node with all eight patch sets, up to `patches-m4r/`, and shows what it reports
+(`witness/README.md`). Earlier releases of the witness program run a build with the six patch sets
+up to `patches-m3/`, which stops following Ark-0 at the first block with a rescue spend, from height
+51000 on. This guide does not cover the witness program.
 
 ### Prebuilt binaries or image
 
