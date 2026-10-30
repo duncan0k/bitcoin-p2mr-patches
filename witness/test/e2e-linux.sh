@@ -3,6 +3,7 @@
 #   sh e2e-linux.sh <ark0-witness> <bitcoind> <bitcoin-cli>
 # Needs curl and python3, and network access. Uses a fresh data folder under /tmp and removes it at the end.
 set -u
+umask 077
 WITNESS=$1
 BITCOIND=$2
 CLI=$3
@@ -93,9 +94,12 @@ say "$ANSWER"
 curl -s "${URL}api/report" | grep -q "Checked a transaction" || fail "report"
 curl -s "${URL}api/report"
 
-say "== a second window on the same folder shows the first one's page"
+say "== a second window on the same folder reports the running witness without its page address"
 "$WITNESS" -no-browser -datadir "$DATA" -bitcoind "$BITCOIND" -lang en < /dev/null > "$LOG.2" 2>&1
-grep -q "$URL" "$LOG.2" || fail "second window"
+grep -Fxq 'The witness is already running in another window, which shows the address of its page.' "$LOG.2" || fail "second window"
+if grep -Eq 'http://127\.0\.0\.1:[0-9]+' "$LOG.2"; then
+	fail "second window disclosed a page address"
+fi
 [ "$(nodes)" -eq 1 ] || fail "nodes: $(nodes)"
 
 say "== stop"
