@@ -1,0 +1,216 @@
+{
+ "step": "record",
+ "statement": {
+  "sid": "01",
+  "k": "ark0-wallet v1 schnorr",
+  "suffix": 0,
+  "y": "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e"
+ },
+ "P": "907f297a12351f4a15126bd44dfc810baae2d7485871415bf5066419de480dd0",
+ "pk_commitment": "b506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+ "network_id": "afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e",
+ "challenge": "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae",
+ "trigger": {
+  "txid": "2885e18bf4e99bd37b35b106edf2ef9ac499ad26c520a45d6a94cd2708b389c9",
+  "blockhash": "000001e1b8fa2d090999db861599132b86f465c47331f9ae64ad162e25478114",
+  "height": 36897
+ },
+ "demoText": "Ark-0 rescue drill R3: proof of seed knowledge",
+ "m_demo": "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+ "proof": {
+  "size": 130218,
+  "sha256": "9b8c07106b39d78ecc35e072ff1bb7bc4c0979c972be2769535d5f55906ec5fa"
+ },
+ "prover": {
+  "sha256": "4828a2054e7f4f71fb262970c343b6ac2fe98b33adbea7fba2601242d5f8a546"
+ },
+ "verifier": {
+  "sha256": "d67ceec30efb33f2fcbdedaef1a2f5d09c642a7753205815197ee9173a1663f8"
+ },
+ "rescue_commit": "71b34baec9f3655733175881a4358284ffa18fe2",
+ "validators": {
+  "rust": {
+   "command": [
+    "<voleith-verify.exe>",
+    "--k",
+    "ark0-wallet v1 schnorr",
+    "--suffix",
+    "0",
+    "--y-hex",
+    "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+    "--msg-hex",
+    "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+    "--proof",
+    "<r3-proof.bin>"
+   ],
+   "cwd": "<ark0-rescue>",
+   "positive": {
+    "command": [
+     "<voleith-verify.exe>",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 0,
+    "stdout": "valid",
+    "stderr": ""
+   },
+   "negative": {
+    "command": [
+     "<voleith-verify.exe>",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 1,
+    "stdout": "invalid",
+    "stderr": ""
+   }
+  },
+  "python": {
+   "command": [
+    "<python>",
+    "-I",
+    "<ark0-rescue>/python/tools/verify_cli.py",
+    "--k",
+    "ark0-wallet v1 schnorr",
+    "--suffix",
+    "0",
+    "--y-hex",
+    "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+    "--msg-hex",
+    "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+    "--proof",
+    "<r3-proof.bin>"
+   ],
+   "cwd": "<ark0-rescue>",
+   "positive": {
+    "command": [
+     "<python>",
+     "-I",
+     "<ark0-rescue>/python/tools/verify_cli.py",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 0,
+    "stdout": "valid",
+    "stderr": ""
+   },
+   "negative": {
+    "command": [
+     "<python>",
+     "-I",
+     "<ark0-rescue>/python/tools/verify_cli.py",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 1,
+    "stdout": "invalid",
+    "stderr": ""
+   }
+  },
+  "go": {
+   "prove_id": "8d88db9c38df6e7fb14959fe59071285531f63216773fdf8469e17d817655b61",
+   "rescue_commit": "71b34baec9f3655733175881a4358284ffa18fe2",
+   "positive": {
+    "command": [
+     "go",
+     "-C",
+     "go",
+     "run",
+     "./cmd/voleith-verify",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 0,
+    "stdout": "valid"
+   },
+   "negative": {
+    "command": [
+     "go",
+     "-C",
+     "go",
+     "run",
+     "./cmd/voleith-verify",
+     "--k",
+     "ark0-wallet v1 schnorr",
+     "--suffix",
+     "0",
+     "--y-hex",
+     "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+     "--msg-hex",
+     "2174cae36b0f4c1c66196047fb0282fe07a86c79c842504a1c9152501d161d02afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+     "--proof",
+     "<r3-proof.bin>"
+    ],
+    "exit": 1,
+    "stdout": "invalid"
+   }
+  }
+ },
+ "scan": {
+  "best": {
+   "height": 37167,
+   "hash": "000000bdd6276e33400c8ef25446e3f5f55be8ff88d69a2098db3a21d75fe17d"
+  },
+  "started": "2026-10-30T15:18:34Z",
+  "finished": "2026-10-30T15:20:18Z",
+  "outputs": [
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 0,
+    "sats": 100000,
+    "scriptPubKey": "52203feeddd6b03d4b8af084fb96248a6f15799dc8665b45e3b3177687c24dc3bfc0",
+    "height": 30068
+   },
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 1,
+    "sats": 100000,
+    "scriptPubKey": "52203feeddd6b03d4b8af084fb96248a6f15799dc8665b45e3b3177687c24dc3bfc0",
+    "height": 30068
+   }
+  ]
+ },
+ "residual_risk": "From now until the rescue on chain (after height 51000), the two drill outputs stay safe only while elliptic curve checks in leaves of version 0xe0 stay disabled, that is, while the block producer signs no branch that leaves out the tripwire spend.",
+ "passed": true,
+ "recorded": "2026-10-30T15:20:23Z"
+}

@@ -703,7 +703,15 @@ cannot be rescued.
   with two leaves of version `0xe0`, `<R> OP_CHECKSIG` and `OP_RETURN`,
   created for it at height 30068
   (`12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0` and
-  `:1`). After height 51000 it will rescue both in one transaction.
+  `:1`). The tripwire drill in block 36897 froze them. On 2026-10-30 the
+  operator proved off the chain, for a public message, that it knows the
+  seed of `R`; `rescue-drill/README.md` has the proof, the operator's record
+  of it and how to check it. The proof's statement includes `y`, the secret
+  key of `R`, so `y` is now public: until the rescue, the two outputs are
+  safe only while the elliptic curve checks in their leaves stay disabled,
+  that is, while the block producer signs no branch that leaves out the
+  tripwire spend. After height 51000 the operator will rescue both in one
+  transaction, with a new proof.
 - **What a node logs and reports.** A node built with `patches-m4r/` logs
   this line when it starts:
 
