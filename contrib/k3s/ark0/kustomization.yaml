@@ -83,7 +83,7 @@ namespace: ark0
 # patches-m3/, whose rule applies from height 30000; the producer kept its
 # image. On 2026-10-19 the two node tags moved to one build that also carries
 # patches-m4/, whose rule applies from height 32000; the producer kept its
-# image again. On [ROLL DATE] the two node tags moved to one build that also
+# image again. On 2026-10-30 the two node tags moved to one build that also
 # carries patches-m4r/, whose rule applies from height 63000; the producer
 # kept its image. All seven rolls are recorded at the end of
 # ../ARK0-MIGRATION.md, with the tags they moved off.

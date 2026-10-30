@@ -16,7 +16,7 @@ whose elliptic curve signature checks stop working once one of two
 designated outputs is spent; see "Rule change at height 30000 (M3)". Since
 2026-10-19 they also carry the M4-S series in `patches-m4/`, which from
 height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
-change at height 32000 (M4-S)". Since [ROLL DATE] they also carry the M4-R
+change at height 32000 (M4-S)". Since 2026-10-30 they also carry the M4-R
 series in `patches-m4r/`, which from height 63000 opens a rescue lane in P2MR
 leaves of version `0xe0`, a hard fork; see "Rule change at height 63000
 (M4-R)".
@@ -609,11 +609,11 @@ lane gives such a leaf one: in place of the signature, the spender proves in
 zero knowledge that they know the seed the key was derived from. The nodes
 built with `patches-m4r/` enforce it, the operator's among them, and
 `doc/p2mr-rescue.md` in the patched tree specifies it. The height was
-announced on [ROLL DATE], with the release of the build, about four weeks
-ahead. At about 890 blocks a day, the rate of recent weeks, the chain reaches
-height 63000 around 2026-11-28 14:00 UTC. It cannot do so before 2026-11-26
-04:00 UTC, even if blocks came every 90 seconds, the producer's configured
-pause.
+announced on 2026-10-30, with the release of the build, about four weeks
+ahead. Counted from height 36980, at 10:17 UTC that day, at about 890 blocks
+a day, the rate of the two weeks before, the chain reaches height 63000
+around 2026-11-28 16:00 UTC. It cannot do so before 2026-11-26 12:00 UTC,
+even if blocks came every 90 seconds, the producer's configured pause.
 
 From height 63000, in an executed P2MR leaf of version `0xe0` at depth one or
 more, an `OP_CHECKSIG`, `OP_CHECKSIGVERIFY` or `OP_CHECKSIGADD` with a 32-byte
@@ -689,12 +689,12 @@ cannot be rescued.
   this for a test network; it is no basis for using the lane anywhere else.
 - **Wallets.** Bitcoin Core's wallet does not make rescue spends. The proofs
   are made off the node, with the prover of ark0-rescue, and only with seeds
-  used on this signet alone. A wallet has to rescue all frozen outputs of a key
-  in one transaction (more than three need one that the block producer
-  includes directly), first move every output the same key can spend another
-  way, never reuse the key, its secret key or the seed on another network or
-  protocol, and pay nothing more to the key (`doc/p2mr-rescue.md`, "Wallets
-  and operators").
+  used on this signet alone. A wallet has four duties (`doc/p2mr-rescue.md`,
+  "Wallets and operators"). Before the rescue, it moves every output the
+  same key can spend another way. It rescues all frozen outputs of a key in
+  one transaction; more than three need a transaction that the block
+  producer includes directly. It never reuses the key, its secret key or the
+  seed on another network or protocol. And it pays nothing more to the key.
 - **The rescue drill.** The operator holds two outputs of 100,000 sats, each
   with two leaves of version `0xe0`, `<R> OP_CHECKSIG` and `OP_RETURN`,
   created for it at height 30068

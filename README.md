@@ -21,8 +21,9 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     signet only if it sets `-signetpqblock`. See "Experimental M2 series" below.
   - The M3 series in `patches-m3/` adds a P2MR leaf version, `0xe0`, whose elliptic curve signature
     checks stop working once one of a few designated outputs is spent. On Ark-0 this applies from
-    height 30000, and the operator holds the key of one of its two such outputs and will spend it in
-    an announced drill. Another custom signet gets it only if it sets `-signettripwire`. See
+    height 30000, and the operator holds the key of one of its two such outputs and spent it in a
+    drill on 2026-10-30, at the announced time. Another custom signet gets it only if it sets
+    `-signettripwire`. See
     "Experimental M3 series" below.
   - The M4-S series in `patches-m4/` adds an SLH-DSA-SHA2-128s signature check in
     P2MR leaves, `OP_CHECKSLHDSA128S`. On Ark-0 it applies from height 32000, with a validation
@@ -223,7 +224,7 @@ checked against each other on a live chain; a divergence would have been the fin
 both also carried `patches-spacing/`, described below; from 2026-09-25 both ran one build of all four
 sets, `patches-m1/` included, from 2026-09-30 one of all five, `patches-m2/` included, from 2026-10-12
 one of all six, `patches-m3/` included, from 2026-10-19 one of all seven, `patches-m4/` included, and
-since [ROLL DATE] they run one of all eight, `patches-m4r/` included. A job every six hours funds a P2MR address from one node and spends it back from the other
+since 2026-10-30 they run one of all eight, `patches-m4r/` included. A job every six hours funds a P2MR address from one node and spends it back from the other
 through the PSBT flow, asserting the witness dimensions each time. `contrib/k3s/ARK0-MIGRATION.md`
 records the 2026-09-25 roll, the build it came from, and the first round trip it produced.
 
@@ -571,7 +572,7 @@ machine too, over the 26 cells in five rounds: the largest ratio there is 0.710 
 of what regtest leaves out). On the third machine it passed over the 26 cells in two rounds, with the
 largest ratio 0.727 (0.729 with that estimate).
 
-Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes ran from 2026-10-19 to [ROLL DATE], which
+Verified in the k3s cluster (`contrib/k3s`) on the build the Ark-0 nodes ran from 2026-10-19 to 2026-10-30, which
 `contrib/k3s/ARK0-MIGRATION.md` records: `test_bitcoin` passed 781 of 787 test cases and one more
 with a warning, and skipped 5; the P2MR and signet functional scripts and `p2p_segwit.py`, 12 in all,
 passed, `feature_p2mr_slhdsa128s.py` among them; and the default functional suite, with the extended
@@ -641,8 +642,8 @@ Regtest has the lane from the final tripwire height, and another custom signet f
 
 The proof system is that of [ark0-rescue](https://github.com/duncan0k/ark0-rescue) `SPEC.md` v0.2 (version
 byte `0x02`, statement `0x01`; revision 3 changes only the wording of revision 2), whose Rust crate the
-series vendors, unmodified, from commit `3c90cd4` (the reviewed crate, the republished `f5a2bc0` with the
-same tree) with its dependencies in `src/rescue/`, and builds into a static library with Rust 1.97.0:
+series vendors, unmodified, from commit `3c90cd4` (the reviewed crate, republished from `f5a2bc0` with
+the same tree) with its dependencies in `src/rescue/`, and builds into a static library with Rust 1.97.0:
 building the node now needs `cargo` and `rustc` 1.97.0. Its security rests on an argument in the classical
 random oracle model; it has had no external review. It is an experiment of the Ark-0 test signet; it is not
 part of BIP-360 or BIP-361, and it is not proposed for Bitcoin. `doc/p2mr-rescue.md`, added by the series,
@@ -650,7 +651,7 @@ is its specification.
 
 | # | Commit | Content |
 |---|---|---|
-| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `3c90cd4`, the reviewed crate, in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`, and on aarch64 also `cpufeatures` and `libc`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
+| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `3c90cd4`, the reviewed crate, in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`, and on aarch64 also `cpufeatures` and `libc`; the 40 packages that no build compiles kept as their manifests only), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (as with upstream's static kernel, a program links it with a C++ compiler driver); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
 | 80 | script: add the P2MR rescue lane to leaf version 0xe0 | `SCRIPT_VERIFY_P2MR_NO_RESCUE`, a restricting flag in neither static set; rules R1 to R8 before the tripwire rule; the token and annex; `SignatureHashP2MRRescue`; R5 with libsecp256k1; R7 through `voleith_verify_s1` with a 96-byte message; `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, 100,000, provisional here and set by 90; four new script errors; cache entries under a fifth salted hasher, padded with `R` |
 | 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset here (never), set to 63000 by 94; `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
 | 82 | policy: relay rescue spends only in template R1, once the lane is open and the checks are disabled | the mempool's flags open the lane only at the tip itself; no rescue spend while elliptic curve checks still work for the next block; template R1 standard, its token exempt from the 80-byte limit; removal below the height; the P2P gate for peers without `noban`, before the orphan pool, with txid and wtxid answered |
@@ -662,7 +663,7 @@ is its specification.
 | 88 | doc: describe the P2MR rescue lane | `doc/p2mr-rescue.md` |
 | 89 | test: rename the context constant of slhdsa128s_tests, a type in windows.h | `CONTEXT` of `src/test/slhdsa128s_tests.cpp` (from `patches-m4/`) becomes `TEST_CONTEXT`, which a MinGW build of `test_bitcoin` needs: `windows.h` defines a type `CONTEXT` |
 | 90 | consensus: set the validation weight of a rescue check to 130,000 | `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK` = 130,000, from the two gates of `contrib/m4r-measure` (at 100,000 the single-check gate asked for 96,579 to 106,234 and the whole-block gate failed by a hair), within the bound of 130,333; the `two_checks` vector and the R4 case with more padding; `doc/p2mr-rescue.md` |
-| 91 | build: relink an Apple shared kernel after the verifier changes, and no test tools in a cross build | the Rust archive a `LINK_DEPENDS` of a shared kernel on Apple platforms, which links it by `-hidden-l`; the Rust test tools only in a native build, a cross build's functional tests taking a native `voleith-prove` through `VOLEITH_PROVE` |
+| 91 | build: relink an Apple shared kernel after the verifier changes, and no test tools in a cross build | on Apple platforms, the shared kernel, which links the Rust archive with `-hidden-l`, lists it in `LINK_DEPENDS`; the Rust test tools only in a native build, a cross build's functional tests taking a native `voleith-prove` through `VOLEITH_PROVE` |
 | 92 | test: copy the rescue record before appending it to its own annex | `vector::insert` with iterators into the vector itself, which the standard does not allow |
 | 93 | doc: the rescue lane's accepted risks, wallet duties and provenance after review | `doc/p2mr-rescue.md`: the accepted risks, what wallets and operators must do, why `network_id` is untagged, R3 as the one-check limit, the weight's measurements at 130,000 on two machines; `src/rescue/README.md`: the republished ark0-rescue commit `3c90cd4` (the tree of `f5a2bc0`) and `SPEC.md` v0.2 revision 3; the test framework's message names `VOLEITH_PROVE` |
 | 94 | consensus: open the P2MR rescue lane on Ark-0 at height 63000 | `ARK0_RESCUE_HEIGHT` = 63000, fixed in the code, about four weeks after the release; the test of the fixed height (the flags of heights 62999 and 63000 differ by exactly `SCRIPT_VERIFY_P2MR_NO_RESCUE`); `doc/p2mr-rescue.md`: Ark-0 from block 63000, what an operator of a node without the lane must know, and the single-check gate's paused and continuous figures |

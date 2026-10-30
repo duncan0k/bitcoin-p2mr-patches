@@ -17,7 +17,7 @@ Before you start:
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest one, milestone
   M4-R, applies from height 63000 ("Rule change at height 63000 (M4-R)" in `NETWORK.md`), expected
-  around 2026-11-28 14:00 UTC and not before 2026-11-26 04:00 UTC. From there nodes accept, in P2MR
+  around 2026-11-28 16:00 UTC and not before 2026-11-26 12:00 UTC. From there nodes accept, in P2MR
   leaves of version `0xe0`, a zero-knowledge proof that the spender knows the seed behind a key in
   place of an elliptic curve signature. **It is a hard fork:** a node built with `patches-m3/` but
   without `patches-m4r/` stops following the chain at the first block that uses it, so upgrade
@@ -25,7 +25,7 @@ Before you start:
   height 32000 (M4-S)"). From there nodes check `OP_CHECKSLHDSA128S`, an SLH-DSA signature check in
   P2MR leaves. M3 applies from height 30000 ("Rule change at height 30000 (M3)"). From there nodes
   run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once one of
-  two designated outputs is spent; the operator will spend one of them in an announced drill. M2 and
+  two designated outputs is spent; the operator spent one of them in a drill on 2026-10-30. M2 and
   M1 have applied since heights 20000 and 8600. Those four are soft forks: a node built without
   `patches-m4/` keeps following the chain (an M3 build only up to the first rescue spend of M4-R)
   but does not check the SLH-DSA signatures or relay the spends that use them, a node without
@@ -38,7 +38,7 @@ Before you start:
 
 A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
 the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). Since [ROLL DATE] the operator's nodes have
+seconds per block (see "Parameters" in `NETWORK.md`). Since 2026-10-30 the operator's nodes have
 run eight patch sets on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series
 in `patches-m05/` (section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in
 `patches-m1/`, the M2 series in `patches-m2/`, the M3 series in `patches-m3/`, the M4-S series in
@@ -346,9 +346,10 @@ do first.
   once with `-reindex-chainstate` so that it checks them (`-reindex` on a pruned node).
 - **`debug.log` has no `Signet P2MR rescue lane` line, or `getdeploymentinfo` does not list
   `p2mr_rescue`:** the node was built without `patches-m4r/`, or still runs the binary from before.
-  Rebuild it (section 1) and restart it before height 63000: from there it stops following the chain
-  at the first block with a rescue spend. An M4-S node needs no reindex for this; an M3 node needs
-  the one of the previous item.
+  Rebuild it (section 1) and restart it before height 63000: from there a node built with
+  `patches-m3/` but without `patches-m4r/` stops following the chain at the first block with a
+  rescue spend. An M4-S node needs no reindex for this; an M3 node also needs one start with
+  `-reindex-chainstate`, as in the previous item.
 - **Stuck at height 62999 or above, with the next block marked invalid:** the node ran without
   `patches-m4r/` when that block came and refused its rescue spend. Rebuild it (section 1), restart
   it, and let it continue with `./build/bin/bitcoin-cli reconsiderblock <hash of that block>`; the
