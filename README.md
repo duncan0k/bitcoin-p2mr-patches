@@ -545,8 +545,8 @@ runs ask for 2,922 to 2,960 with the `sse4_avx2` setting and 2,741 to 3,219 with
 | 77 | doc: describe OP_CHECKSLHDSA128S | `doc/p2mr-slhdsa128s.md` |
 | 78 | crypto: clear the upper vector state at the end of the AVX2 8-way SHA-256 | `_mm256_zeroupper()` at the end of `sha256d64_avx2::Transform_8way`, which returned through a tail call without it; the output is unchanged |
 
-It is a soft fork. A node built without `patches-m4/` accepts every block an M4-S node accepts (an M3
-build only up to the first rescue spend of M4-R, below); to it, `0xf1` stays `OP_SUCCESS241`. Bitcoin Core's wallet does not create or sign these leaves.
+It is a soft fork. A node built without `patches-m4/` accepts every block an M4-S node accepts and
+keeps following Ark-0 (an M3 build only up to the first rescue spend of M4-R, below); to it, `0xf1` stays `OP_SUCCESS241`. Bitcoin Core's wallet does not create or sign these leaves.
 
 Verified on 2026-10-19 on the first machine, from a fresh checkout of v31.1 with all 78 patches
 applied as their `SHA256SUMS` files name them: the release build had no compiler warnings, and
@@ -650,7 +650,7 @@ is its specification.
 
 | # | Commit | Content |
 |---|---|---|
-| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `3c90cd4`, the reviewed crate, in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
+| 79 | rescue: vendor the ark0-rescue verifier and build it as a static library | the crate `voleith` at ark0-rescue `3c90cd4`, the reviewed crate, in `src/rescue/voleith/`, its dependencies in `src/rescue/vendor/` (the library compiles only `keccak` and `zeroize`, and on aarch64 also `cpufeatures` and `libc`; the 40 packages no build compiles reduced to their manifests), a README of every file's SHA-256 and the licences; built with `cargo build --release --offline --locked --frozen --no-default-features --lib`, Rust 1.97.0, every local path remapped, `panic = "unwind"`; linked into `bitcoin_consensus` and `bitcoinkernel`, whose shared form exports none of its symbols, while a static kernel installs the archive as `libbitcoinkernel_voleith`, which `Libs.private` lists with the system libraries it needs (a program links the static kernel with a C++ compiler driver, as upstream's); no `-lgcc_s` or `-lutil`; the crate's prover tools for the functional tests only |
 | 80 | script: add the P2MR rescue lane to leaf version 0xe0 | `SCRIPT_VERIFY_P2MR_NO_RESCUE`, a restricting flag in neither static set; rules R1 to R8 before the tripwire rule; the token and annex; `SignatureHashP2MRRescue`; R5 with libsecp256k1; R7 through `voleith_verify_s1` with a 96-byte message; `VALIDATION_WEIGHT_PER_P2MR_RESCUE_CHECK`, 100,000, provisional here and set by 90; four new script errors; cache entries under a fifth salted hasher, padded with `R` |
 | 81 | consensus: deploy the P2MR rescue lane, closed on Ark-0 until its height is decided | buried deployment `p2mr_rescue`; `ARK0_RESCUE_HEIGHT` unset here (never), set to 63000 by 94; `-signetrescue`; regtest following the final tripwire height, an explicit height below it refused; the network id, SHA256 of the challenge or of `regtest`; the startup log |
 | 82 | policy: relay rescue spends only in template R1, once the lane is open and the checks are disabled | the mempool's flags open the lane only at the tip itself; no rescue spend while elliptic curve checks still work for the next block; template R1 standard, its token exempt from the 80-byte limit; removal below the height; the P2P gate for peers without `noban`, before the orphan pool, with txid and wtxid answered |
@@ -703,7 +703,7 @@ Review status: Codex (gpt-6.1-sol at maximum effort) reviewed the design in seve
 all, before it was frozen, and the series in nine more rounds; the later patches were reviewed as well.
 gpt-6-astra (extra-high effort) then gated the series in two parts, the verifier with its build and the
 static kernel, and the rule with its activation, policy and tests, and passed both, the first in its
-second round. The reviews found that the log of rescue spends, which compared every 32-byte push of a
+second round. The reviews found that the log of rescue spends compared every 32-byte push of a
 script with the token by an elliptic curve operation that no validation weight paid for: a block built
 for it took about 17.5 minutes to connect. The log now looks only at template R1 and makes no curve
 operation. They also found
@@ -751,7 +751,7 @@ release build and a second build from a fresh clone, with an empty compiler cach
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
-(snapshot.ubuntu.com serves past ones); its Rust 1.97.0 is the official release, each component checked
+(snapshot.ubuntu.com serves past ones); its Rust 1.97.0 comes from static.rust-lang.org, each component checked
 against the hash in the channel manifest that the Rust release key signs. And the build path,
 `/work/src`, is part of the binaries, so a rebuild elsewhere has to use it too.
 
