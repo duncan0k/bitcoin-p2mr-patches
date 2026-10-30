@@ -69,10 +69,10 @@ chain with a node of your own.
   30000 the nodes built with `patches-m3/` also run P2MR leaves of an
   experimental leaf version, `0xe0`, and refuse elliptic curve signatures in
   them from the block after one of two designated outputs is spent. The
-  operator holds the key of one of these outputs and will spend it at an
-  announced time, as a drill. Leaves of version `0xc0`, and outputs without
-  leaves of version `0xe0`, are unchanged. See "Rule change at height 30000
-  (M3)" below.
+  operator holds the key of one of these outputs and spent it on
+  2026-10-30, at the announced time, as a drill. Leaves of version `0xc0`,
+  and outputs without leaves of version `0xe0`, are unchanged. See "Rule
+  change at height 30000 (M3)" below.
 - **A third exception from height 32000 (M4-S).** From that height the nodes
   built with `patches-m4/` also check a second post-quantum signature scheme,
   SLH-DSA-SHA2-128s, in outputs that opt into it. Outputs that do not opt in
@@ -303,9 +303,10 @@ here: a drill of disabling elliptic curve signature checks inside one P2MR
 leaf version, `0xe0`. From that height leaves of this version are executed,
 and their elliptic curve signature checks stop working from the block after
 one of two designated outputs, the tripwire outputs, is spent. The operator
-holds the key of one of them and will spend it in an announced drill. The
-nodes built with `patches-m3/` enforce the rule, the operator's among them,
-and `doc/p2mr-tripwire.md` in the patched tree specifies it.
+holds the key of one of them and spent it in a drill on 2026-10-30, at the
+announced time. The nodes built with `patches-m3/` enforce the rule, the
+operator's among them, and `doc/p2mr-tripwire.md` in the patched tree
+specifies it.
 
 The two tripwire outputs were created at height 15748. Each is a P2MR output
 of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
@@ -342,12 +343,12 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
   Empty signatures, `OP_CHECKMLDSA44`, leaves of version `0xc0`, P2TR,
   witness v0 and legacy scripts are not affected, and neither are M2's block
   signature and the proof-of-work rules.
-- **The drill.** The operator will spend the drill output at 2026-10-30
-  08:00 UTC; any change of that time would be announced here at least two
-  weeks ahead. From the next block on, the checks fail on this chain for
-  as long as no reorganization undoes that block. Nodes with the rule then
-  remove from their mempools the spends that now fail, with their
-  descendants. Nobody can spend the NUMS output.
+- **The drill.** The operator spent the drill output on 2026-10-30, as
+  announced for 08:00 UTC, in block 36897 (see "What the chain shows"
+  below). From block 36898 on, the checks fail on this chain for as long as
+  no reorganization undoes block 36897. Nodes with the rule remove from
+  their mempools the spends that fail from then on, with their descendants.
+  Nobody can spend the NUMS output.
 - **What it shows is narrow.** A node with the rule refuses, at the block
   level, any elliptic curve signature in a leaf of version `0xe0` from the
   block after the one that spends a tripwire output, or from height 30000 if
@@ -412,6 +413,99 @@ of two leaves of version `0xc0` at depth one, `<P> OP_CHECKSIG` and
 - **The height and the outputs are rules of this network and will not
   change.** The series is in `patches-m3/` (`README.md`, "Experimental M3
   series").
+
+### What the chain shows
+
+The drill took place on 2026-10-30, as announced for 08:00 UTC: the
+operator sent the spend of the drill output at 08:02:52, and block 36897
+confirmed it.
+
+| Height | Block | What happened |
+|---|---|---|
+| 36897 | `000001e1b8fa2d090999db861599132b86f465c47331f9ae64ad162e25478114` | Transaction `2885e18bf4e99bd37b35b106edf2ef9ac499ad26c520a45d6a94cd2708b389c9` spends the drill output; header time 08:03:39 UTC. The block is `evidence/m3_block_36897.hex`. |
+| 36900 | `0000008a4bf4e555e39f991540e1d581d100f1c5d0e5f180c44abd88654c5c5b` | A block the operator built to be refused, with an elliptic curve signature in a leaf of version `0xe0`. It is not in the chain. It is `evidence/m3_badblock_36900.hex`. |
+| 36901 | `000001f6da9f32e8fdba25bd46aed30f3d488635a44ad5cbc4550d0fc18f835f` | Transaction `38038977cb3d4c0f89d6e6c3a596b4a528b6c2e24b3d7b9cf579dabe33fc38ed` spends an output of a mixed address through its ML-DSA-44 leaf (below); header time 08:10:03 UTC. |
+
+Each of the four nodes the operator runs logged the spend at 08:03:41 UTC,
+when block 36897 joined its active chain:
+
+```
+P2MR tripwire 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 spent by 2885e18bf4e99bd37b35b106edf2ef9ac499ad26c520a45d6a94cd2708b389c9 in block 000001e1b8fa2d090999db861599132b86f465c47331f9ae64ad162e25478114 (height 36897): elliptic curve checks in leaf version 0xe0 are disabled from height 36898
+```
+
+Since then `bitcoin-cli gettripwireinfo` on each of them reports the drill
+output `missing`, the NUMS output `unspent` and `ec_disabled_next_block`
+`true`.
+
+After the drill block the operator tried both leaves on an output of its
+own: vout 3 of
+`0e4fe95eb985a7f8d1ccd61f584fce36fa7a73920db03fe4143ad7cf0bd8c5f6`, an
+output of a mixed address it funded on 2026-10-22 (see "The mixed address"
+above).
+
+- **In the mempool.** `testmempoolaccept` on each of the four nodes refused
+  a spend of it through the Schnorr leaf,
+  `95eb88e25c25ede01c6d4c0d87c875afe356b673857179df7db1c671d5e53020`, with
+  `mempool-script-verify-flag-failed (Elliptic curve signature checks are
+  disabled in this leaf)`.
+- **In a block.** The operator built block 36900 on block 36899,
+  `0000011b2608f136fa7faf18b6f079bbdf2b3c98d8d8ed22770aeb6f2784bb27`, the
+  way the block producer builds every block, with proof of work, the
+  signet solution and the ML-DSA-44 block signature, and added that spend
+  to it. The operator submitted it to node A first. The other three
+  received it over the network, as a compact block, and checked it when it
+  arrived, before the operator submitted it to them as well. Each logged,
+  at 08:07:34 or 08:07:35 UTC:
+
+  ```
+  [error] ConnectTip: ConnectBlock 0000008a4bf4e555e39f991540e1d581d100f1c5d0e5f180c44abd88654c5c5b failed, block-script-verify-flag-failed (Elliptic curve signature checks are disabled in this leaf), input 0 of 95eb88e25c25ede01c6d4c0d87c875afe356b673857179df7db1c671d5e53020 (wtxid fa9afe21c983edef8110f9cca67b1b3fc408a139292848f4f2612bf5cd8a997d), spending 0e4fe95eb985a7f8d1ccd61f584fce36fa7a73920db03fe4143ad7cf0bd8c5f6:3
+  ```
+
+  Each holds the block only as an `invalid` chain tip, and each kept its
+  chain. Block 36900 in the chain is an ordinary block from the producer,
+  `000000e5ce261022cdd714095e50981a38ea5fbfd1df02ba59a9552346aea975`.
+- **Through the ML-DSA-44 leaf.** Each of the four allowed a spend of the
+  same output through the mixed address's ML-DSA-44 leaf, and block 36901
+  holds it.
+
+The refused block is there for the record, not to be replayed: the chain
+has moved past height 36900, and a node given the block now does not run
+its scripts, as the block is not on its best chain.
+
+**The witness transaction.** On 2026-10-22 the operator signed a spend of
+vout 2 of the same transaction through the Schnorr leaf, and
+`testmempoolaccept` on each of the four nodes allowed it then; it was never
+broadcast. Since the drill each refuses it, with the reason above. It is
+`evidence/m3_witness_tx.hex`, transaction
+`9f954b1a61011562dab57bbec62acdcb107046e7089609b7ee2ed211e704bf33`, and the
+output it spends stays unspent until at least 2026-11-30, so a node with
+the rule can judge it for itself:
+
+```bash
+bitcoin-cli testmempoolaccept "[\"$(cat evidence/m3_witness_tx.hex)\"]"
+```
+
+The answer has `"allowed": false` and the reason above.
+
+**How many such leaves were spent.** Until an output is spent through one of
+its leaves, nothing on the chain tells a mixed address from any other P2MR
+output, so only spends can be counted. From height 30000 to the drill
+block, 367 outputs were spent through a leaf of version `0xe0`, each by a
+transaction of its own: 366 through a leaf `<x-only key> OP_CHECKSIG` and 1
+through an ML-DSA-44 leaf. Two of them, at heights 30061 and 30063, were
+the operator's demonstration of the two leaves. From block 36898 to 36928,
+two outputs were spent through a leaf of version `0xe0`, both through an
+ML-DSA-44 leaf, one of them the operator's (in 36901). The 367 spends came
+from 361 distinct scriptPubKeys, that is, 361 addresses. When block 36897
+was made, these addresses held 6 unspent outputs; at height 36928, 4 of
+those 6 remain unspent, the output the witness transaction spends included.
+Outputs at mixed addresses that were never spent from are not counted.
+
+**Witnesses.** Reports from people who watched the drill with nodes of
+their own are not counted yet. At 08:56 UTC on 2026-10-30, after the drill,
+the public node had three peers: the operator's other three nodes,
+connected since 2026-10-21 and 2026-10-27. The node does not log inbound
+connections, so a node that connected and left before then does not show.
 
 ## Rule change at height 32000 (M4-S)
 
@@ -790,6 +884,6 @@ chain instead, see `JOIN.md`.
 | `release-signing-key.asc` | the public key that signs the `SHA256SUMS` of the prebuilt node's releases |
 | `snapshot/ark0-blocks-1264.dat` | the chain, heights 0 to 1264 |
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
-| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, block 20000, and the five blocks refused under M2 |
+| `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, block 20000, the five blocks refused under M2, and M3's drill block, the block refused after it and the witness transaction |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
 | `SHA256SUMS` | checksums for everything above |
