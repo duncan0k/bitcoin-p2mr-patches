@@ -3495,3 +3495,26 @@ Below height 51000 the roll is fully reversible: stop the producer, set the two 
 build of the section before it, apply the maintenance overlay, and start the producer. The external
 nodes get their `*.m4r63` or `*.m4s` binaries back. From 51000 on, a node rolled back to either build
 stops following the chain at the first block with a rescue spend, so that is not a way back.
+
+## 2026-11-02: a second public node
+
+The network has a second public node, `node2.ark0.si` (`ark0/JOIN.md`). It runs the release package
+`ark0-node-m4r` as published, follows the chain and serves peers on port 38433; it holds no wallet and
+produces no blocks. It synced from the first public node on 2026-11-01, and its name has resolved since
+2026-11-02.
+
+Both cluster nodes and the relay now keep a connection to it as well as to the first public node, so
+that each public node gets every block straight from the cluster while the other is down:
+
+- `ark0/10-configmap.yaml` gained `addnode=node2.ark0.si:38433` for both nodes. Rendered with
+  `render-config.sh --from-live`, the diff against the live ConfigMap was those two lines and the
+  comments in the two configurations that speak of the public node; it was applied at 16:04:28 UTC, and the nodes read it at their next start.
+- The running nodes were not restarted. At 16:04:29 both were given the same peer with
+  `addnode node2.ark0.si:38433 add`; the relay was given it at 16:05:05, and its configuration also
+  gained `connect=node2.ark0.si:38433` for its next start.
+- A minute later the new node had the two cluster nodes and the relay as inbound peers, besides its own
+  connection to the first public node, all four at the same height.
+
+Nothing about the blocks changed. To undo it, remove the two lines, render and apply as above, take the
+`connect=node2.ark0.si:38433` line out of the relay's configuration, and run
+`addnode node2.ark0.si:38433 remove` on the two cluster nodes and the relay.

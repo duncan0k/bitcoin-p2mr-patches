@@ -26,9 +26,9 @@ rules actually hold on a running chain?* The material in this directory lets
 anyone rebuild the node, replay the chain offline and re-derive every claim
 below without contacting the network, apart from what happened after height
 1264, where the snapshot ends: the retarget at 8064 and the rule changes from
-8600 on need a node that follows the live chain. Since 2026-09-24 the network
-has one public node, and [`JOIN.md`](JOIN.md) describes how to follow the live
-chain with a node of your own.
+8600 on need a node that follows the live chain. The network has had a
+public node since 2026-09-24 and a second one since 2026-11-01, and [`JOIN.md`](JOIN.md)
+describes how to follow the live chain with a node of your own.
 
 ## What it is
 
@@ -48,7 +48,7 @@ chain with a node of your own.
 - **Not an open network in the usual sense.** Anyone can run a node and follow
   it (`JOIN.md`), but every block is produced by one party, the operator, who
   holds the key of the 1-of-1 challenge and the ML-DSA-44 block key that M2
-  requires from height 20000. There is one public node, and a block explorer,
+  requires from height 20000. There are two public nodes, and a block explorer,
   a faucet and a web wallet, all run by the operator. It is a test network for
   trying things out, and it may be reset at any time.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
@@ -889,7 +889,7 @@ chain instead, see `JOIN.md`.
 |---|---|
 | `NETWORK.md` | this file |
 | `REPRODUCE.md` | step-by-step reproduction, with the output each step produced |
-| `JOIN.md` | how to get a node, prebuilt or built, connect it to the public node and follow the live chain |
+| `JOIN.md` | how to get a node, prebuilt or built, connect it to the public nodes and follow the live chain |
 | `WEB-WALLET.md` | how the operator's web wallet makes its keys and addresses from a seed, and the limits of that derivation |
 | `web-wallet-vectors.json` | test vectors for the other keys and addresses in `WEB-WALLET.md`, and for the login |
 | `web-wallet-slh-vectors.json` | test vectors for the SLH-DSA-SHA2-128s key and the SLH1 address in `WEB-WALLET.md` |

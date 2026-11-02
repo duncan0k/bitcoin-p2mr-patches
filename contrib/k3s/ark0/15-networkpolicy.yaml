@@ -35,7 +35,7 @@
 # above, and would buy little while ingress is already closed: these pods
 # initiate P2P and RPC to each other, an HTTPS call to the API server, the
 # observation job's alert webhook and heartbeat over HTTPS, and, from both
-# nodes, a P2P connection to the network's public node (ark0/JOIN.md). If that
+# nodes, P2P connections to the network's public nodes (ark0/JOIN.md). If that
 # changes, egress is the next thing to close.
 #
 # Two things a NetworkPolicy does not cover, so that nobody reads more into it:

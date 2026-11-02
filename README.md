@@ -176,8 +176,9 @@ validation only after activation.
 parameters (`NETWORK.md`); the confirmed P2MR spend and the three rejected blocks as raw hex, with the
 node responses they produced (`evidence/`); a block file covering genesis to height 1264 that a fresh
 patched node replays with `-loadblock` (`snapshot/`); and the step-by-step `REPRODUCE.md`. Since
-2026-09-24 the network also has one public node: `ark0/JOIN.md` says how to get a node, connect it
-and follow the live chain. Every block is still produced by the operator alone. What the chain showed
+2026-09-24 the network has also had a public node, and since 2026-11-01 a second one: `ark0/JOIN.md` says
+how to get a node, connect it and follow the live chain. Every block is still produced by the operator
+alone. What the chain showed
 at the rule change at height 8600 (M1), with the block the nodes refused after it, at 8714, is in `NETWORK.md`
 and `evidence/`; checking it takes a node that follows the live chain.
 

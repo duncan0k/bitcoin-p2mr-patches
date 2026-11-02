@@ -1,7 +1,7 @@
 # Joining Ark-0
 
 Ark-0 is the experimental custom signet described in [`NETWORK.md`](NETWORK.md). It now has
-one public node, so instead of only replaying the snapshot offline you can run the patched
+two public nodes, so instead of only replaying the snapshot offline you can run the patched
 node yourself, connect it, and check the P2MR rules against your own copy of the live chain.
 
 Before you start:
@@ -175,15 +175,17 @@ listen=0
 signetchallenge=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae
 signetpowtargetspacing=90@8064
 addnode=node.ark0.si:38433
+addnode=node2.ark0.si:38433
 ```
 
 The first two settings under `[signet]` are rules of the network. With another challenge your
 node is on a different signet altogether; without the spacing option it stops following Ark-0
 at height 8064. Set both before the first start.
 
-`node.ark0.si` is a node run by the operator. It listens on port 38433, over IPv4
-only, and offers peer-to-peer connections and nothing else. Your node only needs its outgoing
-connection to it; `listen=0` keeps it from accepting incoming ones.
+`node.ark0.si` and `node2.ark0.si` are two nodes run by the operator. Each listens on port 38433,
+over IPv4 only, and offers peer-to-peer connections and nothing else. Your node only needs an
+outgoing connection to one of them; listing both keeps it following the chain while one is down,
+and `listen=0` keeps it from accepting incoming ones.
 
 Start the node and follow its progress:
 
@@ -224,7 +226,7 @@ The chain is small, so the first sync takes minutes rather than hours.
   and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network
   id of the startup line. A node that has not yet synced past height 15748, where both outputs
   were created, reports both as `missing`, and logs so at startup; that is expected.
-- `./build/bin/bitcoin-cli getpeerinfo` lists the public node, and once `getblockchaininfo`
+- `./build/bin/bitcoin-cli getpeerinfo` lists `node.ark0.si`, `node2.ark0.si` or both, and once `getblockchaininfo`
   shows `blocks` equal to `headers` and `initialblockdownload` false, your node has caught up.
 
 From there, the commands in sections 5 and 6 of [`REPRODUCE.md`](REPRODUCE.md) give the same
@@ -322,7 +324,7 @@ do first.
 - **Stuck at height 8063**, with the next block rejected for its difficulty: the node lacks
   `patches-spacing/` or the `signetpowtargetspacing=90@8064` option.
 - **No blocks at all:** check the challenge, then that the node can reach
-  `node.ark0.si` on port 38433.
+  `node.ark0.si` or `node2.ark0.si` on port 38433.
 - **`getdescriptorinfo` does not know `tmr`:** the node was built without `patches-m05/`, or still
   runs the binary from before; rebuild it and restart it as section 4 says.
 - **`getdeploymentinfo` does not list `p2mr_mldsa44`:** the node was built without `patches-m1/`,
