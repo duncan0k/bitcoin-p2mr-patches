@@ -19,7 +19,12 @@ height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
 change at height 32000 (M4-S)". Since 2026-10-30 they also carry the M4-R
 series in `patches-m4r/`, which from height 51000 opens a rescue lane in P2MR
 leaves of version `0xe0`, a hard fork; see "Rule change at height 51000
-(M4-R)".
+(M4-R)". On [ROLL DATE] they move to a build that also carries the M4-T
+series in `patches-m4t/` and the M4-B series in `patches-m4b/`, which from
+height 55000 run P2MR leaves of version `0xe2`, whose ML-DSA-44 signature
+checks stop working once one of three designated outputs is spent, and
+require an SLH-DSA signature on every block; see "Rule change at height
+55000 (M4-T and M4-B)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -47,8 +52,9 @@ describes how to follow the live chain with a node of your own.
   deployment never activates there and `getdeploymentinfo` does not list it.
 - **Not an open network in the usual sense.** Anyone can run a node and follow
   it (`JOIN.md`), but every block is produced by one party, the operator, who
-  holds the key of the 1-of-1 challenge and the ML-DSA-44 block key that M2
-  requires from height 20000. There are two public nodes, and a block explorer,
+  holds the key of the 1-of-1 challenge, the ML-DSA-44 block key that M2
+  requires from height 20000 and the SLH-DSA block key that M4-B requires
+  from height 55000. There are two public nodes, and a block explorer,
   a faucet and a web wallet, all run by the operator. It is a test network for
   trying things out, and it may be reset at any time.
 - **Not post-quantum.** Milestone M0 implements the P2MR *spending rules* only.
@@ -86,6 +92,15 @@ describes how to follow the live chain with a node of your own.
   its Schnorr keys; its proof system has had no external review; and it relaxes
   the rules: an M3 or M4-S node stops at the first block that uses it. See
   "Rule change at height 51000 (M4-R)" below.
+- **Not evidence that ML-DSA-44 is broken, or that it is not (M4-T and
+  M4-B).** From height 55000 the nodes built with `patches-m4t/` and
+  `patches-m4b/` also run P2MR leaves of an experimental leaf version,
+  `0xe2`, and refuse ML-DSA-44 signatures in them from the block after one of
+  three designated outputs is missing; the operator holds the key of one of
+  them, for a drill. From the same height they also require an
+  SLH-DSA-SHA2-128s signature by one fixed key on every block, next to M2's.
+  Outputs without leaves of version `0xe2` are unchanged. See "Rule change at
+  height 55000 (M4-T and M4-B)" below.
 
 ### What the evidence does not prove
 
@@ -736,15 +751,164 @@ cannot be rescued.
   for that case; rescues already in the chain stay valid. The series is in
   `patches-m4r/` (`README.md`, "Experimental M4-R series").
 
-## Lattice tripwires for a later rule (M4-T)
+## Rule change at height 55000 (M4-T and M4-B)
 
-The next rule planned for Ark-0, M4-T, is not released and no node enforces
-it. It adds P2MR leaves of version `0xe2`, whose ML-DSA-44 checks stop working
-from the block after any one of three designated outputs, the lattice
-tripwires, is spent. Their keys, scripts and addresses are fixed before the
-outputs are created: `lattice-tripwires/README.md` gives them, and how each
-key was made, and `lattice-tripwires/check.py` checks every value. Their
-outpoints and the activation height come with the M4-T build.
+From height 55000 Ark-0 has two more experimental rules, called milestones
+M4-T and M4-B here. They start at the same block, and both are soft forks.
+The nodes built with `patches-m4t/` and `patches-m4b/` enforce them, and
+`doc/p2mr-lattice-tripwire.md` and `doc/signet-slhblock.md` in the patched
+tree specify them. The height was announced on [RELEASE DATE], with the
+release of the build, at least seven days ahead. Counted from height [H] at
+[HH:MM] UTC that day, at about [N] blocks a day, the rate of the two weeks
+before, the chain reaches height 55000 around [DATE TIME] UTC. It cannot do
+so before [EARLIEST DATE TIME] UTC, even if blocks came every 90 seconds, the
+producer's configured pause. The operator's nodes and block producer stay on
+the M4-R build until the chain is past height 51000, where M4-R's rescue lane
+opens, and move to the new build on [ROLL DATE].
+
+### M4-T: leaf version `0xe2` and the lattice tripwires
+
+From height 55000, a P2MR leaf of version `0xe2` at depth one or more (its
+control block starts with `0xe3`) is executed as a leaf of version `0xc0` is,
+`OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S` included, with two differences:
+
+- its elliptic curve signature checks follow the tripwire of leaf version
+  `0xe0` ("Rule change at height 30000 (M3)"). Since the drill in block 36897
+  they fail, for as long as no reorganization undoes that block. M4-R's
+  rescue lane applies to them as in leaves of version `0xe0`: a rescue token
+  in place of the signature is checked as a rescue, and such a spend is valid
+  in a block but not relayed, since template R1 is of version `0xe0` only;
+- its `OP_CHECKMLDSA44` checks with a non-empty signature fail in every block
+  whose parent leaves any one of three designated outputs, the lattice
+  tripwires, missing from the UTXO set: spent, never created, or created at
+  or above height 55000. So a spend takes effect from the next block, and
+  only a reorganization that undoes the spend brings the output back. The
+  mempool and a block refuse such a check with the reason
+  `ML-DSA-44 signature checks are disabled in this leaf`.
+
+Its `OP_CHECKSLHDSA128S` checks keep working, whatever happens to the
+tripwires. Leaves of version `0xc0` and `0xe0`, P2TR, witness v0 and legacy
+scripts are not affected. The three outputs were created at height 39971, by
+`aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c`, 10,000
+sats each, and the build fixes them:
+
+| Output | Outpoint | Key | Label |
+|---|---|---|---|
+| L1 | `aac5a1fe…eba8827c:0` | a NUMS ML-DSA-44 key: nobody knows a private key | `NUMS ML-DSA-44` |
+| L2 | `aac5a1fe…eba8827c:1` | a key made once in a one-time pod, its private key not kept (the operator's statement; it cannot be proved) | `destroyed key` |
+| L3 | `aac5a1fe…eba8827c:2` | the drill key, which the operator holds | `drill key` |
+
+Each is a P2MR output of two leaves of version `0xc0` at depth one: S1 of its
+key (see "Rule change at height 8600 (M1)") and `OP_RETURN`.
+`lattice-tripwires/README.md` gives their keys, scripts and addresses, how
+each key was made, and what a spend of each would most likely mean;
+`lattice-tripwires/check.py` checks every value with Python's standard
+library alone.
+
+- **What the rule does with them.** An output whose tree holds an ML-DSA-44
+  leaf S1 and an SLH-DSA leaf SLH1, both of version `0xe2` at depth one (the
+  pq2 template), can be spent through either. If L1 or L2 is spent, from the
+  next block the S1 path of every such output fails and the SLH1 path still
+  works. A spend of L1 or L2 does not show that ML-DSA-44 is broken, and their
+  staying unspent does not show that it is not: someone who could forge
+  signatures in secret would not spend them, and on a network with one block
+  producer the operator could keep such a spend out of the chain, or spend L2
+  itself. General progress against lattice problems would reach L1 and L2 at
+  about the same cost, so neither is an earlier warning than the other.
+- **Below height 55000, nothing changes.** Until then `0xe2` is an unknown
+  leaf version: a spend through such a leaf succeeds without running it, and
+  nodes do not relay it. No coins should be paid to `0xe2` leaves before the
+  chain is past height 55000. A single leaf sits at depth zero and is spent
+  without being executed, at any height.
+- **What is relayed from the height.** Spends of leaves of version `0xe2`
+  follow the same standardness rules as those of `0xc0` and `0xe0`: S1 and
+  SLH1 are relayed. S2, which needs both an ML-DSA-44 and a Schnorr signature,
+  is not relayed in `0xe2`.
+- **The drill.** The operator will spend L3 at an announced time, announced at
+  least two weeks ahead and no earlier than seven days after a wallet offers
+  pq2 outputs. From the next block, ML-DSA-44 checks in `0xe2` fail and SLH1
+  spends of pq2 outputs keep working; ML-DSA-44 in leaf versions `0xc0` and
+  `0xe0` and the block signatures are not affected. A leaf of version `0xe2`
+  whose only path is an ML-DSA-44 check can no longer be spent after that,
+  and no rescue covers it: the rescue lane covers elliptic curve checks only.
+
+### M4-B: an SLH-DSA block signature
+
+From height 55000 every block must carry, besides M2's ML-DSA-44 block
+signature, an SLH-DSA-SHA2-128s
+([FIPS 205](https://doi.org/10.6028/NIST.FIPS.205)) signature by the key
+`012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e`, whose
+SHA256 is `a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569`.
+It sits in a coinbase output right before the witness commitment output, with
+amount 0: `OP_RETURN` and one push of the tag `PQH1`, a version byte `01` and
+the 7,856-byte signature. A block without it, or with a wrong one, is invalid
+(`bad-signet-slhblk`).
+
+- **The order of the signatures.** The SLH-DSA signature covers what the
+  ML-DSA-44 one covers, less the SLH signature itself: the block's version,
+  previous block and time, every transaction, and the whole coinbase except
+  the ML-DSA-44 push, the signet solution push and the SLH signature. A block
+  is signed with SLH-DSA first, then with ML-DSA-44 over the block that holds
+  the SLH output, then the signet solution is made. Like the other two, the
+  signature does not cover `nNonce` or `nBits`.
+- **Three signatures, one party.** From height 55000 a node with the rule
+  accepts a block only if the signet solution under the challenge's elliptic
+  curve key, the ML-DSA-44 block signature and the SLH-DSA block signature
+  all hold. The operator holds all three keys.
+- **Below height 55000, M4-B rejects no block.** The operator's block producer
+  will put the SLH output in every block from height [SLH FROM] on, at least
+  1,920 blocks before height 55000 (48 hours at its fastest rate of 960 blocks
+  a day). A node started with `-debug=validation` logs, for each block below
+  55000 that it validates other than the genesis block, whether its SLH-DSA
+  signature is valid, invalid, or absent or not in the required form. So the
+  signatures can be checked on the chain before they are enforced.
+- **Cost:** 7,876 bytes more in every block (31,504 weight units), which a
+  compact block carries too, as it carries the coinbase in full.
+
+### Both
+
+- **What a node logs and reports.** At startup a node with these series logs
+  these two lines, which operators can compare with these:
+
+  ```
+  Signet P2MR lattice tripwire rules from height 55000 in leaf version 0xe2; tripwire outputs aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0 (NUMS ML-DSA-44, pk SHA256 591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:1 (destroyed key, pk SHA256 c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:2 (drill key, pk SHA256 5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495)
+  Signet SLH-DSA block signature required from height 55000, public key SHA256 a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569
+  ```
+
+  The M4-S line names the new leaf version too: `P2MR SLH-DSA-SHA2-128s rules
+  active from height 32000 (leaf versions 0xc0, 0xe0, 0xe2)`. The node also
+  logs the state of the three outputs at startup and when the chain reaches
+  height 55000, and each spend of one of them once the block that spends it
+  is in its active chain:
+
+  ```
+  P2MR lattice tripwire <txid:vout> (<label>) spent by <txid> in block <hash> (height <N>): OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from height <H>
+  ```
+
+  `<H>` is `N + 1`, or 55000 if the spend comes before that height; the line
+  ends `is already disabled` when the checks were off before the block.
+  `bitcoin-cli getdeploymentinfo` lists `p2mr_lattice_tripwire` as a buried
+  deployment with height 55000, and from that height
+  `P2MR_LATTICE_TRIPWIRE` among the script flags. `gettripwireinfo` has a
+  `lattice` object: the height, the leaf version `e2`, each output with its
+  `state`, `unspent` or `missing`, its key's SHA256 and its label, and
+  `mldsa_disabled_next_block`. A node that has not yet synced past height
+  39971 reports all three as `missing`; that is expected, and matters only
+  from height 55000.
+- **Wallets.** Bitcoin Core's wallet does not make or sign leaves of version
+  `0xe2`. [PQ2 WALLET: WHEN AND WHICH]
+- **They are soft forks.** A node without these series (an M4-R build)
+  accepts every block a node with them accepts and keeps following the chain,
+  but does not run leaves of version `0xe2`, does not check the SLH-DSA block
+  signature, and does not relay spends of `0xe2` leaves. A node that accepted
+  blocks at or above height 55000 before it upgraded has not checked them; one
+  start with `-reindex-chainstate` (`-reindex` on a pruned node), without
+  `-assumevalid`, checks them.
+- **They are not part of BIP-360 or BIP 325**, and they are not a proposal
+  for Bitcoin.
+- **The height, the three outputs and the key are rules of this network and
+  will not change.** The series are in `patches-m4t/` and `patches-m4b/`
+  (`README.md`, "Experimental M4-T series" and "Experimental M4-B series").
 
 ## Parameters
 
@@ -769,6 +933,8 @@ outpoints and the activation height come with the M4-T build.
 | Leaf version `0xe0` (M3) | executed from height 30000, with the tripwire outputs `4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1` and `8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0`, see "Rule change at height 30000 (M3)" |
 | `OP_CHECKSLHDSA128S` (M4-S) | from height 32000, 5,000 units of validation weight per check, see "Rule change at height 32000 (M4-S)" |
 | Rescue lane of leaf version `0xe0` (M4-R) | from height 51000, 130,000 units of validation weight per rescue check, a hard fork, see "Rule change at height 51000 (M4-R)" |
+| Leaf version `0xe2` (M4-T) | executed from height 55000, with the lattice tripwire outputs `aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0`, `:1` and `:2`, see "Rule change at height 55000 (M4-T and M4-B)" |
+| SLH-DSA block signature (M4-B) | from height 55000, by the key whose SHA256 is `a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569`, see "Rule change at height 55000 (M4-T and M4-B)" |
 
 The cadence and the two target spacings are separate things, and it is worth
 not reading one for another. The cadence is an operational choice: the
@@ -778,9 +944,9 @@ as ten minutes; no patch in this repository touches it, and Core still uses
 it for timeouts and estimates. The retarget target spacing is what the
 difficulty adjustment measures each period against: the same 600 s on every
 signet, and on this one 90 s from the retarget at 8064 on. That change, made
-by the patch in `patches-spacing/`, is one of six consensus changes on this
-network besides P2MR; the others are M1, M2, M3, M4-S and M4-R (the five
-"Rule change" sections above). Producing blocks faster than ten minutes is
+by the patch in `patches-spacing/`, is one of eight consensus changes on this
+network besides P2MR; the others are M1, M2, M3, M4-S, M4-R, M4-T and M4-B
+(the six "Rule change" sections above). Producing blocks faster than ten minutes is
 what a signet is for: the signet solution decides who may produce a block,
 while proof of work still paces how fast, as the next paragraphs record.
 
@@ -908,5 +1074,5 @@ chain instead, see `JOIN.md`.
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
 | `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, block 20000, the five blocks refused under M2, and M3's drill block, the block refused after it and the witness transaction |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
-| `lattice-tripwires/` | the keys, scripts and addresses of the three lattice tripwire outputs of M4-T, fixed before the outputs are created, a script that checks them, and the program that made L2, the destroyed key |
+| `lattice-tripwires/` | the keys, scripts and addresses of the three lattice tripwire outputs of M4-T, fixed before the outputs were created, a script that checks them, and the program that made L2, the destroyed key |
 | `SHA256SUMS` | checksums for everything above |
