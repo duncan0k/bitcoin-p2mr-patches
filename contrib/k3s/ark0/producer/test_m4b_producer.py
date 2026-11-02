@@ -21,10 +21,12 @@ It checks:
   signatures and the signet solution valid;
 - the order: the SLH output is final before the ML-DSA-44 signature, which
   covers it;
-- the gates of section 4.5, through check_block_keys: on Ark-0 while M4-B is
-  undecided, any ARK0_SLH_* variable stops the producer; once decided (set
-  here in the module only), missing variables, a wrong key hash and a start
-  later than the height minus 1,920; anywhere, an incomplete set of variables;
+- the gates of section 4.5, through check_block_keys, with ark0.py's own Ark-0
+  constants (H4T 55000, the key with SHA256 a64c1077...f569): a start at
+  53080, the height minus 1,920, passes and one at 53081 is refused; a wrong
+  key hash, no variables and each missing variable are refused; the branch for
+  unset constants still refuses any ARK0_SLH_* variable; anywhere, an
+  incomplete set of variables;
 - a key that is not the one ARK0_SLH_BLOCK_KEY_SHA256 names, and a signer that
   fails, stop ark0.py before it submits anything;
 - review round 1: with fake signers, mine_block calls submitblock 0 times (the
@@ -51,6 +53,9 @@ ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c17
 HERE = os.path.dirname(os.path.abspath(__file__))
 PQ_HEIGHT = 2
 SLH_HEIGHT = 4
+# M4-B on Ark-0, as ark0.py and the Core series fix it: H4T and the SHA256 of the block key.
+ARK0_H4T = 55000
+ARK0_SLH_KEY_SHA256 = "a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569"
 
 
 def free_port():
@@ -326,34 +331,45 @@ def test_gates(env):
     ark0_pq = {"ARK0_PQ_BLOCK_FROM": "18000", "ARK0_PQ_BLOCK_KEY_SHA256": "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad"}
     no_slh = {"ARK0_SLH_BLOCK_KEY_FILE": None, "ARK0_SLH_BLOCK_FROM": None, "ARK0_SLH_BLOCK_KEY_SHA256": None}
 
-    m = load_ark0(env.producer_env(**ark0_pq, ARK0_SLH_BLOCK_FROM="58080"))
-    check(m.ARK0_SLH_BLOCK_HEIGHT is None and m.ARK0_SLH_KEY_SHA256 is None, "ark0.py: M4-B is undecided on Ark-0")
-    check(raises(lambda: m.check_block_keys(tmpl_ark0), "M4-B is not active on Ark-0"),
-          "Ark-0, undecided: the ARK0_SLH_* variables stop the producer")
-    m = load_ark0(env.producer_env(**ark0_pq, **no_slh))
+    # The decided path, with the module's own constants: H4T 55000 and the key the Ark-0 nodes log.
+    ark0_slh = {"ARK0_SLH_BLOCK_KEY_SHA256": ARK0_SLH_KEY_SHA256}
+    m = load_ark0(env.producer_env(**ark0_pq, **ark0_slh, ARK0_SLH_BLOCK_FROM="53080"))
+    check(m.ARK0_SLH_BLOCK_HEIGHT == ARK0_H4T and m.ARK0_SLH_KEY_SHA256 == ARK0_SLH_KEY_SHA256 and m.ARK0_SLH_LEAD_BLOCKS == 1920,
+          f"ark0.py: M4-B is decided on Ark-0, height {ARK0_H4T}, key SHA256 {ARK0_SLH_KEY_SHA256}, lead 1,920 blocks")
     m.check_block_keys(tmpl_ark0)
-    check(True, "Ark-0, undecided, no ARK0_SLH_* variable: the producer goes on with M2 as before")
-
-    def decided(**overrides):
-        module = load_ark0(env.producer_env(**ark0_pq, **overrides))
-        module.ARK0_SLH_BLOCK_HEIGHT = 60000
-        module.ARK0_SLH_KEY_SHA256 = hashlib.sha256(env.slh_pubkey).hexdigest()
-        return module
-    m = decided(**no_slh)
-    check(raises(lambda: m.check_block_keys(tmpl_ark0), "Ark-0 blocks need ARK0_SLH_BLOCK_KEY_FILE"),
-          "Ark-0, decided: missing key variables stop the producer")
-    m = decided(ARK0_SLH_BLOCK_FROM="58080", ARK0_SLH_BLOCK_KEY_SHA256="11" * 32)
+    check(True, "Ark-0: ARK0_SLH_BLOCK_FROM 53080, the height minus 1,920, with the right key passes")
+    m = load_ark0(env.producer_env(**ark0_pq, **ark0_slh, ARK0_SLH_BLOCK_FROM="50000"))
+    m.check_block_keys(tmpl_ark0)
+    check(True, "Ark-0: an earlier ARK0_SLH_BLOCK_FROM passes")
+    m = load_ark0(env.producer_env(**ark0_pq, **ark0_slh, ARK0_SLH_BLOCK_FROM="53081"))
+    check(raises(lambda: m.check_block_keys(tmpl_ark0), "must be at most 53080, 1920 blocks before the height 55000"),
+          "Ark-0: ARK0_SLH_BLOCK_FROM 53081, later than the height minus 1,920, stops the producer")
+    m = load_ark0(env.producer_env(**ark0_pq, ARK0_SLH_BLOCK_FROM="53080", ARK0_SLH_BLOCK_KEY_SHA256="11" * 32))
     check(raises(lambda: m.check_block_keys(tmpl_ark0), "the key of the Ark-0 rule"),
-          "Ark-0, decided: a wrong public key hash stops the producer")
-    m = decided(ARK0_SLH_BLOCK_FROM="58081")
-    check(raises(lambda: m.check_block_keys(tmpl_ark0), "must be at most 58080"),
-          "Ark-0, decided: a start later than the height minus 1,920 stops the producer")
-    m = decided(ARK0_SLH_BLOCK_FROM="58080")
-    m.check_block_keys(tmpl_ark0)
-    check(True, "Ark-0, decided: a start at the height minus 1,920 with the right key passes")
-    m = decided(ARK0_SLH_BLOCK_FROM="58080", ARK0_PQ_BLOCK_SEED_FILE=None)
+          "Ark-0: a wrong public key hash stops the producer")
+    m = load_ark0(env.producer_env(**ark0_pq, ARK0_SLH_BLOCK_FROM="53080", ARK0_SLH_BLOCK_KEY_SHA256=hashlib.sha256(env.slh_pubkey).hexdigest()))
+    check(raises(lambda: m.check_block_keys(tmpl_ark0), "the key of the Ark-0 rule"),
+          "Ark-0: the test key's hash, valid elsewhere, stops the producer")
+    m = load_ark0(env.producer_env(**ark0_pq, **no_slh))
+    check(raises(lambda: m.check_block_keys(tmpl_ark0), "Ark-0 blocks need ARK0_SLH_BLOCK_KEY_FILE"),
+          "Ark-0: no ARK0_SLH_* variable stops the producer")
+    for missing in ("ARK0_SLH_BLOCK_KEY_FILE", "ARK0_SLH_BLOCK_FROM", "ARK0_SLH_BLOCK_KEY_SHA256"):
+        m = load_ark0(env.producer_env(**{**ark0_pq, **ark0_slh, "ARK0_SLH_BLOCK_FROM": "53080", missing: None}))
+        check(raises(lambda: m.check_block_keys(tmpl_ark0), "go together"), f"Ark-0: {missing} missing stops the producer")
+    m = load_ark0(env.producer_env(**ark0_pq, **ark0_slh, ARK0_SLH_BLOCK_FROM="53080", ARK0_PQ_BLOCK_SEED_FILE=None))
     check(raises(lambda: m.check_block_keys(tmpl_ark0), "needs ARK0_PQ_BLOCK_SEED_FILE"),
           "the SLH-DSA block signature without the ML-DSA-44 one stops the producer")
+
+    # The branch for constants that are not set, kept for a later rule of the same shape: any
+    # ARK0_SLH_* variable stops the producer, and without them it goes on with M2.
+    m = load_ark0(env.producer_env(**ark0_pq, **ark0_slh, ARK0_SLH_BLOCK_FROM="53080"))
+    m.ARK0_SLH_BLOCK_HEIGHT = m.ARK0_SLH_KEY_SHA256 = None
+    check(raises(lambda: m.check_block_keys(tmpl_ark0), "M4-B is not active on Ark-0"),
+          "Ark-0, constants unset: the ARK0_SLH_* variables stop the producer")
+    m = load_ark0(env.producer_env(**ark0_pq, **no_slh))
+    m.ARK0_SLH_BLOCK_HEIGHT = m.ARK0_SLH_KEY_SHA256 = None
+    m.check_block_keys(tmpl_ark0)
+    check(True, "Ark-0, constants unset, no ARK0_SLH_* variable: the producer goes on with M2")
 
     m = load_ark0(env.producer_env(ARK0_SLH_BLOCK_KEY_SHA256=None))
     check(raises(lambda: m.check_block_keys(tmpl_other), "go together"), "another signet: an incomplete set stops the producer")

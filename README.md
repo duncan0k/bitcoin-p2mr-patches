@@ -49,8 +49,8 @@ patches-m3/         11 further patches, the experimental M3 series, on Ark-0 fro
 patches-m4/         13 further patches, the experimental M4-S series, on Ark-0 from height 32000 (see below)
 patches-m4r/        16 further patches, the experimental M4-R1 rescue lane, a hard fork, open on Ark-0 from height 51000 (see below)
 patches-m4r-killswitch/ 1 patch on top of patches-m4r/: the rescue lane's kill switch, not part of the series
-patches-m4t/        10 further patches on top of patches-m4r/, the experimental M4-T series (leaf version 0xe2), not active on Ark-0 (see below)
-patches-m4b/        7 further patches on top of patches-m4t/, the experimental M4-B series (an SLH-DSA block signature), not active on Ark-0 (see below)
+patches-m4t/        10 further patches on top of patches-m4r/, the experimental M4-T series (leaf version 0xe2), on Ark-0 from height 55000 (see below)
+patches-m4b/        8 further patches on top of patches-m4t/, the experimental M4-B series (an SLH-DSA block signature) and the Ark-0 values of both, on Ark-0 from height 55000 (see below)
 SHA256SUMS          checksums of the patches
 SHA256SUMS-m05      checksums of the M0.5 patches
 SHA256SUMS-spacing  checksum of the retarget spacing patch
@@ -780,9 +780,11 @@ deployment), a leaf of that version at depth one or more executes as one of `0xc
 curve checks follow the tripwire of `0xe0` exactly, and in a block whose parent leaves one of three
 *lattice tripwire outputs* missing from the UTXO set, `OP_CHECKMLDSA44` with a non-empty signature in it
 fails. `OP_CHECKSLHDSA128S` is never disabled. It only makes more blocks invalid: a soft fork for M4-R
-nodes. **It is not active on Ark-0**: `H4T` and the three outputs are not decided, so
-`ARK0_LATTICE_TRIPWIRE_HEIGHT` is never and the list is empty, as `0xe0` was before patch 65; a commit
-of its own will set them. Regtest executes `0xe2` where `0xe0` and `OP_CHECKSLHDSA128S` both execute,
+nodes. **On Ark-0 it applies from `H4T` = 55000**, with the three outputs below, all created by
+transaction `aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c` at height 39971; this
+series leaves `ARK0_LATTICE_TRIPWIRE_HEIGHT` never and the list empty, as `0xe0` was before patch 65,
+and patch 113 (`patches-m4b/`) sets them, with M4-B's height and key, so that both rules start at
+the same block. Regtest executes `0xe2` where `0xe0` and `OP_CHECKSLHDSA128S` both execute,
 and another custom signet from `-signetlatticetripwire=<height>@<txid:vout>[,...]`, which needs
 `-signetmldsa44`, `-signettripwire` and `-signetslhdsa128s` at or below its height. The script flags
 take bits 27 (`SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE`) and 28 (`SCRIPT_VERIFY_P2MR_MLDSA_DISABLED`).
@@ -793,6 +795,16 @@ The first output's key is a NUMS ML-DSA-44 key, SHAKE256 of `"MLDSA44-NUMS/v1" |
 with mldsa-native and the functional tests with Python. In M4-R's rescue lane, an elliptic curve check in
 `0xe2` is rescuable from the higher of `H4R` and `H4T` (rule 4R-4), valid in a block but not relayed
 (template R1 is of `0xe0` only); the disabled ML-DSA-44 check is not rescuable (that is M4-R2's).
+
+| Output | Outpoint | Label | ML-DSA-44 public key SHA-256 |
+|---|---|---|---|
+| L1 | `aac5a1fe…eba8827c:0` | `NUMS ML-DSA-44` | `591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805` |
+| L2 | `aac5a1fe…eba8827c:1` | `destroyed key` | `c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44` |
+| L3 | `aac5a1fe…eba8827c:2` | `drill key` | `5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495` |
+
+Their keys, leaf scripts, scriptPubKeys and addresses are in `ark0/lattice-tripwires/`. An Ark-0 node
+logs the height, the three outpoints, their labels and key hashes at startup, in one line that
+operators compare.
 It is an experiment of the Ark-0 test signet; it is not part of BIP-360, and it is not proposed for
 Bitcoin. `doc/p2mr-lattice-tripwire.md`, added by the series, is its specification.
 
@@ -857,15 +869,20 @@ git format-patch --start-number 101 c667973..b9e5fd5 -o patches-m4t     # 0101 t
 
 ## Experimental M4-B series (`patches-m4b/`)
 
-Seven patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
+Eight patches, applied on top of `patches/`, `patches-m05/`, `patches-spacing/`, `patches-m1/`,
 `patches-m2/`, `patches-m3/`, `patches-m4/`, `patches-m4r/` and `patches-m4t/`, in that order, without the
-kill switch. They were written on M4-R, next to M4-T, and rebased onto M4-T as 0106 to 0112. They add
+kill switch. The first seven were written on M4-R, next to M4-T, and rebased onto M4-T as 0106 to 0112;
+the eighth, 0113, sets the Ark-0 values of both M4-T and M4-B. They add
 M4-B, a second block signature on a signet: from a height on, every block also carries an
 SLH-DSA-SHA2-128s signature in a coinbase output right before its witness commitment output, `6a 4d b5 1e 50 51 48 31 01 || sig` (7,865 bytes), next to M2's ML-DSA-44 signature;
 the producer signs the SLH output first, then ML-DSA-44, then the classical signet solution. A block
 without it, or with a wrong one, is refused as `bad-signet-slhblk`. It only makes more blocks invalid: a
-soft fork for M4-R and M4-T nodes. **It is not active on Ark-0**: the height and the key are not decided,
-so `ARK0_SLH_BLOCK_HEIGHT` is never and `ARK0_SLH_BLOCK_PUBKEY` is unset. Another custom signet gets it
+soft fork for M4-R and M4-T nodes. **On Ark-0 it is required from `H4T` = 55000**, the height of M4-T
+there too (one constant, `ARK0_H4T`, holds it for both), by the key
+`012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e` (`PK.seed || PK.root`), SHA256
+`a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569`, which an Ark-0 node logs at startup;
+0106 to 0112 leave `ARK0_SLH_BLOCK_HEIGHT` never and `ARK0_SLH_BLOCK_PUBKEY` unset, and 0113 sets
+them. The producer starts putting the SLH output in its blocks at 53080 at the latest. Another custom signet gets it
 from `-signetslhblock=<pubkey>@<height>`, which needs `-signetpqblock` at or below its height. The series
 also builds `signet-slh-sign`, the producer's signer: a static, non-PIE C program over the vendored
 SLH-DSA library, which no node binary links.
@@ -884,6 +901,7 @@ Bitcoin. `doc/signet-slhblock.md`, added by the series, is its specification. Th
 | 110 | test: add feature_signet_slhblock.py | activation, the negative list, an old node, reindex, compact blocks, a late upgrade, a full block, the Ark-0 producer's way; the BIP34 heights of the design through `submitblock` |
 | 111 | test: add the signet_blocksig fuzz target for both signet block signature parsers | M2's and M4-B's parsers on a custom signet |
 | 112 | doc: describe -signetslhblock | `doc/signet-slhblock.md` |
+| 113 | consensus: set H4T, the lattice tripwire outputs and the SLH-DSA block key of the Ark-0 signet | `ARK0_H4T` = 55000 for both rules, the three outputs of `aac5a1fe…eba8827c` created at 39971, the SLH-DSA block key, their static asserts; the Ark-0 start-up lines; the Ark-0 unit and functional tests; `feature_signet_slhblock_lattice.py`, both rules from one height; both docs |
 
 Verification record (2026-10-31, Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 4 CPUs, the files in
 `patches-m4t/` and `patches-m4b/` as published here): from a fresh clone of v31.1, `apply.sh` with
@@ -919,8 +937,20 @@ as `git am` applies them; `b9e5fd5` is the last commit of `patches-m4t/` there:
 
 ```bash
 git format-patch --start-number 106 b9e5fd5..7a5628e -o patches-m4b
+git format-patch --start-number 113 -1 aadb5f5 -o patches-m4b         # 0113, on 0001 to 0112 as git am applies them
 (cd patches-m4b && sha256sum -b *.patch) > SHA256SUMS-m4b
 ```
+
+Verification record of 0113 (2026-11-02, Ubuntu 24.04 / g++ 13.3 / Rust / 4 CPUs, the files as published
+here): from a fresh clone of v31.1, `apply.sh` with `SERIES` set to the ten sets checked every checksum
+file and applied the 112 patches, built them and passed its own tests; `test_bitcoin` passed 814 of 820 test cases and one more with a warning, and skipped 5; the
+P2MR and signet functional scripts, `p2p_segwit.py`, `feature_taproot.py` and `rpc_blockchain.py`, 24
+runs, and `feature_signet_slhblock_lattice.py`, all passed; `test_m4b_producer.py` passed its 69 checks
+(16 under `python3 -O`) and `check-signer.sh` the build's signer. Before 0113 the same runs passed on
+0001 to 0112 (814 of 820, one warning, 5 skipped; 24 runs; 64 and 11 producer checks). The default
+functional suite, the extended tests and fuzzing were not run. 0113 was exported again afterwards with three
+statements corrected, on how `H4T` was chosen (its message, `doc/p2mr-lattice-tripwire.md` and a comment in
+`src/kernel/chainparams.h`); its code and tests are the ones these runs passed.
 
 ## Prebuilt node
 

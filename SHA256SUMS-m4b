@@ -5,3 +5,4 @@ d8954910be7f2baaac04fd0f62ee50e08a4158f119f8f1dc83c1e10a0dc3f40b *0106-signet-re
 c0e42bbf64af62171fa3bb77da95ebf9b666eca05c167b1e5cce56a11be9e50d *0110-test-add-feature_signet_slhblock.py.patch
 850cdf879da76200146cafc8343cca7c1b9c94172323bdba657aab540ee4dd5b *0111-test-add-the-signet_blocksig-fuzz-target-for-both-si.patch
 f461253007f0a6047f18004a0ba0096fd2789d9403443a31296a7a5ee0c5ac48 *0112-doc-describe-signetslhblock.patch
+2002cc0ec9e184d8a9159b62782ad28e284d2a2ade7a962d138b20429de5cd1f *0113-consensus-set-H4T-the-lattice-tripwire-outputs-and-t.patch

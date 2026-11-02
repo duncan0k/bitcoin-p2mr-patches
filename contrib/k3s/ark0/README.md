@@ -123,38 +123,47 @@ sudo k3s kubectl -n ark0 create secret generic ark0-pq-signer --from-file=seed=s
 
 The exact commands for the first two are in `../ARK0-MIGRATION.md`, step 3.
 
-**`ark0-slh-signer`** (M4-B, not active on Ark-0 yet), one key, `key`: the 48
+**`ark0-slh-signer`** (M4-B, on Ark-0 from height 55000), one key, `key`: the 48
 bytes `SK.seed || SK.prf || PK.seed` of the SLH-DSA-SHA2-128s block key, raw,
-from the operating system's CSPRNG. It is the third block key: once M4-B is
-active, the chain stops without any one of the three. `50-miner.yaml` mounts it
-at `/slh` (optional, so that the pod starts before it exists) and, once the
-height and key are decided, gives the producer `ARK0_SLH_BLOCK_KEY_FILE=/slh/key`.
+from the operating system's CSPRNG. Its public key is
+`012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e`, SHA256
+`a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569`. It is the
+third block key: from height 55000 the chain stops without any one of the three.
+`50-miner.yaml` mounts it at `/slh` (optional, so that the pod starts before it
+exists) and, once the operator puts the three `ARK0_SLH_*` variables in at the
+roll, gives the producer `ARK0_SLH_BLOCK_KEY_FILE=/slh/key`.
 Only the signer program, `signet-slh-sign` in the producer image, reads it; it
 prints the signature after verifying it, or the public key with `-pubkey`, and
 never the key.
 
-**The backup is an open decision.** On the operator's Windows machine the raw
-key would pass through the backup tool's Node process, whose memory can be
+**The backup: option (b), decided and done.** On the operator's Windows machine
+the raw key passes through the backup tool's Node process, whose memory can be
 paged to disk, hibernated or dumped. The M2 and M3 block keys were backed up
-that way; changing the practice is the project owner's decision:
+that way. The project owner had two options:
 
-- **(a)** the encrypted backup is made on the Linux host below (the backup tool
-  needs only the backup public key); the operator's machine receives and
-  uploads only ciphertext; the restore drill decrypts on a Linux host that meets
-  the same preconditions;
-- **(b)** as for the M2 and M3 keys: the backup tool runs on the operator's
-  Windows machine, with its paging, hibernation and crash-dump exposure.
+- **(a)** the encrypted backup made on the Linux host below (the backup tool
+  needs only the backup public key), the operator's machine receiving and
+  uploading only ciphertext, and the restore drill decrypting on a Linux host
+  that meets the same preconditions;
+- **(b)** as for the M2 and M3 keys: the backup tool on the operator's Windows
+  machine, with its paging, hibernation and crash-dump exposure.
 
-**Do not generate the key until that decision is made and recorded in the
-runbook.** Three backups, each checked against the public key, and a restore
-drill with the same image before the height (M4 design section 4.5), follow
-whichever option is recorded.
+Option (b) was recorded in the runbook, and on 2026-11-02 the key was made:
+
+- generated on the Linux host with the steps below;
+- backed up the same day in three encrypted backups, each restored and checked
+  against the public key above;
+- put in the Secret `ark0-slh-signer`.
+
+**Still to come before the height:** the restore drill with the producer image
+(M4 design section 4.5): a backup restored and used to sign with that image's
+`signet-slh-sign`, the signature checked against the public key.
 
 The steps that run on the Linux host: **Linux only** (Windows and Git Bash are
 not supported for them; Git Bash's `/dev/shm` is a directory on disk), with
 `signet-slh-sign` from the producer image. Every check fails closed: a command
 that cannot run stops the procedure, and its exit status is checked apart from
-its output. Not run yet: there is no key.
+its output. Run on 2026-11-02, when the key was generated.
 
 Why a core limit of 1 byte (Linux `fs/coredump.c`, checked at v6.17, commit
 `e5f0a698b34e`): `coredump_pipe()` aborts the dump when `RLIMIT_CORE` is 1, the
@@ -212,7 +221,7 @@ python3 -c 'import hashlib, sys; print(hashlib.sha256(bytes.fromhex(open(sys.arg
   || fail "public key hash"
 # ^ ARK0_SLH_BLOCK_KEY_SHA256; the runbook and the release notes give the same SHA256
 #
-# The three backups go here, as the runbook records (option (a) or (b) above).
+# The three backups go here, as the runbook records (option (b) above).
 as_root k3s kubectl -n ark0 create secret generic ark0-slh-signer --from-file=key="$d/key" || fail "kubectl"
 cleanup; trap - EXIT; test ! -e "$d" || fail "$d was not removed"; echo "removed $d"
 ```
@@ -233,11 +242,13 @@ one-time key.
    `../stage-miner.sh`), from a build of the M4-B series.
 3. The Secret `ark0-slh-signer`.
 4. The Core series and `ark0.py` with the Ark-0 height and key
-   (`ARK0_SLH_BLOCK_HEIGHT`, `ARK0_SLH_KEY_SHA256`): until both are set,
-   `ark0.py` refuses to mine Ark-0 blocks with any `ARK0_SLH_*` variable.
-5. The three `ARK0_SLH_*` variables in `50-miner.yaml`, with a start at least
-   1,920 blocks (about 48 hours) before the height; `ark0.py` refuses a later
-   one, a wrong key hash and a missing variable.
+   (`ARK0_SLH_BLOCK_HEIGHT` 55000, `ARK0_SLH_KEY_SHA256` `a64c1077…f569`): with
+   both set, `ark0.py` refuses to mine an Ark-0 block without the three
+   `ARK0_SLH_*` variables, so 4 and 5 go live in the same roll.
+5. The three `ARK0_SLH_*` variables in `50-miner.yaml`, set by the operator at
+   that roll, with a start at least 1,920 blocks (about 48 hours) before the
+   height, at most 53080; `ark0.py` refuses a later one, a wrong key hash and a
+   missing variable.
 
 The producer signs in a fixed order: the SLH output first (placeholder,
 `slh_msg`, the signer, the full output), then the ML-DSA-44 signature over it,

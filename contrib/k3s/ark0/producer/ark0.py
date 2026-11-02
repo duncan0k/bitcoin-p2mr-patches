@@ -52,10 +52,11 @@ three more variables, all or none:
   ARK0_SLH_SIGNER              the signer program, $ARK0_BIN/signet-slh-sign
                                by default
 
-M4-B is not active on Ark-0 yet: its height and key are not decided, and the
-producer refuses to mine Ark-0 blocks with any ARK0_SLH_* variable set
-(ARK0_SLH_BLOCK_HEIGHT below). On another signet the node's
--signetslhblock decides.
+On Ark-0, M4-B applies from height 55000 (ARK0_SLH_BLOCK_HEIGHT below, H4T),
+by the key whose SHA256 is ARK0_SLH_KEY_SHA256: the producer refuses to mine
+Ark-0 blocks without the three variables, with another key hash, or with
+ARK0_SLH_BLOCK_FROM later than 55000 - 1,920 = 53080. On another signet the
+node's -signetslhblock decides.
 
 Keys are derived from their seeds in memory and never printed. The SLH-DSA key
 never enters this process: the signer program reads the file, signs, checks
@@ -93,11 +94,12 @@ ARK0_SIGNET_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512
 ARK0_PQ_BLOCK_HEIGHT = 20000
 ARK0_PQ_KEY_SHA256 = "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad"
 # M4-B on Ark-0 (H4T of the M4 design, ARK0_SLH_BLOCK_HEIGHT and
-# ARK0_SLH_BLOCK_PUBKEY in the Core series): neither the height nor the key is
-# decided, so both are None and M4-B is inactive. They are set together, with
-# the Core commit that fixes them.
-ARK0_SLH_BLOCK_HEIGHT = None
-ARK0_SLH_KEY_SHA256 = None
+# ARK0_SLH_BLOCK_PUBKEY in the Core series): the height, which the lattice
+# tripwire rules of M4-T share, and the SHA256 of the SLH-DSA-SHA2-128s public
+# key the nodes expect, as they log it at startup. Set together, with the Core
+# commit that fixes them; neither changes once a build carrying them is out.
+ARK0_SLH_BLOCK_HEIGHT = 55000
+ARK0_SLH_KEY_SHA256 = "a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569"
 # The SLH output has to be in the blocks at least this many blocks before the
 # height: 48 hours at the fastest rate of the producer, 960 blocks a day (M4
 # design section 4.5).

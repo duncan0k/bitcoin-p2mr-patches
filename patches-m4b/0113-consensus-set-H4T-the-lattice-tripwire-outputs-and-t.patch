@@ -1,0 +1,1193 @@
+From aadb5f5095dede47424981f1bba18b87e7ed9e55 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Mon, 2 Nov 2026 18:17:46 +0000
+Subject: [PATCH 113/113] consensus: set H4T, the lattice tripwire outputs and
+ the SLH-DSA block key of the Ark-0 signet
+
+The M4-T and M4-B series leave their Ark-0 values unset: without them
+the lattice tripwire rules of leaf version 0xe2 and the
+SLH-DSA-SHA2-128s block signature never apply there. Both rules have one
+height on Ark-0, H4T, and the three lattice tripwire outputs now exist
+on that chain, so this commit fixes all of it, the way patch 65 fixed
+the tripwire outputs of leaf version 0xe0.
+
+- ARK0_H4T is 55000, at least 6720 blocks (seven days) after the release
+  and late enough for the operator to upgrade its nodes and its
+  producer, which carries the SLH output from 1,920 blocks before it.
+  ARK0_LATTICE_TRIPWIRE_HEIGHT and ARK0_SLH_BLOCK_HEIGHT both take it
+  from that one constant, and a static_assert keeps them equal: from
+  that block on every Ark-0 block carries the SLH output, and the same
+  block is the first in which leaf version 0xe2 executes.
+- ARK0_LATTICE_TRIPWIRES holds the three outputs, all created by
+  aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c in the
+  block at height 39971 (ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT), each
+  with the SHA256 of the ML-DSA-44 key its leaf checks and a label:
+  vout 0, "NUMS ML-DSA-44", 591dae31...92805 (the NUMS key); vout 1,
+  "destroyed key", c7a02f1f...1df44; vout 2, "drill key",
+  5237bdf6...8b495. The third label was "drill" in the constraint the
+  outputs are checked against; it is "drill key", as the start-up line
+  of the design names it.
+- ARK0_SLH_BLOCK_PUBKEY is 012b50fa...41b5e, PK.seed || PK.root, whose
+  SHA256 is a64c1077...ef569.
+
+Static asserts hold the values together: the order of the Ark-0 heights,
+8600 < 20000 < 30000 < 32000 <= H4T; the creation height below H4T, so
+that the outputs count as present when the rules start; three distinct
+outpoints of one transaction, the first with the NUMS key; the SLH
+height equal to H4T; and, as before, the SLH key set exactly when its
+height is finite. Changing H4T later is the constant, its tests and its
+docs.
+
+With the values set, the paths the two series already had for a decided
+Ark-0 apply: the consensus parameters carry the height, the outputs with
+their labels and key hashes, and signet_slh_block; an Ark-0 node logs
+"Signet P2MR lattice tripwire rules from height 55000 in leaf version
+0xe2; tripwire outputs ..." with the three outpoints, labels and key
+hashes, and "Signet SLH-DSA block signature required from height 55000,
+public key SHA256 ..."; OP_CHECKSLHDSA128S logs leaf version 0xe2 among
+its leaf versions; getdeploymentinfo lists p2mr_lattice_tripwire at
+55000; gettripwireinfo reports the three outputs. The line that said the
+lattice tripwire rules are not active on Ark-0 is gone, with the include
+it needed. Both options stay refused on Ark-0.
+
+The ark0_inactive unit tests become ark0: the deployment height, the
+outpoints, labels and key hashes, the creation cutoff (an output created
+at 39971 is present, one created at or above H4T is not), the script
+flags and the ML-DSA-44 state around the height, and the SLH height and
+key, with a block without the SLH output passing below H4T and refused
+from it. The functional tests check the Ark-0 node's lines, RPCs and the
+refused options. feature_signet_slhblock_lattice.py turns the ad hoc
+check of the join of M4-T and M4-B into a test: one custom signet with
+both rules from one height, blocks signed SLH first, then ML-DSA-44,
+below, at and above it, a block without the SLH output refused as
+bad-signet-slhblk with the lattice state unchanged, the four start-up
+lines and the separate dependency checks; and a second one shaped like
+Ark-0, with the three outputs created below the height, where an
+ML-DSA-44 spend of leaf version 0xe2 is accepted below the height and
+after it while the outputs are present, and refused once the drill
+output is spent, while an SLH-DSA spend of 0xe2 is still accepted.
+---
+ doc/p2mr-lattice-tripwire.md                  |  61 +--
+ doc/signet-slhblock.md                        |  34 +-
+ src/consensus/params.h                        |  10 +-
+ src/init.cpp                                  |  10 -
+ src/kernel/chainparams.cpp                    |  16 +-
+ src/kernel/chainparams.h                      |  94 +++--
+ src/test/p2mr_lattice_tripwire_tests.cpp      |  82 +++-
+ src/test/signet_slhblock_tests.cpp            |  41 +-
+ .../feature_p2mr_lattice_tripwire_signet.py   |  52 ++-
+ test/functional/feature_signet_slhblock.py    |  22 +-
+ .../feature_signet_slhblock_lattice.py        | 356 ++++++++++++++++++
+ test/functional/test_runner.py                |   1 +
+ 12 files changed, 656 insertions(+), 123 deletions(-)
+ create mode 100644 test/functional/feature_signet_slhblock_lattice.py
+
+diff --git a/doc/p2mr-lattice-tripwire.md b/doc/p2mr-lattice-tripwire.md
+index a8ec5a5..228185e 100644
+--- a/doc/p2mr-lattice-tripwire.md
++++ b/doc/p2mr-lattice-tripwire.md
+@@ -16,11 +16,10 @@ spend these outputs, and on a signet with one block signer the operator can keep
+ of the chain, or spend the output with a key it holds. This build is not part of BIP 360, and it is
+ not proposed for mainnet.
+ 
+-**On the Ark-0 signet these rules are not active.** Their height (`H4T`) and the three outputs are
+-not decided yet: `ARK0_LATTICE_TRIPWIRE_HEIGHT` is `std::numeric_limits<int>::max()` and the list of
+-outputs is empty, so leaf version `0xe2` stays an unknown leaf version there, and a node says so at
+-startup. A later commit sets both, as the outputs of leaf version `0xe0` were set (see
+-[Activation](#activation)).
++**On the Ark-0 signet these rules apply from height 55000** (`H4T`, `ARK0_LATTICE_TRIPWIRE_HEIGHT`),
++with the three outputs listed under [Lattice tripwire outputs](#lattice-tripwire-outputs), created at
++height 39971. The SLH-DSA block signature of [signet-slhblock.md](signet-slhblock.md) is required there
++from the same height. Below it, leaf version `0xe2` is an unknown leaf version on Ark-0.
+ 
+ ## Where leaf version 0xe2 executes
+ 
+@@ -58,16 +57,24 @@ The two tripwires are independent: either can be missing, and a reorganization c
+ and not the other. The state is the UTXO set itself: there is nothing else to restore after a
+ restart, `-reindex`, `-reindex-chainstate` or pruning.
+ 
+-On Ark-0 the three outputs will be P2MR outputs of two leaves of version `0xc0` at depth one: the
+-ML-DSA-44 template S1 of a key, and `OP_RETURN`. The leaf with the key cannot be of version `0xe2`:
++### Lattice tripwire outputs
++
++On Ark-0 the three outputs are P2MR outputs of two leaves of version `0xc0` at depth one: the
++ML-DSA-44 template S1 of a key, and `OP_RETURN`, 10,000 sats each, all created by transaction
++`aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c` in the block at height 39971
++(`ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT`). The leaf with the key cannot be of version `0xe2`:
+ before the height anyone could spend it, and after a trigger it could not be spent at all.
+ `OP_CHECKMLDSA44` in `0xc0` is never disabled.
+ 
+-| Output | Key | Label |
+-|---|---|---|
+-| L1 | the NUMS key below: nobody has a secret for it | `NUMS ML-DSA-44` |
+-| L2 | generated once, its secret destroyed (the operator says so; it cannot be proved) | `destroyed key` |
+-| L3 | the operator holds it and spends it at an announced time to trigger the drill | `drill` |
++| Output | Outpoint | Key | Label | SHA-256 of the public key |
++|---|---|---|---|---|
++| L1 | `aac5a1fe…eba8827c:0` | the NUMS key below: nobody has a secret for it | `NUMS ML-DSA-44` | `591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805` |
++| L2 | `aac5a1fe…eba8827c:1` | generated once, its secret destroyed (the operator says so; it cannot be proved) | `destroyed key` | `c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44` |
++| L3 | `aac5a1fe…eba8827c:2` | the operator holds it and spends it at an announced time to trigger the drill | `drill key` | `5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495` |
++
++The keys, the leaf scripts, the scriptPubKeys and the addresses of the three outputs are published
++with the Ark-0 evidence. The build holds the outpoints and the SHA-256 of each key; a node logs both
++at startup, with the labels, so that operators can compare them.
+ 
+ The NUMS key is computed from a domain separation tag and a label:
+ 
+@@ -138,12 +145,15 @@ like any other, which fails as disabled, or for its size while the checks still
+ A buried deployment, `p2mr_lattice_tripwire`, the last of the buried deployments, sets
+ `SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE` on blocks at or above its height where P2MR is active.
+ 
+-- **Ark-0**: not active (see above). When it is set, `H4T` is the height at the release plus seven
+-  days of blocks (6720), rounded up to the thousand; the build asserts that it is at or above the
+-  height of `OP_CHECKSLHDSA128S` (32000) and above those of the tripwire rules of `0xe0` (30000) and
+-  of `OP_CHECKMLDSA44`. While the height is "never", there is no creation height and no output; once it
+-  is finite, the build requires a creation height below it and exactly three distinct outputs, in the
+-  order and with the labels above, the first with the NUMS key.
++- **Ark-0**: from `H4T`, **55000**, chosen at the release: at least seven days of blocks (6720)
++  after it, and late enough for the operator to upgrade its nodes and its producer, which carries
++  the SLH-DSA block signature from 1,920 blocks before it. One constant, `ARK0_H4T`, holds it for
++  these rules and for the SLH-DSA block signature, which starts at the same block. The build asserts
++  the order of the Ark-0 heights, 8600 < 20000 < 30000 < 32000 <= `H4T` (`OP_CHECKMLDSA44`, the
++  ML-DSA-44 block signature, the tripwire rules of `0xe0`, `OP_CHECKSLHDSA128S`); a creation height,
++  39971, below `H4T`; exactly three distinct outputs of one transaction, in the order and with the
++  labels above, the first with the NUMS key; and the height of the SLH-DSA block signature equal to
++  `H4T`. Once a build carrying them has been published, none of these values changes.
+ - **Another custom signet**: `-signetlatticetripwire=<height>@<txid:vout>[,<txid:vout>...]`, which
+   requires `-signetchallenge`, `-signetmldsa44`, `-signettripwire` and `-signetslhdsa128s`, the
+   heights of the last two at or below its own. Ark-0 and the default signet refuse it. An outpoint
+@@ -210,15 +220,24 @@ is the tip of the active chain:
+ P2MR lattice tripwire <txid:vout> (<label>) spent by <txid> in block <hash> (height N): OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from height max(H4T, N+1)
+ ```
+ 
+-or `is already disabled`. Block proposals, blocks that fail, `VerifyDB` and the background
++or `is already disabled`. On Ark-0 the start-up line reads:
++
++```
++Signet P2MR lattice tripwire rules from height 55000 in leaf version 0xe2; tripwire outputs aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0 (NUMS ML-DSA-44, pk SHA256 591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:1 (destroyed key, pk SHA256 c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:2 (drill key, pk SHA256 5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495)
++```
++
++Block proposals, blocks that fail, `VerifyDB` and the background
+ chainstate of an assumeutxo snapshot log nothing.
+ 
+ ## Tests
+ 
+-- `src/test/p2mr_lattice_tripwire_tests.cpp`: the parameters on every chain, Ark-0 inactive, the NUMS
++- `src/test/p2mr_lattice_tripwire_tests.cpp`: the parameters on every chain, those of Ark-0 (its height,
++  outputs and creation cutoff), the NUMS
+   key computed again, the options, the state, the view `ConnectBlock` reads, the policy.
+ - `src/test/data/script_tests.json`, the block of `test/util/generate_p2mr_lattice_tripwire_script_tests.py`:
+   every combination of the three flags.
+ - `src/test/p2mr_ts_m4_tests.cpp`: the pq2 spends of p2mr-ts at `0xe2`, signed by another implementation.
+-- `test/functional/feature_p2mr_lattice_tripwire.py` and `feature_p2mr_lattice_tripwire_signet.py`.
++- `test/functional/feature_p2mr_lattice_tripwire.py` and `feature_p2mr_lattice_tripwire_signet.py`;
++  `feature_signet_slhblock_lattice.py`, these rules and the SLH-DSA block signature from one height, as
++  on Ark-0.
+ - The fuzz targets `p2mr_mldsa44`, `p2mr_rescue` and `script_flags`.
+diff --git a/doc/signet-slhblock.md b/doc/signet-slhblock.md
+index 101ad8d..fe6c1e9 100644
+--- a/doc/signet-slhblock.md
++++ b/doc/signet-slhblock.md
+@@ -7,10 +7,11 @@ public key, in a coinbase output of its own. Nodes without the rule keep
+ accepting those blocks: the rule only narrows what is valid.
+ 
+ This is an experiment of the Ark-0 test network (M4-B of its M4 design). It is
+-not part of BIP 325 or any other BIP. **It is not active on the Ark-0 signet**:
+-its height and key there are not decided, `ARK0_SLH_BLOCK_HEIGHT` is
+-`std::numeric_limits<int>::max()` and the key is unset, so an Ark-0 node has no
+-such rule and refuses the option. Both are set in one later commit.
++not part of BIP 325 or any other BIP. **On the Ark-0 signet it is required from
++height 55000** (`H4T`, `ARK0_SLH_BLOCK_HEIGHT`), the height from which the P2MR
++lattice tripwire rules of [p2mr-lattice-tripwire.md](p2mr-lattice-tripwire.md)
++apply there too, by the key fixed in the code (see [Ark-0](#ark-0)); an Ark-0
++node refuses the option.
+ 
+ ## What it proves and what it does not
+ 
+@@ -44,6 +45,31 @@ before the chain reaches `<height>`. A node logs at startup
+ 
+ which operators compare.
+ 
++## Ark-0
++
++On the Ark-0 signet the rule is fixed in the code, with no option to change it:
++
++| | |
++|---|---|
++| Height | 55000 (`ARK0_SLH_BLOCK_HEIGHT`, equal to `ARK0_LATTICE_TRIPWIRE_HEIGHT`: one constant, `ARK0_H4T`, holds both) |
++| Public key (`PK.seed \|\| PK.root`) | `012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e` |
++| SHA-256 of the public key | `a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569` |
++
++An Ark-0 node logs
++
++    Signet SLH-DSA block signature required from height 55000, public key SHA256 a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569
++
++The ML-DSA-44 block signature it relies on is required there from height 20000.
++From height 55000 every Ark-0 block carries the SLH output, and the first block
++at that height is also the first in which leaf version `0xe2` executes; the two
++rules share no state, and each checks the block as on its own
++(`feature_signet_slhblock_lattice.py` runs both from one height on a custom
++signet). The producer must start putting the SLH output in its blocks at least
++1,920 blocks (about 48 hours at its fastest rate) before the height, so that a
++wrong signature shows in the nodes' logs (`-debug=validation`) well before it
++would stop the chain. Once a build carrying the height and the key has been
++published, neither changes.
++
+ ## The block
+ 
+ Let `c` be the index of the witness commitment output: the last coinbase
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index 0b4071c..ce35091 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -192,9 +192,9 @@ struct Params {
+     /** Block height at which P2MR leaves of leaf version 0xe2 execute, and from which their
+      * OP_CHECKMLDSA44 checks fail in every block whose parent leaves a lattice tripwire output
+      * missing (doc/p2mr-lattice-tripwire.md). std::numeric_limits<int>::max() on every chain
+-     * but a custom signet given -signetlatticetripwire and regtest; on the Ark-0 signet it
+-     * stays there until ARK0_LATTICE_TRIPWIRE_HEIGHT and the outputs are decided. Never below
+-     * P2MRTripwireHeight or P2MRSLHDSA128SHeight. */
++     * but the Ark-0 signet (from ARK0_LATTICE_TRIPWIRE_HEIGHT, 55000), a custom signet given
++     * -signetlatticetripwire, and regtest. Never below P2MRTripwireHeight or
++     * P2MRSLHDSA128SHeight. */
+     int P2MRLatticeTripwireHeight;
+     /** The network id rescue proofs are bound to: SHA256 of the signet challenge on a signet,
+      * SHA256("regtest") on regtest, unset elsewhere (doc/p2mr-rescue.md). */
+@@ -238,8 +238,8 @@ struct Params {
+      * Signet only: from `height` on, every block must also carry an SLH-DSA-SHA2-128s signature
+      * by `pubkey` in the coinbase output right before the witness commitment output
+      * (doc/signet-slhblock.md). Only set on a signet given -signetslhblock, which requires
+-     * -signetchallenge and -signetpqblock at or below its height. Not set on the Ark-0 signet
+-     * until its height and key are decided (ARK0_SLH_BLOCK_HEIGHT).
++     * -signetchallenge and -signetpqblock at or below its height, and on the Ark-0 signet from
++     * ARK0_SLH_BLOCK_HEIGHT, 55000, by the key the code fixes.
+      */
+     std::optional<SignetSLHBlock> signet_slh_block{};
+     /**
+diff --git a/src/init.cpp b/src/init.cpp
+index dc8e295..09bf332 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -69,7 +69,6 @@
+ #include <rpc/server.h>
+ #include <rpc/util.h>
+ #include <scheduler.h>
+-#include <script/interpreter.h>
+ #include <script/sigcache.h>
+ #include <sync.h>
+ #include <torcontrol.h>
+@@ -972,15 +971,6 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+         LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0%s)", chainparams.GetConsensus().P2MRSLHDSA128SHeight,
+                 DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE) ? ", 0xe2" : "");
+     }
+-    // Leaf version 0xe2 and its lattice tripwire outputs (doc/p2mr-lattice-tripwire.md) are only
+-    // enabled on a signet given -signetlatticetripwire and on regtest, which log them as the chain
+-    // parameters are made. On the Ark-0 signet they are not decided yet: say so, so that an operator
+-    // does not take leaf version 0xe2 for one that executes there.
+-    if (chainparams.GetChainType() == ChainType::SIGNET && IsArk0SignetChallenge(chainparams.GetConsensus().signet_challenge) &&
+-        !DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
+-        LogInfo("P2MR lattice tripwire rules (leaf version 0x%02x) are not active on the Ark-0 signet: their height and outputs are not decided yet",
+-                P2MR_LEAF_LATTICE_TRIPWIRED);
+-    }
+     // The P2MR rescue lane (doc/p2mr-rescue.md) is only open on a signet given -signetrescue, on
+     // regtest, and on the Ark-0 signet from ARK0_RESCUE_HEIGHT, where a node logs "Signet P2MR rescue
+     // lane from height 51000 ...". Every node of a network needs the same height and network id: log
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index f2d208e..8608730 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -98,9 +98,11 @@ static constexpr auto ARK0_PQ_BLOCK_PUBKEY{
+ static_assert(ARK0_PQ_BLOCK_PUBKEY.size() == MLDSA44_PUBKEY_SIZE);
+ 
+ //! The SLH-DSA-SHA2-128s public key of the Ark-0 block signature of doc/signet-slhblock.md, from
+-//! ARK0_SLH_BLOCK_HEIGHT on. Not decided yet: unset, and M4-B is inactive on Ark-0. It is set in the
+-//! same commit as the height, with its SHA256 in the comment as for ARK0_PQ_BLOCK_PUBKEY.
+-static constexpr std::optional<std::array<unsigned char, SLHDSA128S_PUBKEY_SIZE>> ARK0_SLH_BLOCK_PUBKEY{};
++//! ARK0_SLH_BLOCK_HEIGHT on: PK.seed || PK.root, SHA256
++//! a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569. Set in the same commit as the
++//! height.
++static constexpr std::optional<std::array<unsigned char, SLHDSA128S_PUBKEY_SIZE>> ARK0_SLH_BLOCK_PUBKEY{
++    "012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e"_hex_u8};
+ // The key and the height are decided together: both set, or neither.
+ static_assert(ARK0_SLH_BLOCK_PUBKEY.has_value() == (ARK0_SLH_BLOCK_HEIGHT != std::numeric_limits<int>::max()));
+ 
+@@ -126,7 +128,7 @@ static const std::vector<Consensus::P2MRTripwire> ARK0_TRIPWIRE_OUTPOINTS{
+ };
+ 
+ //! The lattice tripwire outputs of the Ark-0 signet, ARK0_LATTICE_TRIPWIRES in kernel/chainparams.h,
+-//! as consensus parameters: none while they are not decided.
++//! as consensus parameters, each with the SHA256 of its key and its label.
+ static std::vector<Consensus::P2MRLatticeTripwire> Ark0LatticeTripwireOutpoints()
+ {
+     std::vector<Consensus::P2MRLatticeTripwire> tripwires;
+@@ -721,8 +723,8 @@ public:
+         // signet only as -signetlatticetripwire gives them, which ReadSigNetArgs refuses on Ark-0 and on
+         // the default signet, and accepts only with OP_CHECKMLDSA44, the tripwire rules of leaf version
+         // 0xe0 and OP_CHECKSLHDSA128S active at or before its height. On Ark-0 from
+-        // ARK0_LATTICE_TRIPWIRE_HEIGHT with ARK0_LATTICE_TRIPWIRE_OUTPOINTS, neither of which is decided
+-        // yet: the rules stay inactive there, and leaf version 0xe2 an unknown one.
++        // ARK0_LATTICE_TRIPWIRE_HEIGHT, H4T, with the three outputs of ARK0_LATTICE_TRIPWIRES, fixed in
++        // the code.
+         consensus.P2MRLatticeTripwireHeight = std::numeric_limits<int>::max();
+         if (options.lattice_tripwire) {
+             assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
+@@ -775,7 +777,7 @@ public:
+         // An SLH-DSA-SHA2-128s block signature next to it (doc/signet-slhblock.md): on another
+         // custom signet as -signetslhblock says, which ReadSigNetArgs accepts only with
+         // -signetpqblock at or below its height and refuses on Ark-0. On Ark-0 by the key and from
+-        // the height this code fixes, once they are decided; until then not at all.
++        // the height this code fixes, ARK0_SLH_BLOCK_PUBKEY from H4T.
+         if (options.slh_block) {
+             assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
+             assert(options.pq_block && options.pq_block->height <= options.slh_block->height);
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 99b314d..aee4325 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -90,19 +90,29 @@ inline constexpr int ARK0_RESCUE_HEIGHT{51000};
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
+ 
++/**
++ * H4T of the M4 design: the height from which the Ark-0 signet applies both M4-T, the lattice
++ * tripwire rules of leaf version 0xe2 (ARK0_LATTICE_TRIPWIRE_HEIGHT), and M4-B, the SLH-DSA-SHA2-128s
++ * block signature (ARK0_SLH_BLOCK_HEIGHT). Both take it from here, so that the two rules start at
++ * the same block and the height is written once.
++ *
++ * 55000 is the height chosen for M4-T and M4-B and fixed in the code, above the height that created
++ * the three lattice tripwire outputs. Once a build carrying it has left the network's own nodes, it
++ * does not change.
++ */
++inline constexpr int ARK0_H4T{55000};
++
+ /**
+  * Height from which the Ark-0 signet executes P2MR leaves of leaf version 0xe2, and fails their
+  * OP_CHECKMLDSA44 checks in every block whose parent leaves one of its lattice tripwire outputs,
+- * ARK0_LATTICE_TRIPWIRE_OUTPOINTS in kernel/chainparams.cpp, missing
+- * (doc/p2mr-lattice-tripwire.md), H4T. NOT DECIDED YET: until it is, it is
+- * std::numeric_limits<int>::max(), the list of outputs is empty, and leaf version 0xe2 stays an
+- * unknown leaf version on Ark-0, as leaf version 0xe0 did before ARK0_TRIPWIRE_HEIGHT was set.
++ * ARK0_LATTICE_TRIPWIRES below, missing (doc/p2mr-lattice-tripwire.md): H4T. Like the heights
++ * above, a rule of that network, fixed here rather than given by an option.
+  *
+- * It is set in one commit with the three outputs, once they are confirmed below it, at the height
+- * at the release plus seven days of blocks (6720), rounded up to the thousand. Once set, it does
+- * not change after a build carrying it has left the network's own nodes.
++ * Set in the same commit as the three outputs, above the height that created them, at least seven
++ * days of blocks (6720) after the release (doc/p2mr-lattice-tripwire.md, Activation). Once set, it
++ * does not change after a build carrying it has left the network's own nodes.
+  */
+-inline constexpr int ARK0_LATTICE_TRIPWIRE_HEIGHT{std::numeric_limits<int>::max()};
++inline constexpr int ARK0_LATTICE_TRIPWIRE_HEIGHT{ARK0_H4T};
+ // Leaf version 0xe2 runs OP_CHECKMLDSA44, which its lattice tripwire disables, follows the tripwire of
+ // leaf version 0xe0 for its elliptic curve checks, and runs OP_CHECKSLHDSA128S, its fallback once
+ // ML-DSA-44 is disabled there: all three have to be active when the leaves start to execute. The
+@@ -115,9 +125,10 @@ static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
+ static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT >= ARK0_SLHDSA128S_HEIGHT);
+ /** Whether the lattice tripwire rules of the Ark-0 signet are decided: their height is finite. */
+ inline constexpr bool ARK0_LATTICE_TRIPWIRE_DECIDED{ARK0_LATTICE_TRIPWIRE_HEIGHT != std::numeric_limits<int>::max()};
+-/** Height of the block that created the lattice tripwire outputs of the Ark-0 signet. Not decided
+- *  yet either: they do not exist. The commit that sets ARK0_LATTICE_TRIPWIRE_HEIGHT sets it. */
+-inline constexpr std::optional<int> ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT{std::nullopt};
++/** Height of the block that created the three lattice tripwire outputs of the Ark-0 signet, in one
++ *  transaction. An output counts as present only when it was created below
++ *  ARK0_LATTICE_TRIPWIRE_HEIGHT, so this has to be below it. */
++inline constexpr std::optional<int> ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT{39971};
+ 
+ /** A lattice tripwire output of the Ark-0 signet as this code fixes it: the outpoint, the SHA256 of
+  *  the ML-DSA-44 key its leaf checks (both in hex, as RPCs print them) and a label. */
+@@ -127,14 +138,21 @@ struct Ark0LatticeTripwire {
+     std::string_view key_sha256;
+     std::string_view label;
+ };
+-/** The lattice tripwire outputs of the Ark-0 signet (doc/p2mr-lattice-tripwire.md): NOT DECIDED YET,
+- *  like ARK0_LATTICE_TRIPWIRE_HEIGHT, so none, and the rules stay inactive there. They will be three
+- *  P2MR outputs of two leaves of version 0xc0 at depth one, the ML-DSA-44 template S1 of a key and
++/** The lattice tripwire outputs of the Ark-0 signet (doc/p2mr-lattice-tripwire.md), all three created
++ *  at height ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT by one transaction, 10,000 sats each. Each is a P2MR
++ *  output of two leaves of version 0xc0 at depth one, the ML-DSA-44 template S1 of a key and
+  *  OP_RETURN, in this order: the NUMS key of P2MR_LATTICE_NUMS_DST and P2MR_LATTICE_NUMS_LABEL,
+- *  labelled "NUMS ML-DSA-44"; a key whose secret was destroyed, labelled "destroyed key"; and the drill
+- *  key the operator holds, labelled "drill". A constant array rather than a vector, so that the
+- *  asserts below hold the count and the contents at compile time. */
+-inline constexpr std::array<Ark0LatticeTripwire, 0> ARK0_LATTICE_TRIPWIRES{};
++ *  labelled "NUMS ML-DSA-44", which nobody can sign for; a key whose secret was destroyed, labelled
++ *  "destroyed key"; and the drill key the operator holds, labelled "drill key". A constant array
++ *  rather than a vector, so that the asserts below hold the count and the contents at compile time. */
++inline constexpr std::array<Ark0LatticeTripwire, 3> ARK0_LATTICE_TRIPWIRES{{
++    {.txid = "aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c", .vout = 0,
++     .key_sha256 = "591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805", .label = "NUMS ML-DSA-44"},
++    {.txid = "aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c", .vout = 1,
++     .key_sha256 = "c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44", .label = "destroyed key"},
++    {.txid = "aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c", .vout = 2,
++     .key_sha256 = "5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495", .label = "drill key"},
++}};
+ 
+ /** The NUMS ML-DSA-44 public key of the first lattice tripwire output (doc/p2mr-lattice-tripwire.md):
+  *  SHAKE256 of this domain separation tag, a zero byte and the label, read as in FIPS 204 KeyGen
+@@ -165,7 +183,7 @@ consteval bool Ark0LatticeTripwiresConsistent()
+     if (!ARK0_LATTICE_TRIPWIRE_DECIDED) return !ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT && ARK0_LATTICE_TRIPWIRES.empty();
+     if (!ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT || *ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT >= ARK0_LATTICE_TRIPWIRE_HEIGHT) return false;
+     if (ARK0_LATTICE_TRIPWIRES.size() != 3) return false;
+-    constexpr std::array<std::string_view, 3> labels{"NUMS ML-DSA-44", "destroyed key", "drill"};
++    constexpr std::array<std::string_view, 3> labels{"NUMS ML-DSA-44", "destroyed key", "drill key"};
+     for (size_t i = 0; i < ARK0_LATTICE_TRIPWIRES.size(); ++i) {
+         const Ark0LatticeTripwire& t{ARK0_LATTICE_TRIPWIRES[i]};
+         if (!IsNonNullHex256(t.txid) || !IsNonNullHex256(t.key_sha256) || t.label != labels[i]) return false;
+@@ -176,25 +194,43 @@ consteval bool Ark0LatticeTripwiresConsistent()
+     return ARK0_LATTICE_TRIPWIRES[0].key_sha256 == P2MR_LATTICE_NUMS_KEY_SHA256;
+ }
+ static_assert(Ark0LatticeTripwiresConsistent());
++// The ties M4 design section 3.4 asks for, spelled out for the values above. The order of the Ark-0
++// heights: OP_CHECKMLDSA44 (H1), the ML-DSA-44 block signature (H2), the tripwire leaves of 0xe0 (H3),
++// OP_CHECKSLHDSA128S (32000), then H4T, which OP_CHECKSLHDSA128S must not come after.
++static_assert(ARK0_LATTICE_TRIPWIRE_DECIDED);
++static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT && ARK0_PQ_BLOCK_HEIGHT < ARK0_TRIPWIRE_HEIGHT &&
++              ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT && ARK0_SLHDSA128S_HEIGHT == 32000 &&
++              ARK0_SLHDSA128S_HEIGHT <= ARK0_H4T);
++// The outputs exist before the rules start: created below H4T.
++static_assert(ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT.has_value() && *ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT < ARK0_LATTICE_TRIPWIRE_HEIGHT);
++// Three distinct outpoints of one transaction, the first with the NUMS key.
++static_assert(ARK0_LATTICE_TRIPWIRES.size() == 3);
++static_assert(ARK0_LATTICE_TRIPWIRES[0].txid == ARK0_LATTICE_TRIPWIRES[1].txid &&
++              ARK0_LATTICE_TRIPWIRES[1].txid == ARK0_LATTICE_TRIPWIRES[2].txid);
++static_assert(ARK0_LATTICE_TRIPWIRES[0].vout != ARK0_LATTICE_TRIPWIRES[1].vout &&
++              ARK0_LATTICE_TRIPWIRES[1].vout != ARK0_LATTICE_TRIPWIRES[2].vout &&
++              ARK0_LATTICE_TRIPWIRES[0].vout != ARK0_LATTICE_TRIPWIRES[2].vout);
++static_assert(ARK0_LATTICE_TRIPWIRES[0].key_sha256 == P2MR_LATTICE_NUMS_KEY_SHA256);
+ 
+ /**
+  * Height from which the Ark-0 signet requires the SLH-DSA-SHA2-128s block signature of
+- * doc/signet-slhblock.md (M4-B, H4T in the M4 design), by the key kernel/chainparams.cpp would fix
+- * as ARK0_SLH_BLOCK_PUBKEY.
++ * doc/signet-slhblock.md (M4-B), by the key kernel/chainparams.cpp fixes as ARK0_SLH_BLOCK_PUBKEY
++ * (SHA256 a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569): H4T, the height of
++ * the lattice tripwire rules too, so that from that block on every Ark-0 block carries the SLH
++ * output and may spend leaves of version 0xe2. Like the heights above, a rule of that network, fixed
++ * here rather than given by an option; -signetslhblock is refused there, as every option that
++ * would change that network's rules.
+  *
+- * Neither the height nor the key is decided yet, so M4-B stays inactive on Ark-0: the height is
+- * std::numeric_limits<int>::max(), ARK0_SLH_BLOCK_PUBKEY is unset, and the Ark-0 signet's
+- * consensus parameters have no signet_slh_block (signet_slhblock_tests/ark0_inactive checks it).
+- * -signetslhblock is refused there, as every option that would change that network's rules. Both
+- * are set together, in one commit, with the height announced ahead (H4T in the M4 design: the
+- * height at release + 6,720, rounded up to a thousand); they never change once a build carrying
+- * them has left the network's own nodes.
++ * Set in the same commit as the key; neither changes once a build carrying them has left the
++ * network's own nodes.
+  */
+-inline constexpr int ARK0_SLH_BLOCK_HEIGHT{std::numeric_limits<int>::max()};
++inline constexpr int ARK0_SLH_BLOCK_HEIGHT{ARK0_H4T};
+ // The SLH-DSA block signature comes with or after OP_CHECKSLHDSA128S (32000 <= H4T, M4 design
+ // section 4.1), and after the ML-DSA-44 block signature, which the SLH output relies on.
+ static_assert(ARK0_SLH_BLOCK_HEIGHT >= ARK0_SLHDSA128S_HEIGHT);
+ static_assert(ARK0_SLH_BLOCK_HEIGHT > ARK0_PQ_BLOCK_HEIGHT);
++// M4-B and M4-T start at the same block on Ark-0 (M4 design section 4.1).
++static_assert(ARK0_SLH_BLOCK_HEIGHT == ARK0_LATTICE_TRIPWIRE_HEIGHT);
+ 
+ /** The bytes regtest's rescue network id is the SHA256 of (doc/p2mr-rescue.md). */
+ inline constexpr std::string_view P2MR_RESCUE_REGTEST_ID{"regtest"};
+diff --git a/src/test/p2mr_lattice_tripwire_tests.cpp b/src/test/p2mr_lattice_tripwire_tests.cpp
+index 2b590fe..9461477 100644
+--- a/src/test/p2mr_lattice_tripwire_tests.cpp
++++ b/src/test/p2mr_lattice_tripwire_tests.cpp
+@@ -179,27 +179,65 @@ struct UncreatedLatticeTripwireSetup : public TestChain100Setup {
+ 
+ BOOST_FIXTURE_TEST_SUITE(p2mr_lattice_tripwire_tests, BasicTestingSetup)
+ 
+-// H4T and the three lattice tripwire outputs of Ark-0 are not decided: the rules stay inactive there,
+-// as those of leaf version 0xe0 did before their height was set, and leaf version 0xe2 is an unknown
+-// leaf version in every block. The default signet, the testnets and mainnet never activate them.
+-BOOST_AUTO_TEST_CASE(ark0_inactive)
++// The lattice tripwire rules of Ark-0 as its consensus parameters carry them: from H4T, 55000, with the
++// three outputs of one transaction, created at height 39971, each with its label and the SHA256 of its
++// key, and the cutoff of "present" at H4T (doc/p2mr-lattice-tripwire.md). The default signet, the
++// testnets and mainnet never activate them.
++BOOST_AUTO_TEST_CASE(ark0)
+ {
+-    static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT == NEVER);
+-    static_assert(!ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT.has_value());
+-    // The order the heights must keep once they are set (doc/p2mr-lattice-tripwire.md).
++    static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT == ARK0_H4T && ARK0_H4T == 55000);
++    static_assert(ARK0_LATTICE_TRIPWIRE_DECIDED);
++    static_assert(ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT == 39971);
++    // The order the heights keep (doc/p2mr-lattice-tripwire.md).
+     static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT && ARK0_PQ_BLOCK_HEIGHT < ARK0_TRIPWIRE_HEIGHT);
+     static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT && ARK0_SLHDSA128S_HEIGHT <= ARK0_LATTICE_TRIPWIRE_HEIGHT);
+     const auto ark0{MakeParams(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}})};
+     const Consensus::Params& consensus{ark0->GetConsensus()};
+-    BOOST_CHECK_EQUAL(consensus.P2MRLatticeTripwireHeight, NEVER);
+-    BOOST_CHECK(consensus.p2mr_lattice_tripwires.empty());
+-    BOOST_CHECK(!DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
++    BOOST_CHECK_EQUAL(consensus.P2MRLatticeTripwireHeight, 55000);
++    BOOST_CHECK_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE), 55000);
++    BOOST_CHECK(DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
+     // The other rules of Ark-0 are unchanged.
+     BOOST_CHECK_EQUAL(consensus.P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
+     BOOST_CHECK_EQUAL(consensus.P2MRSLHDSA128SHeight, ARK0_SLHDSA128S_HEIGHT);
+     BOOST_CHECK_EQUAL(consensus.P2MRRescueHeight, ARK0_RESCUE_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.p2mr_tripwires.size(), 2U);
++
++    // The three outputs: their outpoints, labels and key hashes, as published with their keys.
++    const std::string txid{"aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c"};
++    const std::array<std::array<std::string, 3>, 3> expected{{
++        {txid + ":0", "NUMS ML-DSA-44", "591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805"},
++        {txid + ":1", "destroyed key", "c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44"},
++        {txid + ":2", "drill key", "5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495"},
++    }};
++    BOOST_REQUIRE_EQUAL(consensus.p2mr_lattice_tripwires.size(), expected.size());
++    for (size_t i{0}; i < expected.size(); ++i) {
++        const Consensus::P2MRLatticeTripwire& tripwire{consensus.p2mr_lattice_tripwires[i]};
++        BOOST_CHECK_EQUAL(strprintf("%s:%u", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n), expected[i][0]);
++        BOOST_CHECK_EQUAL(tripwire.label, expected[i][1]);
++        BOOST_REQUIRE(tripwire.key_sha256);
++        BOOST_CHECK_EQUAL(HexStr(*tripwire.key_sha256), expected[i][2]);
++    }
++    BOOST_CHECK_EQUAL(HexStr(*consensus.p2mr_lattice_tripwires[0].key_sha256), P2MR_LATTICE_NUMS_KEY_SHA256);
++    BOOST_CHECK_EQUAL(DescribeLatticeTripwireRules(consensus),
++                      "P2MR lattice tripwire rules from height 55000 in leaf version 0xe2; tripwire outputs " +
++                          txid + ":0 (NUMS ML-DSA-44, pk SHA256 591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805), " +
++                          txid + ":1 (destroyed key, pk SHA256 c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44), " +
++                          txid + ":2 (drill key, pk SHA256 5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495)");
++
++    // The creation cutoff: an output counts as present only when it was created below H4T, so the
++    // three, created at 39971, are; the same outpoints created again at or above H4T would not be.
++    for (const Consensus::P2MRLatticeTripwire& tripwire : consensus.p2mr_lattice_tripwires) {
++        for (const int height : {*ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT, ARK0_H4T - 1, ARK0_H4T, ARK0_H4T + 1}) {
++            CCoinsView empty;
++            CCoinsViewCache coins{&empty};
++            coins.AddCoin(tripwire.outpoint, Coin{CTxOut{10'000, CScript{} << OP_2 << std::vector<unsigned char>(32, 0x01)}, height, /*fCoinBaseIn=*/false},
++                          /*possible_overwrite=*/false);
++            BOOST_CHECK_EQUAL(IsP2MRTripwirePresent(coins, tripwire.outpoint, consensus.P2MRLatticeTripwireHeight), height < ARK0_H4T);
++        }
++    }
+ 
+-    // No block of Ark-0 executes leaf version 0xe2 or fails ML-DSA-44 checks in it.
++    // Blocks of Ark-0 execute leaf version 0xe2 from H4T on, not below; from there ML-DSA-44 checks in it
++    // are disabled when one of the outputs is missing, and enabled while all three are present.
+     kernel::Notifications notifications{};
+     const ChainstateManager::Options chainman_opts{
+         .chainparams = *ark0,
+@@ -220,14 +258,24 @@ BOOST_AUTO_TEST_CASE(ark0_inactive)
+     const uint256 hash{1};
+     CBlockIndex block;
+     block.phashBlock = &hash;
+-    for (const int height : {ARK0_SLHDSA128S_HEIGHT, ARK0_RESCUE_HEIGHT, 60'000, 1'000'000}) {
++    for (const int height : {ARK0_SLHDSA128S_HEIGHT, ARK0_RESCUE_HEIGHT, ARK0_H4T - 1, ARK0_H4T, ARK0_H4T + 1, 1'000'000}) {
+         block.nHeight = height;
+-        BOOST_CHECK(!(GetBlockScriptFlags(block, chainman) & SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE));
+-        CCoinsView empty;
+-        CCoinsViewCache coins{&empty};
+-        BOOST_CHECK(!P2MRMLDSADisabledAfter(&block, coins, chainman));
++        BOOST_CHECK_EQUAL(bool(GetBlockScriptFlags(block, chainman) & SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE), height >= ARK0_H4T);
++    }
++    CCoinsView empty;
++    CCoinsViewCache missing{&empty};
++    CCoinsViewCache present{&empty};
++    for (const Consensus::P2MRLatticeTripwire& tripwire : consensus.p2mr_lattice_tripwires) {
++        present.AddCoin(tripwire.outpoint, Coin{CTxOut{10'000, CScript{} << OP_2 << std::vector<unsigned char>(32, 0x01)}, 39971, false}, false);
++    }
++    // P2MRMLDSADisabledAfter(pindex) is the state for the block after pindex.
++    for (const int height : {ARK0_H4T - 2, ARK0_H4T - 1, ARK0_H4T}) {
++        block.nHeight = height;
++        BOOST_CHECK_EQUAL(P2MRMLDSADisabledAfter(&block, missing, chainman), height + 1 >= ARK0_H4T);
++        BOOST_CHECK(!P2MRMLDSADisabledAfter(&block, present, chainman));
+     }
+ 
++    // Another signet without the option, the default signet, the testnets and mainnet never activate them.
+     const auto never{[](const std::unique_ptr<const CChainParams>& params) {
+         BOOST_CHECK_EQUAL(params->GetConsensus().P2MRLatticeTripwireHeight, NEVER);
+         BOOST_CHECK(params->GetConsensus().p2mr_lattice_tripwires.empty());
+@@ -238,7 +286,7 @@ BOOST_AUTO_TEST_CASE(ark0_inactive)
+     never(MakeParams(ChainType::TESTNET, {}));
+     never(MakeParams(ChainType::TESTNET4, {}));
+ 
+-    // An Ark-0 node says so at startup (init.cpp); the node's rule list names the deployment.
++    // The node's rule list names the deployment, which getdeploymentinfo reports with the height above.
+     BOOST_CHECK_EQUAL(DeploymentName(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE), "p2mr_lattice_tripwire");
+     BOOST_CHECK(GetBuriedDeployment("p2mr_lattice_tripwire") == Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE);
+     static_assert(Consensus::ValidDeployment(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
+diff --git a/src/test/signet_slhblock_tests.cpp b/src/test/signet_slhblock_tests.cpp
+index 3856a7f..7639c9e 100644
+--- a/src/test/signet_slhblock_tests.cpp
++++ b/src/test/signet_slhblock_tests.cpp
+@@ -487,23 +487,38 @@ BOOST_AUTO_TEST_CASE(option)
+     BOOST_CHECK(!CreateChainParams(ArgsManager{}, ChainType::REGTEST)->GetConsensus().signet_slh_block);
+ }
+ 
+-// The Ark-0 signet has no SLH-DSA block signature until its height and key are decided: M4-B is
+-// inactive there, and the option is refused.
+-BOOST_AUTO_TEST_CASE(ark0_inactive)
++// The Ark-0 signet requires the SLH-DSA block signature from H4T, 55000, the height of its lattice
++// tripwire rules too, by the key the code fixes (its SHA256 is what an Ark-0 node logs at startup).
++// Nobody here can sign for it: a block without the SLH output passes below the height and is refused
++// from it on.
++BOOST_AUTO_TEST_CASE(ark0)
+ {
+-    BOOST_CHECK_EQUAL(ARK0_SLH_BLOCK_HEIGHT, std::numeric_limits<int>::max());
++    static_assert(ARK0_SLH_BLOCK_HEIGHT == ARK0_H4T && ARK0_H4T == 55000);
++    static_assert(ARK0_SLH_BLOCK_HEIGHT == ARK0_LATTICE_TRIPWIRE_HEIGHT);
+     ArgsManager args;
+     args.ForceSetArg("-signetchallenge", std::string{ARK0_CHALLENGE});
+     const auto params{CreateChainParams(args, ChainType::SIGNET)};
+-    BOOST_CHECK(!params->GetConsensus().signet_slh_block);
+-    // The M2 rule is there; an Ark-0 block without any SLH output passes the M4-B check at any height.
+-    BOOST_CHECK(params->GetConsensus().signet_pq_block);
+-    CBlock block{MakeBlock(100)};
+-    block = WithCoinbase(block, [](CMutableTransaction& tx) {
+-        tx.vout.erase(tx.vout.begin() + 1);
+-        tx.vin[0].scriptSig = CScript() << std::numeric_limits<int>::max() - 1 << OP_0;
+-    });
+-    BOOST_CHECK(CheckSignetSLHBlock(block, params->GetConsensus()));
++    const Consensus::Params& consensus{params->GetConsensus()};
++    BOOST_REQUIRE(consensus.signet_slh_block);
++    BOOST_CHECK_EQUAL(consensus.signet_slh_block->height, 55000);
++    BOOST_CHECK_EQUAL(HexStr(consensus.signet_slh_block->pubkey), "012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e");
++    uint256 key_hash;
++    CSHA256().Write(consensus.signet_slh_block->pubkey.data(), consensus.signet_slh_block->pubkey.size()).Finalize(key_hash.begin());
++    BOOST_CHECK_EQUAL(HexStr(key_hash), "a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569");
++    // The M2 rule it relies on is there, from a lower height.
++    BOOST_REQUIRE(consensus.signet_pq_block);
++    BOOST_CHECK_EQUAL(consensus.signet_pq_block->height, ARK0_PQ_BLOCK_HEIGHT);
++    BOOST_CHECK_LT(consensus.signet_pq_block->height, consensus.signet_slh_block->height);
++
++    // An Ark-0 block without any SLH output: accepted below H4T, refused at it and above.
++    const CBlock block{MakeBlock(100)};
++    for (const int height : {ARK0_SLHDSA128S_HEIGHT, ARK0_H4T - 1, ARK0_H4T, ARK0_H4T + 1}) {
++        const CBlock without{WithCoinbase(block, [&](CMutableTransaction& tx) {
++            tx.vout.erase(tx.vout.begin() + 1);
++            tx.vin[0].scriptSig = CScript() << height << OP_0;
++        })};
++        BOOST_CHECK_EQUAL(CheckSignetSLHBlock(without, consensus), height < ARK0_H4T);
++    }
+ }
+ 
+ BOOST_AUTO_TEST_SUITE_END()
+diff --git a/test/functional/feature_p2mr_lattice_tripwire_signet.py b/test/functional/feature_p2mr_lattice_tripwire_signet.py
+index b8af93c..e669673 100644
+--- a/test/functional/feature_p2mr_lattice_tripwire_signet.py
++++ b/test/functional/feature_p2mr_lattice_tripwire_signet.py
+@@ -2,24 +2,37 @@
+ # Copyright (c) 2026 duncan0k
+ # Distributed under the MIT software license, see the accompanying
+ # file COPYING or http://www.opensource.org/licenses/mit-license.php.
+-"""Test the P2MR lattice tripwire rules on a custom signet, and their absence on Ark-0
++"""Test the P2MR lattice tripwire rules on a custom signet, and their parameters on Ark-0
+ (doc/p2mr-lattice-tripwire.md).
+ 
+ Node 0 runs a custom signet with -signetlatticetripwire, whose one lattice tripwire output never
+ existed: from the height of the rules, ML-DSA-44 checks in leaf version 0xe2 are disabled, which
+ gettripwireinfo and getdeploymentinfo report, and the startup log names the rules. Node 1 runs the
+-Ark-0 signet, whose height and lattice tripwire outputs are not decided: the rules are not active
+-there, the deployment is not listed, gettripwireinfo has no lattice object, and the startup log
+-says so. The script rules themselves are tested on regtest (feature_p2mr_lattice_tripwire.py).
++Ark-0 signet, whose rules start at H4T, 55000, with three lattice tripwire outputs fixed in the code:
++getdeploymentinfo lists the deployment at that height, gettripwireinfo reports the three outputs with
++their labels and key hashes (they do not exist on this fresh chain, which only matters from the
++height on), the startup log names the rules and the SLH-DSA block signature of the same height, and
++the option stays refused. The script rules themselves are tested on regtest
++(feature_p2mr_lattice_tripwire.py).
+ """
+ 
+ from test_framework.test_framework import BitcoinTestFramework
++from test_framework.test_node import ErrorMatch
+ from test_framework.util import assert_equal
+ 
+ CHALLENGE = "51"
+ ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
+ H1, H3, H4, H4T = 1, 3, 4, 6
+ NEVER_CREATED = f"{'22' * 32}:1"
++# Ark-0: H4T, and the three lattice tripwire outputs with their labels and key hashes.
++ARK0_H4T = 55000
++ARK0_TXID = "aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c"
++ARK0_LATTICE = [
++    (f"{ARK0_TXID}:0", "NUMS ML-DSA-44", "591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805"),
++    (f"{ARK0_TXID}:1", "destroyed key", "c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44"),
++    (f"{ARK0_TXID}:2", "drill key", "5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495"),
++]
++ARK0_SLH_KEY_SHA256 = "a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569"
+ # Signet blocks need real proof of work, about 2^22 hashes each.
+ MAXTRIES = 10**9
+ ARGS = [f"-signetchallenge={CHALLENGE}", f"-signetmldsa44={H1}", f"-signettripwire={H3}@{'11' * 32}:0",
+@@ -58,14 +71,33 @@ class P2MRLatticeTripwireSignetTest(BitcoinTestFramework):
+         assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["active"], True)
+         assert "P2MR_LATTICE_TRIPWIRE" in node.getdeploymentinfo()["script_flags"]
+ 
+-        self.log.info("Ark-0: the lattice tripwire rules are not active, and the node says so")
+-        assert "p2mr_lattice_tripwire" not in ark0.getdeploymentinfo()["deployments"]
+-        assert "lattice" not in ark0.gettripwireinfo()
++        self.log.info(f"Ark-0: the lattice tripwire rules from height {ARK0_H4T}, with the three outputs the code fixes")
++        assert_equal(ark0.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"], {"type": "buried", "active": False, "height": ARK0_H4T})
++        assert "P2MR_LATTICE_TRIPWIRE" not in ark0.getdeploymentinfo()["script_flags"]
++        # A fresh chain has none of the outputs: "missing", which only disables anything from the height on.
++        assert_equal(ark0.gettripwireinfo()["lattice"], {
++            "height": ARK0_H4T,
++            "leaf_version": "e2",
++            "tripwires": [{"outpoint": outpoint, "state": "missing", "key_sha256": key_sha256, "label": label}
++                          for outpoint, label, key_sha256 in ARK0_LATTICE],
++            "mldsa_disabled_next_block": False,
++        })
+         log = ark0.debug_log_path.read_text()
+-        assert "P2MR lattice tripwire rules (leaf version 0xe2) are not active on the Ark-0 signet: their height and outputs are not decided yet" in log
+-        assert "P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)" in log
+-        assert "P2MR lattice tripwire rules from height" not in log
++        outputs = ", ".join(f"{outpoint} ({label}, pk SHA256 {key_sha256})" for outpoint, label, key_sha256 in ARK0_LATTICE)
++        assert f"Signet P2MR lattice tripwire rules from height {ARK0_H4T} in leaf version 0xe2; tripwire outputs {outputs}" in log
++        assert f"Signet SLH-DSA block signature required from height {ARK0_H4T}, public key SHA256 {ARK0_SLH_KEY_SHA256}" in log
++        assert "P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0, 0xe2)" in log
++        states = ", ".join(f"{outpoint} missing" for outpoint, _, _ in ARK0_LATTICE)
++        assert f"P2MR lattice tripwire state at height 0: lattice tripwire outputs {states}; ML-DSA-44 checks in leaf version 0xe2 are enabled for the next block" in log
++        assert "are not active on the Ark-0 signet" not in log
+ 
++        self.log.info("Ark-0: the options that would change these rules stay refused")
++        ark0.stop_node()
++        for arg, error in ((f"-signetlatticetripwire={ARK0_H4T}@{NEVER_CREATED}", "-signetlatticetripwire"),
++                           (f"-signetslhblock={'01' * 32}@{ARK0_H4T}", "-signetslhblock")):
++            ark0.assert_start_raises_init_error([f"-signetchallenge={ARK0_CHALLENGE}", arg],
++                                                f"Error: {error} cannot be used on the Ark-0 signet, whose rules are fixed in the code.",
++                                                match=ErrorMatch.FULL_TEXT)
+ 
+ if __name__ == '__main__':
+     P2MRLatticeTripwireSignetTest(__file__).main()
+diff --git a/test/functional/feature_signet_slhblock.py b/test/functional/feature_signet_slhblock.py
+index 09b95ad..8a6ffc0 100755
+--- a/test/functional/feature_signet_slhblock.py
++++ b/test/functional/feature_signet_slhblock.py
+@@ -19,7 +19,8 @@ build without this series):
+   contrib/signet/miner; and a block made in the wrong order (ML-DSA-44 first, SLH second), which
+   both the new and the old node refuse;
+ 
+-and a node with Ark-0's challenge, where the rule is not active; and a node on its own (node 6)
++and a node with Ark-0's challenge, where the rule applies from H4T, 55000, by the key the code fixes,
++and the option is refused; and a node on its own (node 6)
+ for the multi-byte BIP34 heights of the design, through submitblock (see test_bip34_heights).
+ """
+ 
+@@ -77,6 +78,10 @@ PQ_HEIGHT = 2           # -signetpqblock height on both signets
+ SLH_HEIGHT = 130        # -signetslhblock height on the OP_TRUE signet: coinbases below it mature first
+ MULTI_SLH_HEIGHT = 4    # and on the bare multisig signet
+ ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++# H4T: Ark-0 requires the SLH-DSA block signature from this height, by the key with this SHA256, and
++# starts its lattice tripwire rules there too.
++ARK0_H4T = 55000
++ARK0_SLH_KEY_SHA256 = "a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569"
+ MAX_BLOCK_WEIGHT = 4_000_000
+ BAD_PQ = "bad-signet-pqblk"
+ BAD_SLH = "bad-signet-slhblk"
+@@ -122,7 +127,7 @@ class SignetSLHBlockTest(BitcoinTestFramework):
+             # the bare multisig signet: node 3 with the rule and the classical key, node 4 without the rule
+             [multi, pq_rule, f"-signetslhblock={self.slh_pubkey.hex()}@{MULTI_SLH_HEIGHT}", noban, "-blockreservedweight=48000"],
+             [multi, pq_rule, noban],
+-            # Ark-0's challenge, alone: M4-B is not active there
++            # Ark-0's challenge, alone: M4-B from H4T there
+             [f"-signetchallenge={ARK0_CHALLENGE}", "-debug=validation"],
+             # On its own, restarted with the rule at each height test_bip34_heights tries
+             ["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@1"],
+@@ -238,7 +243,7 @@ class SignetSLHBlockTest(BitcoinTestFramework):
+         self.sign_other = program_slh_signer(self.program, self.other_keyfile)
+ 
+         self.test_options()
+-        self.test_ark0_inactive()
++        self.test_ark0()
+         self.test_below_height()
+         self.test_negative_list()
+         self.test_at_height()
+@@ -285,13 +290,16 @@ class SignetSLHBlockTest(BitcoinTestFramework):
+         self.start_node(1, extra_args=self.extra_args[1])
+         self.connect_nodes(0, 1)
+ 
+-    def test_ark0_inactive(self):
+-        self.log.info("Ark-0: M4-B is not active (no height and no key yet); M2 is")
++    def test_ark0(self):
++        self.log.info(f"Ark-0: M4-B from H4T, {ARK0_H4T}, by the key the code fixes, after M2; the option is refused")
+         node = self.nodes[5]
+-        with node.assert_debug_log(["Signet blocks need an ML-DSA-44 block signature from height 20000"],
+-                                   unexpected_msgs=["SLH-DSA block signature required"]):
++        with node.assert_debug_log(["Signet blocks need an ML-DSA-44 block signature from height 20000",
++                                    f"Signet SLH-DSA block signature required from height {ARK0_H4T}, public key SHA256 {ARK0_SLH_KEY_SHA256}",
++                                    f"Signet P2MR lattice tripwire rules from height {ARK0_H4T} in leaf version 0xe2"]):
+             self.restart_node(5, extra_args=self.extra_args[5])
+         self.stop_node(5)
++        node.assert_start_raises_init_error([f"-signetchallenge={ARK0_CHALLENGE}", f"-signetslhblock={self.slh_pubkey.hex()}@{ARK0_H4T}"],
++                                            "Error: -signetslhblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
+ 
+     def test_below_height(self):
+         self.log.info("Below the height blocks need no SLH-DSA signature; a present one is only logged")
+diff --git a/test/functional/feature_signet_slhblock_lattice.py b/test/functional/feature_signet_slhblock_lattice.py
+new file mode 100644
+index 0000000..8047f24
+--- /dev/null
++++ b/test/functional/feature_signet_slhblock_lattice.py
+@@ -0,0 +1,356 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the SLH-DSA block signature and the P2MR lattice tripwire rules starting at the same height,
++as they do on the Ark-0 signet at H4T (doc/signet-slhblock.md, doc/p2mr-lattice-tripwire.md).
++
++The two rules share no code or state: the SLH-DSA block signature is a block rule on the coinbase,
++checked in CheckBlock, and the lattice tripwire a script rule on spends of leaf version 0xe2,
++checked in ConnectBlock from the UTXO set. Two custom signets, each on a node of its own, with every
++option of both: -signetpqblock, -signetmldsa44, -signettripwire, -signetslhdsa128s, and
++-signetslhblock and -signetlatticetripwire at one height.
++
++- Node 0, both from height 6, with a lattice tripwire output that never existed: the four start-up
++  lines; blocks signed SLH first, then ML-DSA-44, accepted below, at and above the height; at the
++  height both rules start, and ML-DSA-44 checks in 0xe2 are disabled since a tripwire is missing;
++  above it a block without the SLH output is refused as bad-signet-slhblk with the lattice state
++  unchanged; and the dependency checks of the options, each series' own.
++- Node 1, shaped like Ark-0: three lattice tripwire outputs created by one transaction below the
++  height, both rules from height 110. An ML-DSA-44 spend of leaf version 0xe2 is accepted in a block
++  below the height (unexecuted) and after it while the three outputs are present; once the drill
++  output is spent, an ML-DSA-44 spend in 0xe2 is refused, in the mempool and in a block, while an
++  SLH-DSA spend in 0xe2 is still accepted, in blocks that carry the SLH output.
++"""
++
++import hashlib
++import importlib.machinery
++import importlib.util
++import logging
++import os
++import subprocess
++
++from test_framework.messages import COIN, COutPoint, CBlockHeader, CTransaction, CTxIn, CTxInWitness, CTxOut, from_hex
++from test_framework.p2mr_lattice_tripwire import (
++    MLDSA_DISABLED_ERROR,
++    lattice_tripwire_tree,
++    mldsa44_any_leaf_witness,
++    nums_pubkey,
++    pq2_tree,
++    slhdsa128s_leaf_witness,
++)
++from test_framework.p2mr_mldsa44 import mldsa44_keygen
++from test_framework.p2mr_slhdsa128s import slhdsa128s_keygen
++from test_framework.script import CScript, OP_TRUE
++from test_framework.signet_pq import add_signet_pq_signature, signet_pq_keygen
++from test_framework.signet_slh import (
++    add_signet_slh_and_pq_signatures,
++    program_slh_pubkey,
++    program_slh_signer,
++    python_slh_signer,
++    signet_slh_sign_program,
++    verify_signet_slh_signature,
++)
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.test_node import ErrorMatch
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++PQ_PUBKEY, PQ_SECKEY = signet_pq_keygen(bytes.fromhex("11" * 32))
++SLH_SEED = hashlib.sha256(b"tb_both_rules key").digest() + bytes(16)
++CHALLENGE = bytes(CScript([OP_TRUE]))
++NEVER_CREATED = f"{'22' * 32}:1"
++# Node 0: both rules from height 6, the lattice tripwire's (M4-T) and the SLH block signature's (M4-B).
++H = 6
++# Node 1: the ML-DSA-44 block signature from 104, both rules from 110, the outputs created below 104.
++PQ_B, H_B = 104, 110
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++
++
++def seckey(tag):
++    return hashlib.sha256(b"feature_signet_slhblock_lattice " + tag).digest()
++
++
++L2_PUB, L2_SEC = mldsa44_keygen(seckey(b"destroyed"))
++L3_PUB, L3_SEC = mldsa44_keygen(seckey(b"drill"))
++PQ_PUB, PQ_SEC = mldsa44_keygen(seckey(b"ml-dsa-44"))
++SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha512(b"feature_signet_slhblock_lattice slh").digest()[:48])
++# The three lattice tripwire outputs, in Ark-0's order: the NUMS key, a "destroyed" key, the drill key.
++TREES = {"L1": lattice_tripwire_tree(nums_pubkey()), "L2": lattice_tripwire_tree(L2_PUB), "L3": lattice_tripwire_tree(L3_PUB)}
++# pq2: S1 and SLH1 in leaf version 0xe2.
++PQ2 = pq2_tree(PQ_PUB, SLH_PUB)
++
++
++def load_signet_miner(srcdir):
++    path = os.path.join(srcdir, "contrib", "signet", "miner")
++    loader = importlib.machinery.SourceFileLoader("signetminer", path)
++    spec = importlib.util.spec_from_loader("signetminer", loader)
++    module = importlib.util.module_from_spec(spec)
++    root = logging.getLogger()
++    handlers = list(root.handlers)
++    loader.exec_module(module)
++    for handler in list(root.handlers):
++        if handler not in handlers:
++            root.removeHandler(handler)
++    return module
++
++
++def outpoint(tx, n):
++    return f"{tx.txid_hex}:{n}"
++
++
++class SignetSLHBlockLatticeTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        self.rpc_timeout = 240
++        self.slh_pubkey, self.slh_seckey = slhdsa128s_keygen(SLH_SEED)
++        self.lattice = ["-signetmldsa44=1", f"-signettripwire=3@{'11' * 32}:0", "-signetslhdsa128s=4",
++                        f"-signetlatticetripwire={H}@{NEVER_CREATED}"]
++        self.blocksig = [f"-signetpqblock={PQ_PUBKEY.hex()}@2", f"-signetslhblock={self.slh_pubkey.hex()}@{H}"]
++        # Node 1 starts without -signetlatticetripwire: its outputs do not exist yet.
++        self.base_b = ["-signetchallenge=51", "-signetmldsa44=1", f"-signettripwire=3@{'11' * 32}:0", "-signetslhdsa128s=4",
++                       f"-signetpqblock={PQ_PUBKEY.hex()}@{PQ_B}", f"-signetslhblock={self.slh_pubkey.hex()}@{H_B}",
++                       "-blockreservedweight=48000", "-debug=validation"]
++        self.extra_args = [["-signetchallenge=51"] + self.lattice + self.blocksig + ["-blockreservedweight=48000"], self.base_b]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_bitcoin_util()
++
++    def setup_network(self):
++        # Two separate signets: the nodes are not connected.
++        self.setup_nodes()
++
++    # ------------------------------------------------------------------
++    # Blocks
++    # ------------------------------------------------------------------
++
++    def grind(self, node, block):
++        util_argv = node.binaries.util_argv() + ["grind"]
++        out = subprocess.run(util_argv + [CBlockHeader.serialize(block).hex()], stdout=subprocess.PIPE, check=True).stdout.strip()
++        block.nNonce = from_hex(CBlockHeader(), out.decode()).nNonce
++        return block
++
++    def block(self, node, *, slh=True, pq=True, txs=None, reward=CHALLENGE):
++        """A block from node's template, or with txs in place of the template's transactions (the
++        node can hand out the same template for a few seconds after its mempool changed), signed
++        SLH first, then ML-DSA-44 (or ML-DSA-44 only, or neither), then ground."""
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        if txs is not None:
++            # The coinbase gives up the fees of the template's transactions and of txs.
++            tmpl["coinbasevalue"] -= sum(t["fee"] for t in tmpl["transactions"])
++            tmpl["transactions"] = [{"data": tx.serialize().hex()} for tx in txs]
++        block = self.miner.new_block(tmpl, reward)
++        if slh:
++            add_signet_slh_and_pq_signatures(block, CHALLENGE, self.sign, PQ_SECKEY)
++            assert verify_signet_slh_signature(block, self.slh_pubkey, CHALLENGE)
++        elif pq:
++            add_signet_pq_signature(block, PQ_SECKEY, CHALLENGE)
++        return self.grind(node, block)
++
++    def submit(self, node, block, expected=None):
++        assert_equal(node.submitblock(block.serialize().hex()), expected)
++
++    def mine_to_wallet(self, node, count, txs=None):
++        """count blocks below the ML-DSA-44 block signature's height, paying the wallet, the first with
++        txs; ground by bitcoin-util, faster than the node's own miner."""
++        for i in range(count):
++            self.submit(node, self.block(node, slh=False, pq=False, txs=txs if i == 0 else None, reward=self.wallet.get_output_script()))
++        self.wallet.rescan_utxos()
++
++    # ------------------------------------------------------------------
++    # Node 1's transactions
++    # ------------------------------------------------------------------
++
++    def spend(self, utxo, make_witness):
++        """A spend of one output of the funding transaction to the wallet, with the witness make_witness gives."""
++        tx = CTransaction()
++        tx.vin = [CTxIn(COutPoint(utxo["tx"].txid_int, utxo["n"]), b"", 0xfffffffd)]
++        tx.vout = [CTxOut(FUND_SATS - FEE_SATS, self.wallet.get_output_script())]
++        spent = [utxo["tx"].vout[utxo["n"]]]
++        tx.wit.vtxinwit = [CTxInWitness()]
++        tx.wit.vtxinwit[0].scriptWitness.stack = make_witness(tx, spent, 0)
++        return tx
++
++    def pq_spend(self, utxo):
++        leaf = PQ2.leaves["pq"]
++        return self.spend(utxo, lambda tx, spent, index: mldsa44_any_leaf_witness(PQ_SEC, leaf, tx, spent, index))
++
++    def slh_spend(self, utxo):
++        leaf = PQ2.leaves["slh"]
++        return self.spend(utxo, lambda tx, spent, index: slhdsa128s_leaf_witness(SLH_SEC, leaf, tx, spent, index))
++
++    def lattice_info(self, node):
++        return node.gettripwireinfo()["lattice"]
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        self.miner = load_signet_miner(self.config["environment"]["SRCDIR"])
++        program = signet_slh_sign_program(self.config)
++        if program is None:
++            self.log.info("signet-slh-sign is not built: the blocks are signed in Python, which is slower")
++            self.sign = python_slh_signer(self.slh_seckey)
++        else:
++            keyfile = os.path.join(self.options.tmpdir, "slh.key")
++            with open(keyfile, "wb") as f:
++                f.write(SLH_SEED)
++            assert_equal(program_slh_pubkey(program, keyfile), self.slh_pubkey)
++            self.sign = program_slh_signer(program, keyfile, pubkey=self.slh_pubkey)
++
++        self.test_both_rules_never_created()
++        self.test_options()
++        self.test_both_rules_with_outputs()
++
++    def test_both_rules_never_created(self):
++        node = self.nodes[0]
++
++        self.log.info("Start-up: both rules log their line")
++        log = node.debug_log_path.read_text()
++        slh_key_sha = hashlib.sha256(self.slh_pubkey).hexdigest()
++        pq_key_sha = hashlib.sha256(PQ_PUBKEY).hexdigest()
++        for line in (f"Signet P2MR lattice tripwire rules from height {H} in leaf version 0xe2; tripwire outputs {NEVER_CREATED}",
++                     "P2MR SLH-DSA-SHA2-128s rules active from height 4 (leaf versions 0xc0, 0xe0, 0xe2)",
++                     f"Signet blocks need an ML-DSA-44 block signature from height 2, by the key whose SHA256 is {pq_key_sha}",
++                     f"Signet SLH-DSA block signature required from height {H}, public key SHA256 {slh_key_sha}"):
++            assert line in log, line
++
++        self.log.info("Blocks below, at and above the height of both rules, signed SLH first, then ML-DSA-44")
++        for height in range(1, H + 3):
++            if height == H:
++                with node.assert_debug_log([f"P2MR lattice tripwire rules active from height {H}, reached by block ",
++                                            f"lattice tripwire outputs {NEVER_CREATED} missing; ML-DSA-44 checks in leaf version 0xe2 are disabled for the next block"]):
++                    self.submit(node, self.block(node))
++            else:
++                self.submit(node, self.block(node))
++            assert_equal(node.getblockcount(), height)
++            # Both rules start at the same block: the deployment is active for the next block from H - 1 on.
++            assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["active"], height >= H - 1)
++            assert_equal(self.lattice_info(node)["mldsa_disabled_next_block"], height >= H - 1)
++        assert "P2MR_LATTICE_TRIPWIRE" in node.getdeploymentinfo()["script_flags"]
++
++        self.log.info("Above both heights, a block without the SLH output is refused, the lattice tripwire state unchanged")
++        before = self.lattice_info(node)
++        self.submit(node, self.block(node, slh=False), "bad-signet-slhblk")
++        assert_equal(node.getblockcount(), H + 2)
++        assert_equal(self.lattice_info(node), before)
++        assert_equal(before["mldsa_disabled_next_block"], True)
++
++    def test_options(self):
++        self.log.info("The options' dependency checks stay separate")
++        node = self.nodes[0]
++        node.stop_node()
++        base = ["-signetchallenge=51"]
++        cases = [
++            (self.lattice + [f"-signetslhblock={self.slh_pubkey.hex()}@{H}"], "-signetslhblock requires -signetpqblock."),
++            ([a for a in self.lattice if not a.startswith("-signetslhdsa128s")] + self.blocksig, "-signetlatticetripwire requires -signetslhdsa128s."),
++            ([a for a in self.lattice if not a.startswith("-signetmldsa44")] + self.blocksig, "-signettripwire requires -signetmldsa44."),
++        ]
++        for args, error in cases:
++            node.assert_start_raises_init_error(base + args, f"Error: {error}", match=ErrorMatch.FULL_TEXT)
++        # Both rules, on the same chain data, still start.
++        self.restart_node(0, base + self.lattice + self.blocksig)
++        assert_equal(node.getblockcount(), H + 2)
++
++    def test_both_rules_with_outputs(self):
++        node = self.nodes[1]
++        self.wallet = MiniWallet(node)
++
++        self.log.info(f"Node 1: {PQ_B - 2} blocks, then one transaction creates the three lattice tripwire outputs below the height")
++        self.mine_to_wallet(node, PQ_B - 3)
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        names = ["L1", "L2", "L3", "pq_below", "pq_at", "pq_after", "slh_after"]
++        fund = CTransaction()
++        fund.vin = [CTxIn(COutPoint(int(utxo["txid"], 16), utxo["vout"]), b"", 0xfffffffd)]
++        fund.vout = [CTxOut(FUND_SATS, (TREES[n] if n in TREES else PQ2).scriptPubKey) for n in names]
++        fund.vout.append(CTxOut(int(utxo["value"] * COIN) - FUND_SATS * len(names) - FEE_SATS, self.wallet.get_output_script()))
++        self.wallet.sign_tx(fund)
++        node.sendrawtransaction(fund.serialize().hex())
++        self.mine_to_wallet(node, 1, txs=[fund])
++        creation_height = node.getblockcount()
++        assert_equal(creation_height, PQ_B - 2)
++        assert fund.txid_hex in node.getblock(node.getbestblockhash())["tx"]
++        self.outs = {n: {"tx": fund, "n": i} for i, n in enumerate(names)}
++        tripwires = [outpoint(fund, i) for i in range(3)]
++
++        self.log.info(f"Restart with the lattice tripwire rules from {H_B}, the height of the SLH block signature: the start-up lines")
++        lattice_arg = f"-signetlatticetripwire={H_B}@{','.join(tripwires)}"
++        states = ", ".join(f"{t} unspent" for t in tripwires)
++        with node.assert_debug_log([f"Signet P2MR lattice tripwire rules from height {H_B} in leaf version 0xe2; tripwire outputs {', '.join(tripwires)}",
++                                    "P2MR SLH-DSA-SHA2-128s rules active from height 4 (leaf versions 0xc0, 0xe0, 0xe2)",
++                                    f"Signet blocks need an ML-DSA-44 block signature from height {PQ_B}, by the key whose SHA256 is {hashlib.sha256(PQ_PUBKEY).hexdigest()}",
++                                    f"Signet SLH-DSA block signature required from height {H_B}, public key SHA256 {hashlib.sha256(self.slh_pubkey).hexdigest()}",
++                                    f"P2MR lattice tripwire state at height {creation_height}: lattice tripwire outputs {states}; "
++                                    "ML-DSA-44 checks in leaf version 0xe2 are enabled for the next block"]):
++            self.restart_node(1, self.base_b + [lattice_arg])
++        assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"], {"type": "buried", "active": False, "height": H_B})
++        reward = self.wallet.get_output_script()
++        self.mine_to_wallet(node, 1)
++        assert_equal(node.getblockcount(), PQ_B - 1)
++
++        self.log.info("Below the height: an ML-DSA-44 spend of leaf version 0xe2 stays out of the mempool, and a block takes it")
++        below = self.pq_spend(self.outs["pq_below"])
++        assert_raises_rpc_error(-26, "Taproot version reserved for soft-fork upgrades", node.sendrawtransaction, below.serialize().hex())
++        self.submit(node, self.block(node, slh=False, txs=[below], reward=reward))
++        assert_equal(node.getblockcount(), PQ_B)
++        assert below.txid_hex in node.getblock(node.getbestblockhash())["tx"]
++
++        self.log.info("Blocks below the height, with the ML-DSA-44 block signature, then also the SLH one")
++        while node.getblockcount() < H_B - 3:
++            self.submit(node, self.block(node, slh=False, reward=reward))
++        while node.getblockcount() < H_B - 1:
++            with node.assert_debug_log([f"below height {H_B}, SLH-DSA block signature valid"]):
++                self.submit(node, self.block(node, reward=reward))
++        assert_equal(self.lattice_info(node)["mldsa_disabled_next_block"], False)
++        assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["active"], True)
++
++        self.log.info("At the height: a block without the SLH output is refused; with it, both rules start, the three outputs present")
++        self.submit(node, self.block(node, slh=False, reward=reward), "bad-signet-slhblk")
++        with node.assert_debug_log([f"P2MR lattice tripwire rules active from height {H_B}, reached by block ",
++                                    f"lattice tripwire outputs {states}; ML-DSA-44 checks in leaf version 0xe2 are enabled for the next block"]):
++            self.submit(node, self.block(node, reward=reward))
++        assert_equal(node.getblockcount(), H_B)
++        assert_equal([t["state"] for t in self.lattice_info(node)["tripwires"]], ["unspent"] * 3)
++
++        self.log.info("Above it, with all three present: an ML-DSA-44 spend of leaf version 0xe2 is accepted, in the mempool and in a block")
++        at = self.pq_spend(self.outs["pq_at"])
++        node.sendrawtransaction(at.serialize().hex())
++        self.submit(node, self.block(node, txs=[at], reward=reward))
++        assert at.txid_hex in node.getblock(node.getbestblockhash())["tx"]
++
++        self.log.info("The drill output is spent: ML-DSA-44 checks in leaf version 0xe2 are disabled from the next block on")
++        leaf = TREES["L3"].leaves["pq"]
++        trip = self.spend({"tx": self.outs["L3"]["tx"], "n": self.outs["L3"]["n"]},
++                          lambda tx, spent, index: mldsa44_any_leaf_witness(L3_SEC, leaf, tx, spent, index))
++        node.sendrawtransaction(trip.serialize().hex())
++        height = node.getblockcount() + 1
++        with node.assert_debug_log([f"P2MR lattice tripwire {tripwires[2]} spent by {trip.txid_hex} in block "]):
++            self.submit(node, self.block(node, txs=[trip], reward=reward))
++        assert_equal(node.getblockcount(), height)
++        info = self.lattice_info(node)
++        assert_equal([t["state"] for t in info["tripwires"]], ["unspent", "unspent", "missing"])
++        assert_equal(info["mldsa_disabled_next_block"], True)
++
++        self.log.info("Then an ML-DSA-44 spend in 0xe2 is refused, in the mempool and in a block, an SLH-DSA spend in 0xe2 still accepted")
++        after = self.pq_spend(self.outs["pq_after"])
++        assert_raises_rpc_error(-26, MLDSA_DISABLED_ERROR, node.sendrawtransaction, after.serialize().hex())
++        self.submit(node, self.block(node, txs=[after], reward=reward), f"block-script-verify-flag-failed ({MLDSA_DISABLED_ERROR})")
++        slh = self.slh_spend(self.outs["slh_after"])
++        node.sendrawtransaction(slh.serialize().hex())
++        self.submit(node, self.block(node, txs=[slh], reward=reward))
++        assert slh.txid_hex in node.getblock(node.getbestblockhash())["tx"]
++        assert_equal(node.getblockcount(), height + 1)
++
++        self.log.info("Above both heights, a block without the SLH output is refused, the lattice tripwire state unchanged")
++        before = self.lattice_info(node)
++        self.submit(node, self.block(node, slh=False, reward=reward), "bad-signet-slhblk")
++        assert_equal(self.lattice_info(node), before)
++        assert_equal(node.getblockcount(), height + 1)
++
++
++if __name__ == '__main__':
++    SignetSLHBlockLatticeTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 0e5076c..31c2d2a 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -110,6 +110,7 @@ BASE_SCRIPTS = [
+     'p2p_node_network_limited.py --v1transport',
+     'p2p_node_network_limited.py --v2transport',
+     'feature_signet_slhblock.py',
++    'feature_signet_slhblock_lattice.py',
+     # vv Tests less than 2m vv
+     'feature_signet_pqblock_edges.py',
+     'mining_getblocktemplate_longpoll.py',
+-- 
+2.49.0.windows.1
+
