@@ -1,0 +1,82 @@
+# The one-time Job that makes L2 (design m4-design-2026-10-14.md §3.1), in a namespace of its own on de1's
+# k3s. Not applied as it is: `m4t_tripwires.py l2-job --image <name>@sha256:<digest>` writes a copy with the
+# image's digest in place of the image placeholder to results/, and that copy is applied (README.md, step 2).
+#
+# - the namespace's NetworkPolicy selects every pod and allows nothing in either direction (k3s enforces
+#   NetworkPolicy with its embedded controller);
+# - the pod has no service account token, no service links, no host namespaces, no persistent volume;
+#   its root file system is read-only, its one writable place is an emptyDir in memory (1 MiB, /tmp);
+# - it runs once: backoffLimit 0, restartPolicy Never, at most 300 s. The Job and its pod are kept until the
+#   operator has read the log and the record (l2/CHECKLIST.md), then the namespace is deleted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ark0-m4t-l2
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: ark0-m4t-l2
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m4t-l2-keygen
+  namespace: ark0-m4t-l2
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: m4t-l2-keygen
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keygen
+          image: "docker.io/library/ark0-m4t-l2-keygen@sha256:28b614b7dd1bd825588a7f4c53fd9b34823cc8c127a3756a12fa0cb04116e602"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TMPDIR
+              value: /tmp
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi

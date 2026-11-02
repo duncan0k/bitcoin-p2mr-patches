@@ -736,6 +736,16 @@ cannot be rescued.
   for that case; rescues already in the chain stay valid. The series is in
   `patches-m4r/` (`README.md`, "Experimental M4-R series").
 
+## Lattice tripwires for a later rule (M4-T)
+
+The next rule planned for Ark-0, M4-T, is not released and no node enforces
+it. It adds P2MR leaves of version `0xe2`, whose ML-DSA-44 checks stop working
+from the block after any one of three designated outputs, the lattice
+tripwires, is spent. Their keys, scripts and addresses are fixed before the
+outputs are created: `lattice-tripwires/README.md` gives them, and how each
+key was made, and `lattice-tripwires/check.py` checks every value. Their
+outpoints and the activation height come with the M4-T build.
+
 ## Parameters
 
 | Parameter | Value |
@@ -898,4 +908,5 @@ chain instead, see `JOIN.md`.
 | `evidence/EVIDENCE.md` | what each evidence file is and what the node said about it |
 | `evidence/*.hex` | the confirmed spend, three malformed spends, three rejected blocks, the block refused under M1, block 20000, the five blocks refused under M2, and M3's drill block, the block refused after it and the witness transaction |
 | `evidence/p2mr_tree.json` | the demo script tree, public data only |
+| `lattice-tripwires/` | the keys, scripts and addresses of the three lattice tripwire outputs of M4-T, fixed before the outputs are created, a script that checks them, and the program that made L2, the destroyed key |
 | `SHA256SUMS` | checksums for everything above |
