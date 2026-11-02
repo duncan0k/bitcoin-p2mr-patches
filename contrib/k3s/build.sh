@@ -28,6 +28,8 @@
 #                          "master m05" = those plus the 24 M0.5 wallet patches
 #                          either, then "spacing" = the retarget spacing patch
 #                          "master m05 spacing m1" = all three and the M1 series
+#                          "master m05 spacing m1 m2 m3 m4 m4r m4t m4b" = up to
+#                          M4-R, then M4-T and M4-B; m4b only right after m4t
 #   FRESH_CLONE            1 = delete and re-clone the source tree first
 #   APPLY_PATCHES          1 = reset to the tag and git am the series
 #                          0 = build whatever is already in the tree
@@ -111,6 +113,25 @@ python3 --version
 echo "logs: $LOGDIR"
 df -h "$WORK" | tail -1
 
+# --- patch set names ---------------------------------------------------------
+# The set names, before the source tree is touched, any checksum checked or any
+# patch applied: each canonical, lower-case letters, digits and hyphens with no
+# slash and no dot, so that "./m4b" or "m4b/" cannot name the M4-B set past the
+# order check; and the M4-B series (from 0106), built on the M4-T series (0096 to
+# 0105), right after it.
+previous_set=""
+for set_name in $PATCH_SETS; do
+    if ! [[ "$set_name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        echo "PATCH_SETS: '$set_name' is not a patch set name (lower-case letters, digits and hyphens; no slash, no dot)" >&2
+        exit 1
+    fi
+    if [ "$set_name" = "m4b" ] && [ "$previous_set" != "m4t" ]; then
+        echo "patch set m4b applies on top of m4t only: list m4t right before it" >&2
+        exit 1
+    fi
+    previous_set="$set_name"
+done
+
 # --- source tree -------------------------------------------------------------
 if [ "$FRESH_CLONE" = "1" ] && [ -e "$SRC" ]; then
     say "removing the existing source tree (FRESH_CLONE=1)"
@@ -159,6 +180,15 @@ if [ "$APPLY_PATCHES" = "1" ]; then
             exit 1
         fi
         ( cd "$dir" && sha256sum -c "$(basename "$sums")" ) | tee -a "$LOGDIR/checksums.log"
+        # git am below applies every .patch file of the set: each must be one the
+        # checksum file lists (not one left behind by a renumbering, say).
+        listed="$(sed -e 's/^[0-9a-f]\{64\} [ *]//' "$sums")"
+        for patch in "$dir"/*.patch; do
+            if ! printf '%s\n' "$listed" | grep -Fxq -- "$(basename "$patch")"; then
+                echo "patch set $set_name: $(basename "$patch") is not listed in $(basename "$sums")" >&2
+                exit 1
+            fi
+        done
     done
     record checksums ok
 
@@ -395,7 +425,11 @@ if [ "$USE_CCACHE" = "1" ]; then
 fi
 
 say "staging binaries for this run only ($STAGE)"
-for b in bitcoind bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet; do
+# signet-slh-sign, the SLH-DSA block signer of M4-B, exists from patches-m4b/ on
+# (PATCH_SETS ending in "m4r m4t m4b").
+# It is published with the others for the producer image (stage-miner.sh) and
+# kept out of the node image's context below: no node runs it.
+for b in bitcoind bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet signet-slh-sign; do
     if [ -x "build/bin/$b" ]; then
         install -m 0755 "build/bin/$b" "$STAGE/$b"
     fi

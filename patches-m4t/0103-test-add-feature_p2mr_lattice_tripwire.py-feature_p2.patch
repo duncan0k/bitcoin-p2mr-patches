@@ -1,0 +1,1599 @@
+From 8417f94cb5ba891eab006450961d56d216f51473 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:02:41 +0000
+Subject: [PATCH 103/105] test: add feature_p2mr_lattice_tripwire.py,
+ feature_p2mr_lattice_tripwire_signet.py and
+ feature_p2mr_lattice_tripwire_storage.py
+
+feature_p2mr_lattice_tripwire.py runs four regtest nodes with the
+tripwire of leaf version 0xe0 and three lattice tripwire outputs of the
+shape the Ark-0 ones will have (L1 with the NUMS key, L2 and L3 with keys
+the test holds): one with the default policy, one with -acceptnonstdtxn=1,
+an M4-R node without the lattice rules, and one whose rescue lane opens
+above the lattice height. It covers the activation boundary in the mempool
+and in blocks, the 80-byte limit at depth zero, a reorganization below
+the height; the block that spends a lattice tripwire output (ML-DSA-44
+spends of leaf version 0xe2 before and after the spend in it are valid,
+the same spends one block later are not, in the mempool, in a block and
+in a proposal, past both caches, while the M4-R node takes that block); a
+spend only in the mempool; removal from the mempool on a plain connect
+(chains, a package, TRUC, mixed inputs, a child of two removed ML-DSA-44
+spends next to an SLH-DSA-only branch, with the exact mempool) and after a
+reorganization (the same families, with the exact mempool again), with
+a parent that comes back while its ML-DSA-44 child goes and its SLH-DSA
+child stays, and a reorganization whose first block repeats the
+transactions of the block it replaces, so that the mempool is empty when
+the trigger connects and the node checks it after the reorganization
+without stopping; reorganizations over the trigger and one that brings back
+one of two missing outputs; the tripwire of leaf version 0xe0 and a
+lattice tripwire spent in one block and in adjacent blocks, with the
+mempool checked after each; a lattice tripwire spent below a lattice
+height given later, so that the first block at that height refuses an
+ML-DSA-44 spend of leaf version 0xe2; the outputs moved by a
+reorganization and confirmed again at the height, which leaves them
+missing; regtest's default height following OP_CHECKMLDSA44, so that a
+reorganization below it removes a spend of leaf version 0xe2; both tripwires missing (Schnorr, S2, an
+ML-DSA-44 AND SLH-DSA leaf, SLH1); the NUMS output; the M4-R lane in leaf
+version 0xe2 (an elliptic curve rescue with a real proof valid in a block
+from the higher of the two heights, on a node whose lane opens below the
+lattice height and on one whose lane opens above it, not standard, not
+logged as template R1; a rescue token in place of an ML-DSA-44 signature
+refused); the logs and gettripwireinfo; VerifyDB level 4, restarts,
+-reindex-chainstate, -reindex; a late upgrade of the M4-R node, whose
+state is right once it has the rules and which keeps a block that breaks
+them until -reindex; a spendable output in the first lattice slot, which
+triggers as the others do (block X with ML-DSA-44 spends around the
+trigger, block X+1 refusing one and taking an SLH-DSA spend); an outpoint
+that was never created, with a block holding an ML-DSA-44 spend of leaf
+version 0xe2 refused and one holding an SLH-DSA spend taken; and the
+options.
+
+feature_p2mr_lattice_tripwire_signet.py runs a custom signet with
+-signetlatticetripwire, whose lattice tripwire output never existed, and
+an Ark-0 node: on the first the rules apply and disable ML-DSA-44 checks
+from their height, on Ark-0 they are not active, the deployment is not
+listed and the node says so at startup.
+
+feature_p2mr_lattice_tripwire_storage.py does for leaf version 0xe2 what
+feature_p2mr_tripwire.py does for 0xe0 with assumeutxo and pruning: a
+node loads the regtest snapshot at 299 with a lattice tripwire output
+that block 200 spends, so that the snapshot chainstate has it missing and
+refuses an ML-DSA-44 spend of 0xe2 from the first block after the
+snapshot: in the mempool before block 300, and in a candidate block 300
+with its funding, while block 300 with the funding and an SLH-DSA spend is
+taken; and again at 301, on confirmed outputs; the
+background chainstate replays block 200 without logging the spend, and
+after it and after a restart the state and the refusals are the same. A
+pruned node prunes, connects a trigger, drops the ML-DSA-44 spend from
+its mempool, goes back over the trigger inside the blocks it keeps and
+forward again; once the trigger's block is pruned it rebuilds the same
+state at restart, refuses and takes the same spends, and reorganizes
+above its prune height, over a second trigger too.
+
+test_framework/p2mr_lattice_tripwire.py computes the NUMS key with
+Python's hashlib, independently of the unit test, and builds the trees
+and witnesses.
+---
+ .../feature_p2mr_lattice_tripwire.py          | 984 ++++++++++++++++++
+ .../feature_p2mr_lattice_tripwire_signet.py   |  71 ++
+ .../feature_p2mr_lattice_tripwire_storage.py  | 333 ++++++
+ .../test_framework/p2mr_lattice_tripwire.py   |  83 ++
+ test/functional/test_runner.py                |   3 +
+ 5 files changed, 1474 insertions(+)
+ create mode 100644 test/functional/feature_p2mr_lattice_tripwire.py
+ create mode 100644 test/functional/feature_p2mr_lattice_tripwire_signet.py
+ create mode 100644 test/functional/feature_p2mr_lattice_tripwire_storage.py
+ create mode 100644 test/functional/test_framework/p2mr_lattice_tripwire.py
+
+diff --git a/test/functional/feature_p2mr_lattice_tripwire.py b/test/functional/feature_p2mr_lattice_tripwire.py
+new file mode 100644
+index 0000000..539c69a
+--- /dev/null
++++ b/test/functional/feature_p2mr_lattice_tripwire.py
+@@ -0,0 +1,984 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test P2MR leaf version 0xe2 and its lattice tripwire outputs (doc/p2mr-lattice-tripwire.md).
++
++With -signetlatticetripwire=<height>@<outpoints> on regtest, P2MR leaves of leaf version 0xe2 at
++depth one or more execute from that height on as leaves of version 0xc0 do. Their elliptic curve
++checks follow the tripwire of leaf version 0xe0 (-signettripwire); in a block whose parent leaves
++one of the lattice tripwire outputs missing from the UTXO set (spent, never created, or created at
++or above the height), OP_CHECKMLDSA44 with a non-empty signature in such a leaf fails. There are
++three lattice tripwire outputs here, of the shape the Ark-0 ones will have: L1 with the NUMS key,
++L2 and L3 with keys the test holds; and the tripwire output D of leaf version 0xe0.
++
++  node 0  the rules and the default policy
++  node 1  the rules, -acceptnonstdtxn=1
++  node 2  an M4-R node: the tripwire of leaf version 0xe0, without the lattice rules; it takes
++          every block node 0 takes (a soft fork), which it is given one by one: connected, it would
++          also take the blocks node 0 is offered and refuses, which node 0 relays to it as compact
++          blocks before checking them
++  node 3  the rules, with the rescue lane open from a height above that of the lattice rules
++
++Covered: the activation boundary in the mempool and in blocks, -acceptnonstdtxn, the m=0 exception
++and the 80-byte limit at depth zero, a reorganization below the height, the block that spends a
++lattice tripwire (spends before and after the trigger in it are valid, the same spends one block
++later are not, in the mempool, in a block and in a proposal), a lattice tripwire spend only in the
++mempool, removal from the mempool on a plain connect (chains, a package, TRUC, mixed inputs) and
++after a reorganization (a parent that comes back while its ML-DSA-44 child goes and its SLH-DSA child
++stays; a first block that repeats the transactions of the block it replaces, so that none come back),
++reorgs over the trigger (with the exact mempool after each: a child of two removed ML-DSA-44 spends
++goes, an SLH-DSA-only branch stays), both tripwires spent in one block and in adjacent blocks, a lattice
++tripwire spent below the height (the first block there refuses), outputs moved by a reorg and
++confirmed again at the height (missing), regtest's default height following OP_CHECKMLDSA44, both
++tripwires missing (S2, an AND leaf, SLH1 and Schnorr leaves
++in 0xe2), the NUMS output, the M4-R lane in 0xe2 (an elliptic curve rescue valid from
++max(H4R, H4T) but not standard, an ML-DSA-44 rescue token refused), the policy of 0xe2 leaves, the
++logs and gettripwireinfo, VerifyDB level 4, restarts, -reindex and -reindex-chainstate, a late
++upgrade of the M4-R node, a spendable output in the first lattice slot that triggers, an outpoint
++that was never created, and the options. assumeutxo and pruning are in
++feature_p2mr_lattice_tripwire_storage.py.
++"""
++
++import hashlib
++import re
++
++from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase
++from test_framework.key import compute_xonly_pubkey
++from test_framework.messages import COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr import p2mr_construct
++from test_framework.p2mr_lattice_tripwire import (
++    LEAF_VERSION_LATTICE_TRIPWIRED,
++    MLDSA_DISABLED_ERROR,
++    NUMS_KEY_SHA256,
++    lattice_tripwire_tree,
++    mldsa44_any_leaf_witness,
++    nums_pubkey,
++    pq2_tree,
++    slhdsa128s_leaf_witness,
++)
++from test_framework.p2mr_mldsa44 import OP_CHECKMLDSA44, mldsa44_keygen, mldsa44_leaf, mldsa44_sig_chunks
++from test_framework.p2mr_rescue import (
++    RESCUE_STATEMENT_HMAC,
++    WALLET_V1_SCHNORR_K,
++    find_prover,
++    network_id_regtest,
++    prove,
++    rescue_annex,
++    rescue_key,
++    rescue_message,
++    rescue_pub,
++    rescue_sighash,
++    rescue_token,
++    rescue_y,
++)
++from test_framework.p2mr_slhdsa128s import OP_CHECKSLHDSA128S, slhdsa128s_keygen, slhdsa128s_leaf
++from test_framework.p2mr_tripwire import EC_DISABLED_ERROR, LEAF_VERSION_TRIPWIRED, schnorr_leaf_witness, tripwire_tree
++from test_framework.script import CScript, OP_1, OP_CHECKSIG, OP_DROP, OP_RETURN, OP_VERIFY
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.test_node import ErrorMatch
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++E2 = LEAF_VERSION_LATTICE_TRIPWIRED
++H3 = 215
++H4T = 230
++# Node 3's rescue lane, above H4T; node 0's opens at H3, as regtest's does by default.
++H4R_LATE = 250
++NEVER = 2147483646  # the highest height -testactivationheight takes
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++
++DISCOURAGED = "mempool-script-verify-flag-failed (Taproot version reserved for soft-fork upgrades)"
++NONSTANDARD = "bad-witness-nonstandard"
++MEMPOOL_ML = f"mempool-script-verify-flag-failed ({MLDSA_DISABLED_ERROR})"
++BLOCK_ML = f"block-script-verify-flag-failed ({MLDSA_DISABLED_ERROR})"
++MEMPOOL_EC = f"mempool-script-verify-flag-failed ({EC_DISABLED_ERROR})"
++BLOCK_EC = f"block-script-verify-flag-failed ({EC_DISABLED_ERROR})"
++
++
++def seckey(tag):
++    return hashlib.sha256(b"feature_p2mr_lattice_tripwire " + tag).digest()
++
++
++SEC_D, SEC_U = seckey(b"tripwire d"), seckey(b"user")
++PUB_D, PUB_U = (compute_xonly_pubkey(key)[0] for key in (SEC_D, SEC_U))
++PQ_PUB, PQ_SEC = mldsa44_keygen(seckey(b"ml-dsa-44"))
++L2_PUB, L2_SEC = mldsa44_keygen(seckey(b"destroyed"))
++L3_PUB, L3_SEC = mldsa44_keygen(seckey(b"drill"))
++# A key for a spendable output in the first lattice slot, which on Ark-0 holds the NUMS output.
++SLOT_PUB, SLOT_SEC = mldsa44_keygen(seckey(b"first slot"))
++SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha512(b"feature_p2mr_lattice_tripwire slh").digest()[:48])
++NUMS_PUB = nums_pubkey()
++assert hashlib.sha256(NUMS_PUB).hexdigest() == NUMS_KEY_SHA256
++
++TREE_D = tripwire_tree(PUB_D)
++TREE_L1, TREE_L2, TREE_L3 = (lattice_tripwire_tree(pk) for pk in (NUMS_PUB, L2_PUB, L3_PUB))
++TREE_SLOT = lattice_tripwire_tree(SLOT_PUB)
++# pq2: the ML-DSA-44 leaf S1 and the SLH-DSA leaf SLH1, both of version 0xe2.
++PQ2 = pq2_tree(PQ_PUB, SLH_PUB)
++# The same leaves in 0xc0 and 0xe0: what the lattice tripwire leaves alone.
++PQ2_C0 = pq2_tree(PQ_PUB, SLH_PUB, 0xc0)
++PQ2_E0 = pq2_tree(PQ_PUB, SLH_PUB, LEAF_VERSION_TRIPWIRED)
++# A Schnorr leaf of version 0xe2, next to S1.
++HYBRID = p2mr_construct([("ec", CScript([PUB_U, OP_CHECKSIG]), E2), ("pq", mldsa44_leaf(PQ_PUB), E2)])
++# S2 (ML-DSA-44 AND Schnorr) and an ML-DSA-44 AND SLH-DSA leaf, both of version 0xe2.
++S2 = p2mr_construct([("s2", mldsa44_leaf(PQ_PUB, PUB_U), E2), ("fail", CScript([OP_RETURN]))])
++AND = p2mr_construct([("and", CScript(list(mldsa44_leaf(PQ_PUB))[:-1] + [OP_CHECKMLDSA44, OP_VERIFY, SLH_PUB, OP_CHECKSLHDSA128S]), E2),
++                      ("fail", CScript([OP_RETURN]))])
++# A single leaf tree has m=0: the leaf is not executed at any height.
++LONE = p2mr_construct([("pq", mldsa44_leaf(PQ_PUB), E2)])
++# Drops one witness item, for the 80-byte stack item limit of policy.
++ITEM = p2mr_construct([("drop", CScript([OP_DROP, OP_1]), E2), ("fail", CScript([OP_RETURN]))])
++
++# The rescue key: a web wallet v1 style key, y = HMAC-SHA256(K, x || 0), P = x(y*G), in a leaf
++# <P> OP_CHECKSIG of version 0xe2 (the shape of template R1, at another leaf version).
++RESCUE_X = seckey(b"rescue")
++RESCUE_Y = rescue_y(WALLET_V1_SCHNORR_K, RESCUE_X, 0)
++RESCUE_P = rescue_key(RESCUE_Y)
++RESCUE_TOKEN = rescue_token(WALLET_V1_SCHNORR_K, 0, RESCUE_Y)
++RESCUE = p2mr_construct([("rescue", CScript([RESCUE_P, OP_CHECKSIG]), E2), ("fail", CScript([OP_RETURN]))])
++
++OUTPUTS = {
++    "boundary_pq": PQ2, "boundary_slh": PQ2, "boundary_invalid": PQ2, "boundary_s2": S2, "boundary_rescue": RESCUE,
++    "boundary_token": PQ2, "lone_1": LONE, "lone_81": LONE, "item_81": ITEM, "s2_relay": S2,
++    "kept_slh": PQ2, "gone_pq": PQ2, "parent_pq": PQ2, "truc_pq": PQ2, "mixed_pq": PQ2, "package": PQ2,
++    "before": PQ2, "after": PQ2, "cache_pq": PQ2, "ec_e2": HYBRID, "pq_c0": PQ2_C0, "pq_e0": PQ2_E0, "late_slh": PQ2,
++    "and": AND, "s2": S2, "both_slh": PQ2, "both_ec": HYBRID, "ec_mempool": HYBRID,
++    "same_pq": PQ2, "late_pq": PQ2,
++    "one_ec": HYBRID, "one_pq": PQ2, "one_kept": PQ2, "adj_ec": HYBRID, "adj_pq": PQ2,
++    "early_1": PQ2, "early_2": PQ2, "m1_reorg": PQ2,
++    "rescue": RESCUE, "rescue_bad": RESCUE, "token": PQ2, "after_reorg": PQ2, "after_bad": PQ2, "rescue_bad2": RESCUE,
++    "two_a": PQ2, "two_b": PQ2, "slh_branch": PQ2, "reorg_a": PQ2, "reorg_b": PQ2, "reorg_slh": PQ2,
++    "slot1": TREE_SLOT, "slot2": TREE_L3, "slot_before": PQ2, "slot_after": PQ2, "slot_mempool": PQ2, "slot_late_pq": PQ2,
++    "slot_late_slh": PQ2, "never_pq": PQ2, "never_slh": PQ2,
++}
++
++
++def output(tx, n=0):
++    return {"txid": tx.txid_int, "vout": n, "value": tx.vout[n].nValue, "script_pubkey": tx.vout[n].scriptPubKey}
++
++
++def outpoint(utxo):
++    return f"{utxo['txid']:064x}:{utxo['vout']}"
++
++
++def pq_witness(tree=PQ2, name="pq", *, key=PQ_SEC, mutate=None, below=()):
++    leaf = tree.leaves[name]
++
++    def make(tx, spent, index):
++        stack = mldsa44_any_leaf_witness(key, leaf, tx, spent, index, stack_below=below)
++        return stack if mutate is None else mutate(stack)
++    return make
++
++
++def slh_witness(tree=PQ2, name="slh"):
++    leaf = tree.leaves[name]
++    return lambda tx, spent, index: slhdsa128s_leaf_witness(SLH_SEC, leaf, tx, spent, index)
++
++
++def ec_witness(tree=HYBRID, name="ec", key=SEC_U):
++    leaf = tree.leaves[name]
++    return lambda tx, spent, index: schnorr_leaf_witness(key, leaf, tx, spent, index)
++
++
++def flip_bit(stack):
++    return stack[:2] + [bytes([stack[2][0] ^ 1]) + stack[2][1:]] + stack[3:]
++
++
++def s2_witness(tx, spent, index):
++    leaf = S2.leaves["s2"]
++    schnorr = schnorr_leaf_witness(SEC_U, leaf, tx, spent, index)[0]
++    return mldsa44_any_leaf_witness(PQ_SEC, leaf, tx, spent, index, stack_below=[schnorr])
++
++
++def and_witness(tx, spent, index):
++    leaf = AND.leaves["and"]
++    slh = slhdsa128s_leaf_witness(SLH_SEC, leaf, tx, spent, index)[:-2]
++    return mldsa44_any_leaf_witness(PQ_SEC, leaf, tx, spent, index, stack_below=slh)
++
++
++def lone_witness(size=0):
++    leaf = LONE.leaves["pq"]
++    return lambda tx, spent, index: ([b"\x01" * size] if size else []) + [bytes(leaf.script), leaf.control_block]
++
++
++def item_witness(size):
++    leaf = ITEM.leaves["drop"]
++    return lambda tx, spent, index: [b"\x01" * size, bytes(leaf.script), leaf.control_block]
++
++
++def token_witness(tx, spent, index):
++    """A rescue token in place of the first ML-DSA-44 signature chunk, the other chunks empty, and a
++    rescue record: not a rescue, since the disabled ML-DSA-44 check is not rescuable."""
++    leaf = PQ2.leaves["pq"]
++    return [RESCUE_TOKEN, b"", b"", b"", b"", bytes(leaf.script), leaf.control_block, rescue_annex(bytes(130218))]
++
++
++class P2MRLatticeTripwireTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.num_nodes = 4
++        self.rpc_timeout = 240
++        noban = "-whitelist=noban@127.0.0.1"
++        self.base_args = [[noban], [noban, "-acceptnonstdtxn=1"], [noban], [noban]]
++        self.extra_args = [list(args) for args in self.base_args]
++
++    def setup_network(self):
++        self.add_nodes(self.num_nodes, self.extra_args)
++        self.start_nodes()
++        for i in (1, 3):
++            self.connect_nodes(0, i)
++        self.sync_all()
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def rules_args(self, i):
++        tripwire = f"-signettripwire={H3}@{self.tripwires['D']}"
++        if i == 2:
++            return self.base_args[2] + [tripwire, f"-testactivationheight=p2mr_lattice_tripwire@{NEVER}"]
++        lattice = f"-signetlatticetripwire={H4T}@{','.join(self.tripwires[n] for n in ('L1', 'L2', 'L3'))}"
++        rescue = [f"-testactivationheight=p2mr_rescue@{H4R_LATE}"] if i == 3 else []
++        return self.base_args[i] + [tripwire, lattice] + rescue
++
++    def sync_main(self):
++        self.sync_blocks(self.main)
++
++    def follow_m4r(self):
++        """Give node 2, the M4-R node, the blocks of node 0's active chain it does not have."""
++        n0, n2 = self.nodes[0], self.nodes[2]
++        height = min(n0.getblockcount(), n2.getblockcount())
++        while n0.getblockhash(height) != n2.getblockhash(height):
++            height -= 1
++        for h in range(height + 1, n0.getblockcount() + 1):
++            assert_equal(n2.submitblock(n0.getblock(n0.getblockhash(h), 0)), None)
++        assert_equal(n2.getbestblockhash(), n0.getbestblockhash())
++
++    def mine(self, count=1):
++        return self.generate(self.wallet, count, sync_fun=self.sync_main)
++
++    def connect_main(self):
++        for node in self.main[1:]:
++            self.connect_nodes(0, node.index)
++        self.sync_main()
++
++    def disconnect_main(self):
++        for node in self.main[1:]:
++            self.disconnect_nodes(0, node.index)
++
++    def wallet_witness(self, tx, spent, index):
++        return list(self.wallet_stack)
++
++    def wallet_input(self):
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        return ({"txid": int(utxo["txid"], 16), "vout": utxo["vout"], "value": int(utxo["value"] * COIN),
++                 "script_pubkey": self.wallet.get_output_script()}, self.wallet_witness)
++
++    def spend(self, inputs, *, outputs=None, version=2):
++        tx = CTransaction()
++        tx.version = version
++        tx.vin = [CTxIn(COutPoint(utxo["txid"], utxo["vout"]), b"", 0xfffffffd) for utxo, _ in inputs]
++        total = sum(utxo["value"] for utxo, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(utxo["value"], utxo["script_pubkey"]) for utxo, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for index, (_, make) in enumerate(inputs):
++            tx.wit.vtxinwit[index].scriptWitness.stack = make(tx, spent, index)
++        return tx
++
++    def fund(self, script_pubkeys):
++        utxo, witness = self.wallet_input()
++        outputs = [CTxOut(FUND_SATS, spk) for spk in script_pubkeys]
++        outputs.append(CTxOut(utxo["value"] - FUND_SATS * len(outputs) - FEE_SATS, self.wallet.get_output_script()))
++        tx = self.spend([(utxo, witness)], outputs=outputs)
++        self.wallet.sendrawtransaction(from_node=self.nodes[0], tx_hex=tx.serialize().hex())
++        self.mine()
++        return tx, [output(tx, n) for n in range(len(script_pubkeys))]
++
++    def families(self, pq_a, pq_b, slh_root):
++        """Two ML-DSA-44 spends of 0xe2 leaves and a child of both, which go when ML-DSA-44 is disabled;
++        and an SLH-DSA spend of a 0xe2 leaf with an SLH-DSA child, which stays. All in the mempool."""
++        a = self.spend([(self.outs[pq_a], pq_witness())])
++        b = self.spend([(self.outs[pq_b], pq_witness())])
++        child = self.spend([(output(a), self.wallet_witness), (output(b), self.wallet_witness)])
++        slh_parent = self.spend([(self.outs[slh_root], slh_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, PQ2.scriptPubKey)])
++        slh_child = self.spend([(output(slh_parent), slh_witness())])
++        for tx in (a, b, child, slh_parent, slh_child):
++            self.accept(tx)
++        return {a.txid_hex, b.txid_hex, child.txid_hex}, {slh_parent.txid_hex, slh_child.txid_hex}
++
++    def rescue_spend(self, utxo, *, corrupt=False):
++        tx = CTransaction()
++        tx.version = 2
++        tx.vin = [CTxIn(COutPoint(utxo["txid"], utxo["vout"]), b"", 0xfffffffd)]
++        tx.vout = [CTxOut(utxo["value"] - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(utxo["value"], utxo["script_pubkey"])]
++        leaf = RESCUE.leaves["rescue"]
++        pub = rescue_pub(WALLET_V1_SCHNORR_K, 0, RESCUE_Y)
++        if corrupt:
++            proof = bytes(130218)
++        else:
++            sighash = rescue_sighash(tx, 0, spent, leaf.script, network_id_regtest(), RESCUE_STATEMENT_HMAC, pub, leaf_ver=E2)
++            _, proof = prove(self.prover, WALLET_V1_SCHNORR_K, 0, RESCUE_X, rescue_message(sighash, network_id_regtest(), RESCUE_P))
++        tx.wit.vtxinwit = [CTxInWitness()]
++        tx.wit.vtxinwit[0].scriptWitness.stack = [RESCUE_TOKEN, bytes(leaf.script), leaf.control_block, rescue_annex(proof)]
++        return tx
++
++    def build_block(self, txs, *, node=None, prev=None, nudge=0):
++        node = node or self.nodes[0]
++        prev = prev or node.getbestblockhash()
++        header = node.getblockheader(prev)
++        block = create_block(int(prev, 16), create_coinbase(header["height"] + 1), header["mediantime"] + 1 + nudge, txlist=txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def submit(self, block, expected=None, *, node=None):
++        assert_equal((node or self.nodes[0]).submitblock(block.serialize().hex()), expected)
++
++    def propose(self, block, node=None):
++        return (node or self.nodes[0]).getblocktemplate({"mode": "proposal", "data": block.serialize().hex()})
++
++    def accept(self, tx, node=0):
++        self.nodes[node].sendrawtransaction(tx.serialize().hex(), 0)
++        assert tx.txid_hex in self.nodes[node].getrawmempool()
++
++    def reject(self, tx, reason, node=0):
++        assert_raises_rpc_error(-26, reason, self.nodes[node].sendrawtransaction, tx.serialize().hex(), 0)
++
++    def mempool(self, node=0):
++        return set(self.nodes[node].getrawmempool())
++
++    def lattice(self, node=None):
++        return (node or self.nodes[0]).gettripwireinfo()["lattice"]
++
++    def assert_next(self, *, active, disabled, nodes=None):
++        """The deployment and the state as they apply to the next block."""
++        for node in nodes or [self.nodes[i] for i in (0, 1, 3)]:
++            assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["active"], active)
++            assert_equal(self.lattice(node)["mldsa_disabled_next_block"], disabled)
++
++    def assert_state(self, states, disabled, node=None):
++        info = self.lattice(node)
++        assert_equal([tripwire["state"] for tripwire in info["tripwires"]], states)
++        assert_equal(info["mldsa_disabled_next_block"], disabled)
++
++    def spent_log(self, name, tx, block_hash, height, effect):
++        return (f"P2MR lattice tripwire {self.tripwires[name]} spent by {tx.txid_hex} in block {block_hash} (height {height}): "
++                f"OP_CHECKMLDSA44 in leaf version 0xe2 is {effect}")
++
++    def state_log(self, states, checks):
++        outputs = ", ".join(f"{self.tripwires[n]} {state}" for n, state in zip(("L1", "L2", "L3"), states))
++        return f"lattice tripwire outputs {outputs}; ML-DSA-44 checks in leaf version 0xe2 are {checks} for the next block"
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        self.prover = find_prover(self.config)
++        self.wallet = MiniWallet(self.nodes[0])
++        self.wallet.rescan_utxos()
++        probe = CTransaction()
++        probe.vin = [CTxIn()]
++        self.wallet.sign_tx(probe)
++        self.wallet_stack = list(probe.wit.vtxinwit[0].scriptWitness.stack)
++        self.main = [self.nodes[0], self.nodes[1], self.nodes[3]]
++
++        self.create_tripwires()
++        self.test_activation()
++        self.test_resurrection()
++        self.test_reorg_onto_same_transactions()
++        self.test_both_tripwires_together()
++        self.test_trigger()
++        self.test_reorg_over_trigger()
++        self.test_both_missing()
++        self.test_rescue()
++        self.test_nums()
++        self.test_moved_and_reconfirmed()
++        self.test_restarts()
++        self.test_late_upgrade()
++        self.test_missing_before_activation()
++        self.test_default_height_follows_m1()
++        self.test_each_slot()
++        self.test_options()
++
++    def create_tripwires(self):
++        self.log.info("Create the tripwire output D and the lattice tripwire outputs L1 (NUMS), L2 and L3")
++        n0 = self.nodes[0]
++        self.tripwire_tx, outputs = self.fund([TREE_D.scriptPubKey, TREE_L1.scriptPubKey, TREE_L2.scriptPubKey, TREE_L3.scriptPubKey])
++        self.c_hash, self.c_height = n0.getbestblockhash(), n0.getblockcount()
++        self.tw = dict(zip(("D", "L1", "L2", "L3"), outputs))
++        self.tripwires = {name: outpoint(utxo) for name, utxo in self.tw.items()}
++        # The NUMS output of the three, as the unit test computes it with mldsa-native.
++        assert_equal(bytes(TREE_L1.scriptPubKey).hex(), "52208fda4317667005f0a85352aeae313b38d0c4d9476a43b80b9ef64dba29c8dd56")
++        height = n0.getblockcount()
++
++        self.log.info(f"Restart with the rules: leaf version 0xe0 from {H3}, 0xe2 from {H4T}")
++        lattice_list = ", ".join(self.tripwires[n] for n in ("L1", "L2", "L3"))
++        logs = [f"P2MR lattice tripwire rules from height {H4T} in leaf version 0xe2; tripwire outputs {lattice_list}",
++                f"P2MR SLH-DSA-SHA2-128s rules active from height 0 (leaf versions 0xc0, 0xe0, 0xe2)",
++                f"P2MR lattice tripwire state at height {height}: " + self.state_log(["unspent"] * 3, "enabled")]
++        for i in (0, 1, 3):
++            with self.nodes[i].assert_debug_log(logs):
++                self.restart_node(i, extra_args=self.rules_args(i))
++        with self.nodes[2].assert_debug_log([], unexpected_msgs=["P2MR lattice tripwire state"]):
++            self.restart_node(2, extra_args=self.rules_args(2))
++        self.connect_main()
++
++        info = n0.gettripwireinfo()
++        assert_equal(info["lattice"], {
++            "height": H4T,
++            "leaf_version": "e2",
++            "tripwires": [{"outpoint": self.tripwires[n], "state": "unspent"} for n in ("L1", "L2", "L3")],
++            "mldsa_disabled_next_block": False,
++        })
++        assert_equal(info["tripwires"], [{"outpoint": self.tripwires["D"], "state": "unspent"}])
++        assert_equal(n0.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"], {"type": "buried", "active": False, "height": H4T})
++        assert_equal(self.nodes[2].getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["height"], NEVER)
++
++        _, outputs = self.fund([tree.scriptPubKey for tree in OUTPUTS.values()])
++        self.outs = dict(zip(OUTPUTS, outputs))
++
++    def test_activation(self):
++        n0, n1, n3 = self.nodes[0], self.nodes[1], self.nodes[3]
++        o = self.outs
++        self.mine(H4T - 2 - n0.getblockcount())
++        self.log.info("Tip H4T-2: the mempool turns away spends of 0xe2 leaves at depth one, -acceptnonstdtxn too")
++        self.assert_next(active=False, disabled=False)
++        pq = self.spend([(o["boundary_pq"], pq_witness())])
++        slh = self.spend([(o["boundary_slh"], slh_witness())])
++        s2 = self.spend([(o["s2_relay"], s2_witness)])
++        for node in (0, 1):
++            self.reject(pq, DISCOURAGED, node=node)
++            self.reject(slh, DISCOURAGED, node=node)
++        self.log.info("Policy holds 0xe2 leaves to the limits of 0xc0 leaves at every height, at depth zero too")
++        # Rule 4T-4: a depth-zero spend of leaf version 0xe2 with an 81-byte element is not standard at
++        # every height, before the rules too, as for 0xe0; a node without this series relays it.
++        lone_81 = self.spend([(o["lone_81"], lone_witness(81))])
++        self.reject(lone_81, NONSTANDARD)
++        self.accept(lone_81, node=1)
++        lone = self.spend([(o["lone_1"], lone_witness())])
++        self.accept(lone)
++
++        self.log.info("A block below H4T takes 0xe2 spends that would fail: an invalid signature, a rescue with a bad proof")
++        invalid = self.spend([(o["boundary_invalid"], pq_witness(mutate=flip_bit))])
++        bad_rescue = self.rescue_spend(o["boundary_rescue"], corrupt=True)
++        below = self.build_block([invalid, bad_rescue])
++        self.submit(below)
++        self.sync_main()
++        self.follow_m4r()
++        assert lone_81.txid_hex in self.mempool(1)
++
++        self.log.info("Tip H4T-1: the mempool executes them; S2 is not standard in 0xe2")
++        self.assert_next(active=True, disabled=False)
++        self.accept(pq)
++        self.accept(slh)
++        self.reject(s2, NONSTANDARD)
++        self.accept(s2, node=1)
++        self.log.info("The M4-R node, without the lattice rules, still takes them as unknown leaf versions in a block only")
++        self.reject(pq, DISCOURAGED, node=2)
++
++        self.log.info("A reorg below H4T removes them from both mempools; the m=0 spend stays")
++        for node in (n0, n1):
++            node.invalidateblock(below.hash_hex)
++        self.assert_next(active=False, disabled=False, nodes=[n0, n1])
++        assert not {pq.txid_hex, slh.txid_hex} & self.mempool()
++        assert s2.txid_hex not in self.mempool(1)
++        assert lone.txid_hex in self.mempool()
++        for node in (n0, n1):
++            node.reconsiderblock(below.hash_hex)
++        assert_equal(n0.getbestblockhash(), below.hash_hex)
++        self.accept(pq)
++        self.accept(slh)
++        self.accept(s2, node=1)
++
++        self.log.info("H4T: the ML-DSA-44, SLH-DSA and S2 spends of 0xe2 leaves confirm")
++        with n0.assert_debug_log([f"P2MR lattice tripwire rules active from height {H4T}, reached by block ",
++                                  ": " + self.state_log(["unspent"] * 3, "enabled")]):
++            blockhash = self.mine()[0]
++        block = n0.getblock(blockhash)
++        assert_equal(block["height"], H4T)
++        assert {pq.txid_hex, slh.txid_hex} <= set(block["tx"])
++        self.assert_next(active=True, disabled=False)
++        blockhash = self.generate(n1, 1, sync_fun=self.sync_main)[0]
++        assert s2.txid_hex in n0.getblock(blockhash)["tx"]
++
++        self.log.info("From H4T: an invalid signature fails; a rescue token in place of an ML-DSA-44 signature is no rescue")
++        bad = self.spend([(o["after_bad"], pq_witness(mutate=flip_bit))])
++        self.submit(self.build_block([bad]), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++        token = self.spend([(o["boundary_token"], token_witness)])
++        self.reject(token, NONSTANDARD)
++        self.submit(self.build_block([token]), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature chunk size)")
++        self.log.info("From H4T the rescue lane of node 0 (open from H3) checks the proof of a rescue in 0xe2")
++        self.submit(self.build_block([self.rescue_spend(o["rescue_bad2"], corrupt=True)]), "block-script-verify-flag-failed (Invalid rescue proof)")
++        item_81 = self.spend([(o["item_81"], item_witness(81))])
++        self.reject(item_81, NONSTANDARD)
++
++        self.log.info("Node 3's rescue lane opens at its own height, above H4T: a valid rescue in 0xe2 waits for both")
++        self.rescue_tx = self.rescue_spend(o["rescue"])
++        proposal = self.build_block([self.rescue_tx], node=n3)
++        assert_equal(self.propose(proposal, node=n3), "block-script-verify-flag-failed (Invalid Schnorr signature size)")
++        assert_equal(self.propose(proposal), None)
++        self.follow_m4r()
++        assert_equal(self.propose(proposal, node=self.nodes[2]), None)
++
++    def test_resurrection(self):
++        self.log.info("Reorg to a branch that spends L3: a parent comes back, its ML-DSA-44 child goes, its SLH-DSA child stays")
++        n0 = self.nodes[0]
++        self.disconnect_main()
++        funds, funds_witness = self.wallet_input()
++        parent = self.spend([(funds, funds_witness)], outputs=[
++            CTxOut(FUND_SATS, PQ2.scriptPubKey), CTxOut(FUND_SATS, PQ2.scriptPubKey),
++            CTxOut(funds["value"] - 2 * FUND_SATS - FEE_SATS, self.wallet.get_output_script())])
++        fork = n0.getbestblockhash()
++        old = self.build_block([parent])
++        self.submit(old)
++        child_pq = self.spend([(output(parent, 0), pq_witness())])
++        grandchild = self.spend([(output(child_pq), self.wallet_witness)])
++        child_slh = self.spend([(output(parent, 1), slh_witness())])
++        for tx in (child_pq, grandchild, child_slh):
++            self.accept(tx)
++
++        # Version 4 keeps the trigger out of the mempool when its branch is disconnected again.
++        trigger = self.spend([(self.tw["L3"], pq_witness(TREE_L3, "pq", key=L3_SEC))], version=4)
++        new = self.build_block([trigger], prev=fork, nudge=1)
++        self.submit(new, "inconclusive")
++        assert_equal(n0.getbestblockhash(), old.hash_hex)
++        height = n0.getblockcount()
++        longer = self.build_block([], prev=new.hash_hex)
++        with n0.assert_debug_log([self.spent_log("L3", trigger, new.hash_hex, height, f"disabled from height {height + 1}")]):
++            self.submit(longer)
++        assert_equal(n0.getbestblockhash(), longer.hash_hex)
++        self.assert_state(["unspent", "unspent", "missing"], True)
++        assert_equal(self.mempool(), {parent.txid_hex, child_slh.txid_hex})
++        template = n0.getblocktemplate({"rules": ["segwit"]})
++        assert_equal({tx["txid"] for tx in template["transactions"]}, {parent.txid_hex, child_slh.txid_hex})
++
++        n0.invalidateblock(new.hash_hex)
++        assert_equal(n0.getbestblockhash(), old.hash_hex)
++        self.assert_state(["unspent"] * 3, False)
++        assert_equal(self.mempool(), {child_slh.txid_hex})
++        self.connect_main()
++        self.mine()
++
++    def test_reorg_onto_same_transactions(self):
++        self.log.info("Reorg whose first block repeats the transactions of the block it replaces, and whose second spends L3")
++        n0 = self.nodes[0]
++        self.disconnect_main()
++        before = self.mempool()
++        fork = n0.getbestblockhash()
++        # Block A confirms a parent, whose child waits in the mempool behind a relative lock of one
++        # block, with lock points that refer to A; next to it, an ML-DSA-44 spend of a 0xe2 leaf.
++        funds, funds_witness = self.wallet_input()
++        parent = self.spend([(funds, funds_witness)])
++        block_a = self.build_block([parent])
++        self.submit(block_a)
++        child = self.spend([(output(parent), self.wallet_witness)])
++        child.vin[0].nSequence = 1
++        pq = self.spend([(self.outs["same_pq"], pq_witness())])
++        for tx in (child, pq):
++            self.accept(tx)
++
++        # B1 has the transactions of A at another time: once it is connected, nothing of A is left to
++        # put back in the mempool. B2 spends L3, so the reorganization ends with ML-DSA-44 disabled;
++        # the mempool is checked after it, not in ConnectTip, and the node does not stop.
++        block_b1 = self.build_block([parent], prev=fork, nudge=1)
++        assert_equal([tx.txid_hex for tx in block_b1.vtx], [tx.txid_hex for tx in block_a.vtx])
++        self.submit(block_b1, "inconclusive")
++        trigger = self.spend([(self.tw["L3"], pq_witness(TREE_L3, "pq", key=L3_SEC))], version=4)
++        block_b2 = self.build_block([trigger], prev=block_b1.hash_hex)
++        self.submit(block_b2)
++        assert_equal(n0.getbestblockhash(), block_b2.hash_hex)
++        self.assert_state(["unspent", "unspent", "missing"], True)
++        assert_equal(self.mempool(), before | {child.txid_hex})
++
++        n0.invalidateblock(block_b1.hash_hex)
++        assert_equal(n0.getbestblockhash(), block_a.hash_hex)
++        self.assert_state(["unspent"] * 3, False)
++        assert pq.txid_hex not in self.mempool()
++        self.connect_main()
++
++    def test_both_tripwires_together(self):
++        n0 = self.nodes[0]
++        o = self.outs
++        self.log.info("D and L2 spent in the same block: one recheck drops the Schnorr and the ML-DSA-44 spends of 0xe2")
++        self.disconnect_main()
++        fork = n0.getbestblockhash()
++        ec = self.spend([(o["one_ec"], ec_witness())])
++        pq = self.spend([(o["one_pq"], pq_witness())])
++        kept = self.spend([(o["one_kept"], slh_witness())])
++        for tx in (ec, pq, kept):
++            self.accept(tx)
++        # Version 4 keeps the trigger spends out of the mempool once their blocks are disconnected.
++        d = self.spend([(self.tw["D"], ec_witness(TREE_D, "csig", key=SEC_D))], version=4)
++        l2 = self.spend([(self.tw["L2"], pq_witness(TREE_L2, "pq", key=L2_SEC))], version=4)
++        both = self.build_block([d, l2])
++        self.submit(both)
++        info = n0.gettripwireinfo()
++        assert_equal((info["ec_disabled_next_block"], info["lattice"]["mldsa_disabled_next_block"]), (True, True))
++        assert_equal(self.mempool(), {kept.txid_hex})
++        n0.invalidateblock(both.hash_hex)
++        assert_equal(n0.getbestblockhash(), fork)
++        info = n0.gettripwireinfo()
++        assert_equal((info["ec_disabled_next_block"], info["lattice"]["mldsa_disabled_next_block"]), (False, False))
++        assert_equal(self.mempool(), {kept.txid_hex})
++
++        self.log.info("D and L2 in adjacent blocks: the first drops the Schnorr spend of 0xe2, the second the ML-DSA-44 one")
++        ec = self.spend([(o["adj_ec"], ec_witness())])
++        pq = self.spend([(o["adj_pq"], pq_witness())])
++        for tx in (ec, pq):
++            self.accept(tx)
++        first = self.build_block([d], nudge=1)
++        self.submit(first)
++        info = n0.gettripwireinfo()
++        assert_equal((info["ec_disabled_next_block"], info["lattice"]["mldsa_disabled_next_block"]), (True, False))
++        assert_equal(self.mempool(), {kept.txid_hex, pq.txid_hex})
++        second = self.build_block([l2])
++        self.submit(second)
++        info = n0.gettripwireinfo()
++        assert_equal((info["ec_disabled_next_block"], info["lattice"]["mldsa_disabled_next_block"]), (True, True))
++        assert_equal(self.mempool(), {kept.txid_hex})
++        n0.invalidateblock(first.hash_hex)
++        assert_equal(n0.getbestblockhash(), fork)
++        self.assert_state(["unspent"] * 3, False)
++        self.connect_main()
++        blockhash = self.mine()[0]
++        assert kept.txid_hex in n0.getblock(blockhash)["tx"]
++
++    def test_trigger(self):
++        n0 = self.nodes[0]
++        o = self.outs
++        self.log.info("Before the trigger: spends of 0xe2 leaves, unconfirmed chains, a package, TRUC, mixed inputs")
++        kept_slh = self.spend([(o["kept_slh"], slh_witness())])
++        gone_pq = self.spend([(o["gone_pq"], pq_witness())])
++        parent_pq = self.spend([(o["parent_pq"], pq_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, PQ2.scriptPubKey)])
++        slh_child = self.spend([(output(parent_pq), slh_witness())])
++        truc_pq = self.spend([(o["truc_pq"], pq_witness())], version=3)
++        truc_child = self.spend([(output(truc_pq), self.wallet_witness)], version=3)
++        mixed = self.spend([(o["mixed_pq"], pq_witness()), self.wallet_input()])
++        ec_e2 = self.spend([(o["ec_e2"], ec_witness())])
++        pq_c0 = self.spend([(o["pq_c0"], pq_witness(PQ2_C0))])
++        pq_e0 = self.spend([(o["pq_e0"], pq_witness(PQ2_E0))])
++        for tx in (kept_slh, gone_pq, parent_pq, slh_child, truc_pq, truc_child, mixed, ec_e2, pq_c0, pq_e0):
++            self.accept(tx)
++        package_parent = self.spend([(o["package"], pq_witness())], outputs=[CTxOut(FUND_SATS - FEE_SATS, PQ2.scriptPubKey)])
++        package_child = self.spend([(output(package_parent), slh_witness())])
++        assert_equal(n0.submitpackage([package_parent.serialize().hex(), package_child.serialize().hex()])["package_msg"], "success")
++        self.log.info("Before the trigger: a child of two ML-DSA-44 spends of 0xe2 leaves, and an SLH-DSA-only branch")
++        two_removed, slh_branch = self.families("two_a", "two_b", "slh_branch")
++        self.cache_pq = self.spend([(o["cache_pq"], pq_witness())])
++        # A block with the ML-DSA-44 spend is valid now, which also fills the script cache.
++        assert_equal(self.propose(self.build_block([self.cache_pq])), None)
++
++        self.log.info("A lattice tripwire spend only in the mempool changes nothing")
++        self.trigger = self.spend([(self.tw["L2"], pq_witness(TREE_L2, "pq", key=L2_SEC))])
++        self.accept(self.trigger)
++        self.assert_state(["unspent"] * 3, False)
++        self.before = self.spend([(o["before"], pq_witness())])
++        self.after = self.spend([(o["after"], pq_witness())])
++        self.accept(self.before)
++        self.accept(self.after)
++
++        self.log.info("Neither a proposal nor an invalid candidate that spends L2 logs the spend")
++        block = self.build_block([self.before, self.trigger, self.after])
++        invalid = self.spend([(o["late_slh"], pq_witness(mutate=flip_bit))])
++        with n0.assert_debug_log([], unexpected_msgs=[f"P2MR lattice tripwire {self.tripwires['L2']} spent by"]):
++            assert_equal(self.propose(block), None)
++            self.submit(self.build_block([self.trigger, invalid], nudge=1), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++
++        self.log.info("Block X spends L2 between two ML-DSA-44 spends of 0xe2 leaves, which are both valid")
++        self.x_height = n0.getblockcount() + 1
++        with n0.assert_debug_log([self.spent_log("L2", self.trigger, block.hash_hex, self.x_height, f"disabled from height {self.x_height + 1}")]):
++            self.submit(block)
++            self.sync_main()
++        self.x_hash = block.hash_hex
++        self.assert_state(["unspent", "missing", "unspent"], True)
++        assert_equal(n0.gettripwireinfo()["ec_disabled_next_block"], False)
++
++        self.log.info("After X the mempool keeps the SLH-DSA, Schnorr and other spends, and drops the ML-DSA-44 ones in 0xe2")
++        self.kept = {kept_slh.txid_hex, ec_e2.txid_hex, pq_c0.txid_hex, pq_e0.txid_hex} | slh_branch
++        assert not two_removed & self.mempool()
++        assert_equal(self.mempool(), self.kept)
++        template = n0.getblocktemplate({"rules": ["segwit"]})
++        assert_equal({tx["txid"] for tx in template["transactions"]}, self.kept)
++
++        self.log.info("Block X+1: the same spends fail in the mempool, in a block and in a proposal, past both caches")
++        self.reject(self.cache_pq, MEMPOOL_ML)
++        self.reject(self.cache_pq, MEMPOOL_ML, node=1)
++        stale = self.build_block([self.cache_pq])
++        self.submit(stale, BLOCK_ML)
++        assert_equal(self.propose(self.build_block([self.cache_pq], nudge=1)), BLOCK_ML)
++        self.log.info("The M4-R node takes that block: the lattice tripwire only tightens the rules")
++        self.follow_m4r()
++        assert_equal(self.propose(self.build_block([self.cache_pq], nudge=2), node=self.nodes[2]), None)
++        self.log.info("ML-DSA-44 leaves of versions 0xc0 and 0xe0, and SLH-DSA leaves of 0xe2, are not affected")
++        self.late_slh = self.spend([(o["late_slh"], slh_witness())])
++        self.accept(self.late_slh)
++
++    def test_reorg_over_trigger(self):
++        n0 = self.nodes[0]
++        self.log.info("invalidateblock X: ML-DSA-44 spends of 0xe2 leaves are valid again, X's transactions come back")
++        self.disconnect_main()
++        n0.invalidateblock(self.x_hash)
++        self.assert_state(["unspent"] * 3, False)
++        assert {self.before.txid_hex, self.trigger.txid_hex, self.after.txid_hex} <= self.mempool()
++        kept = self.mempool() - {self.before.txid_hex, self.trigger.txid_hex, self.after.txid_hex}
++        self.accept(self.cache_pq)
++        two_removed, slh_branch = self.families("reorg_a", "reorg_b", "reorg_slh")
++        self.log.info("reconsiderblock X: they fail again, and the mempool drops them after the reorganization, the child of two with them")
++        n0.reconsiderblock(self.x_hash)
++        assert_equal(n0.getbestblockhash(), self.x_hash)
++        self.assert_state(["unspent", "missing", "unspent"], True)
++        assert not two_removed & self.mempool()
++        assert_equal(self.mempool(), kept | slh_branch)
++        self.connect_main()
++        blockhash = self.mine()[0]
++        assert self.kept | {self.late_slh.txid_hex} | slh_branch <= set(n0.getblock(blockhash)["tx"])
++
++    def test_both_missing(self):
++        n0 = self.nodes[0]
++        o = self.outs
++        self.log.info("L3 spent too: ML-DSA-44 checks were already disabled")
++        trigger = self.spend([(self.tw["L3"], pq_witness(TREE_L3, "pq", key=L3_SEC))])
++        self.accept(trigger)
++        height = n0.getblockcount() + 1
++        with n0.assert_debug_log([f"P2MR lattice tripwire {self.tripwires['L3']} spent by {trigger.txid_hex} in block ",
++                                  f" (height {height}): OP_CHECKMLDSA44 in leaf version 0xe2 is already disabled"]):
++            y_hash = self.mine()[0]
++        self.assert_state(["unspent", "missing", "missing"], True)
++        self.log.info("A reorg that brings back L3 alone leaves the checks disabled")
++        self.disconnect_main()
++        n0.invalidateblock(y_hash)
++        self.assert_state(["unspent", "missing", "unspent"], True)
++        n0.reconsiderblock(y_hash)
++        self.assert_state(["unspent", "missing", "missing"], True)
++        self.connect_main()
++
++        self.log.info("Tripwire D spent too: elliptic curve checks in 0xe2 follow it, and are dropped from the mempool")
++        ec_mempool = self.spend([(o["ec_mempool"], ec_witness())])
++        self.accept(ec_mempool)
++        trigger = self.spend([(self.tw["D"], ec_witness(TREE_D, "csig", key=SEC_D))])
++        self.accept(trigger)
++        height = n0.getblockcount() + 1
++        block = self.build_block([trigger])
++        with n0.assert_debug_log([f"P2MR tripwire {self.tripwires['D']} spent by {trigger.txid_hex} in block {block.hash_hex}"
++                                  f" (height {height}): elliptic curve checks in leaf version 0xe0 are disabled from height {height + 1}"]):
++            self.submit(block)
++        self.sync_main()
++        assert ec_mempool.txid_hex not in self.mempool()
++        info = n0.gettripwireinfo()
++        assert_equal((info["ec_disabled_next_block"], info["lattice"]["mldsa_disabled_next_block"]), (True, True))
++
++        self.log.info("Both disabled: Schnorr and S2 fail, the ML-DSA-44 AND SLH-DSA leaf fails, SLH1 passes")
++        ec = self.spend([(o["both_ec"], ec_witness())])
++        self.reject(ec, MEMPOOL_EC)
++        self.submit(self.build_block([ec]), BLOCK_EC)
++        s2 = self.spend([(o["s2"], s2_witness)])
++        self.submit(self.build_block([s2]), BLOCK_ML)
++        both = self.spend([(o["and"], and_witness)])
++        self.submit(self.build_block([both]), BLOCK_ML)
++        slh = self.spend([(o["both_slh"], slh_witness())])
++        self.accept(slh)
++        self.mine()
++
++    def test_rescue(self):
++        n0, n2, n3 = self.nodes[0], self.nodes[2], self.nodes[3]
++        o = self.outs
++        self.log.info("Rescue in 0xe2: valid in a block from max(H4R, H4T), not standard, and not logged as R1")
++        self.reject(self.rescue_tx, NONSTANDARD)
++        self.submit(self.build_block([self.rescue_spend(o["rescue_bad"], corrupt=True)]), "block-script-verify-flag-failed (Invalid rescue proof)")
++        # Node 3 opens the lane at H4R_LATE: before it the token is a signature, which fails as EC is disabled.
++        self.disconnect_nodes(0, 3)
++        self.main.remove(n3)
++        assert n3.getblockcount() < H4R_LATE - 1
++        assert_equal(self.propose(self.build_block([self.rescue_tx], node=n3), node=n3), BLOCK_EC)
++        block = self.build_block([self.rescue_tx])
++        with n0.assert_debug_log([], unexpected_msgs=["P2MR rescue of"]):
++            self.submit(block)
++        self.sync_main()
++        self.follow_m4r()
++        assert_equal(n2.getbestblockhash(), block.hash_hex)
++        self.generate(n3, H4R_LATE - 1 - n3.getblockcount(), sync_fun=self.no_op)
++        assert_equal(self.propose(self.build_block([self.rescue_tx], node=n3), node=n3), None)
++
++        self.log.info("A rescue token in place of an ML-DSA-44 signature fails as disabled: not rescuable here")
++        token = self.spend([(o["token"], token_witness)])
++        self.submit(self.build_block([token]), BLOCK_ML)
++        self.reject(token, NONSTANDARD)
++        self.reject(token, MEMPOOL_ML, node=1)
++
++    def test_nums(self):
++        self.log.info("L1, locked to the NUMS key, cannot be spent")
++        leaf, fail = TREE_L1.leaves["pq"], TREE_L1.leaves["fail"]
++        chunks = mldsa44_sig_chunks(bytes(range(256)) * 9 + bytes(116))
++        forged = self.spend([(self.tw["L1"], lambda tx, spent, index: chunks + [bytes(leaf.script), leaf.control_block])])
++        self.reject(forged, "mempool-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++        self.submit(self.build_block([forged]), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature)")
++        returned = self.spend([(self.tw["L1"], lambda tx, spent, index: [bytes(fail.script), fail.control_block])])
++        self.reject(returned, "mempool-script-verify-flag-failed (OP_RETURN was encountered)")
++
++    def test_moved_and_reconfirmed(self):
++        n0 = self.nodes[0]
++        self.log.info("A reorg that takes away the block creating the lattice tripwires; they confirm again at H4T, and stay missing")
++        self.disconnect_main()
++        tip = n0.getbestblockhash()
++        n0.invalidateblock(self.c_hash)
++        assert_equal(n0.getblockcount(), self.c_height - 1)
++        while n0.getblockcount() < H4T - 1:
++            self.generateblock(n0, output="raw(51)", transactions=[], sync_fun=self.no_op)
++        # Not created at all: missing, and ML-DSA-44 is disabled from H4T on.
++        self.assert_state(["missing"] * 3, True)
++        self.generateblock(n0, output="raw(51)", transactions=[self.tripwire_tx.serialize().hex()], sync_fun=self.no_op)
++        assert_equal(n0.getblockcount(), H4T)
++        assert_equal(n0.gettxout(f"{self.tw['L1']['txid']:064x}", self.tw["L1"]["vout"])["confirmations"], 1)
++        # Created again at H4T: still missing.
++        self.assert_state(["missing"] * 3, True)
++        n0.reconsiderblock(self.c_hash)
++        assert_equal(n0.getbestblockhash(), tip)
++        self.assert_state(["unspent", "missing", "missing"], True)
++        self.connect_main()
++
++    def test_restarts(self):
++        n0, n1 = self.nodes[0], self.nodes[1]
++        o = self.outs
++        self.mine()
++        expected = n0.gettripwireinfo()
++        self.log.info("VerifyDB level 4 connects the blocks around the trigger again, each against its own parent")
++        depth = n0.getblockcount() - (H4T - 2)
++        assert n0.verifychain(4, depth)
++        tip = n0.getblockcount()
++        with n0.assert_debug_log([f"P2MR lattice tripwire state at height {tip}: " + self.state_log(["unspent", "missing", "missing"], "disabled")]):
++            self.restart_node(0, extra_args=self.rules_args(0) + ["-checklevel=4", f"-checkblocks={depth}"])
++        assert_equal(n0.gettripwireinfo(), expected)
++        self.log.info("-reindex-chainstate and -reindex rebuild the same state")
++        for node, option in ((n0, "-reindex-chainstate"), (n1, "-reindex")):
++            self.restart_node(node.index, extra_args=self.rules_args(node.index) + [option])
++            self.wait_until(lambda: node.getbestblockhash() == expected["tip_hash"])
++            assert_equal(node.gettripwireinfo(), expected)
++        self.connect_main()
++        after = self.spend([(o["after_reorg"], pq_witness())])
++        self.reject(after, MEMPOOL_ML)
++        self.submit(self.build_block([after]), BLOCK_ML)
++
++    def test_late_upgrade(self):
++        n0, n2 = self.nodes[0], self.nodes[2]
++        self.log.info("Late upgrade: the M4-R node followed past the triggers; with the rules its state is right")
++        self.follow_m4r()
++        self.restart_node(2, extra_args=self.rules_args(0))
++        assert_equal(n2.gettripwireinfo(), n0.gettripwireinfo())
++
++        self.log.info("Late upgrade: a block that breaks the rules, taken without them, stays; -reindex drops it")
++        self.restart_node(2, extra_args=self.rules_args(2))
++        block = self.build_block([self.spend([(self.outs["late_pq"], pq_witness())])], node=n2)
++        self.submit(block, node=n2)
++        self.submit(block, BLOCK_ML)
++        self.restart_node(2, extra_args=self.rules_args(0))
++        assert_equal(n2.getbestblockhash(), block.hash_hex)
++        self.restart_node(2, extra_args=self.rules_args(0) + ["-reindex"])
++        self.wait_until(lambda: {"hash": block.hash_hex, "status": "invalid"} in
++                        [{"hash": tip["hash"], "status": tip["status"]} for tip in n2.getchaintips()])
++        assert_equal(n2.getbestblockhash(), f"{block.hashPrevBlock:064x}")
++
++    def test_missing_before_activation(self):
++        n3 = self.nodes[3]
++        o = self.outs
++        self.log.info("Node 3: L2, spent below a lattice height given later, makes the first block at that height refuse ML-DSA-44 in 0xe2")
++        height = n3.getblockcount() + 2
++        self.restart_node(3, extra_args=self.base_args[3] + [f"-signettripwire={H3}@{self.tripwires['D']}",
++                                                            f"-signetlatticetripwire={height}@{self.tripwires['L2']}"])
++        assert_equal(self.lattice(n3)["tripwires"], [{"outpoint": self.tripwires["L2"], "state": "missing"}])
++        assert_equal(self.lattice(n3)["mldsa_disabled_next_block"], False)
++        # Below the height leaf version 0xe2 is not executed: an ML-DSA-44 spend is valid in a block.
++        self.submit(self.build_block([self.spend([(o["early_1"], pq_witness())])], node=n3), node=n3)
++        assert_equal(self.lattice(n3)["mldsa_disabled_next_block"], True)
++        self.submit(self.build_block([self.spend([(o["early_2"], pq_witness())])], node=n3), BLOCK_ML, node=n3)
++        self.submit(self.build_block([self.spend([(o["early_2"], slh_witness())])], node=n3), node=n3)
++        assert_equal(n3.getblockcount(), height)
++
++    def test_default_height_follows_m1(self):
++        n3 = self.nodes[3]
++        self.log.info("Regtest's default lattice height follows OP_CHECKMLDSA44: a reorg below it removes a 0xe2 ML-DSA-44 spend")
++        height = n3.getblockcount() + 2
++        self.restart_node(3, extra_args=self.base_args[3] + [f"-testactivationheight=p2mr_mldsa44@{height}"])
++        assert_equal(n3.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"], {"type": "buried", "active": False, "height": height})
++        blockhash = self.generate(n3, 1, sync_fun=self.no_op)[0]
++        spend = self.spend([(self.outs["m1_reorg"], pq_witness())])
++        self.accept(spend, node=3)
++        n3.invalidateblock(blockhash)
++        assert spend.txid_hex not in self.mempool(3)
++        self.reject(spend, DISCOURAGED, node=3)
++        n3.reconsiderblock(blockhash)
++        self.accept(spend, node=3)
++
++    def test_each_slot(self):
++        n3 = self.nodes[3]
++        o = self.outs
++        tripwire = f"-signettripwire={H3}@{self.tripwires['D']}"
++        self.log.info("Node 3: a spendable output in the first lattice slot, which on Ark-0 holds the NUMS output, triggers as the others do")
++        slots = [outpoint(o["slot1"]), outpoint(o["slot2"])]
++        self.restart_node(3, extra_args=self.base_args[3] + [tripwire, f"-signetlatticetripwire={H4T}@{','.join(slots)}"])
++        assert_equal(self.lattice(n3)["tripwires"], [{"outpoint": slot, "state": "unspent"} for slot in slots])
++        assert_equal(self.lattice(n3)["mldsa_disabled_next_block"], False)
++        mempool_pq = self.spend([(o["slot_mempool"], pq_witness())])
++        self.accept(mempool_pq, node=3)
++        trigger = self.spend([(o["slot1"], pq_witness(TREE_SLOT, "pq", key=SLOT_SEC))], version=4)
++        before = self.spend([(o["slot_before"], pq_witness())])
++        after = self.spend([(o["slot_after"], pq_witness())])
++        x = self.build_block([before, trigger, after], node=n3)
++        height = n3.getblockcount() + 1
++        with n3.assert_debug_log([f"P2MR lattice tripwire {slots[0]} spent by {trigger.txid_hex} in block {x.hash_hex} (height {height}): "
++                                  f"OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from height {height + 1}"]):
++            self.submit(x, node=n3)
++        self.log.info("Block X+1 after the first slot: the ML-DSA-44 spend of 0xe2 fails, in the mempool and in a block; SLH-DSA passes")
++        assert_equal(self.lattice(n3)["tripwires"], [{"outpoint": slots[0], "state": "missing"}, {"outpoint": slots[1], "state": "unspent"}])
++        assert_equal(self.lattice(n3)["mldsa_disabled_next_block"], True)
++        assert mempool_pq.txid_hex not in self.mempool(3)
++        self.reject(mempool_pq, MEMPOOL_ML, node=3)
++        self.submit(self.build_block([self.spend([(o["slot_late_pq"], pq_witness())])], node=n3), BLOCK_ML, node=n3)
++        self.submit(self.build_block([self.spend([(o["slot_late_slh"], slh_witness())])], node=n3), node=n3)
++        assert_equal(n3.getblockcount(), height + 1)
++
++        self.log.info("Node 3: a lattice tripwire outpoint that was never created: a block with an ML-DSA-44 spend of 0xe2 is refused, one with an SLH-DSA spend is taken")
++        never = f"{'5a' * 32}:7"
++        self.restart_node(3, extra_args=self.base_args[3] + [tripwire, f"-signetlatticetripwire={H4T}@{never}"])
++        assert_equal(self.lattice(n3)["tripwires"], [{"outpoint": never, "state": "missing"}])
++        assert_equal(self.lattice(n3)["mldsa_disabled_next_block"], True)
++        self.submit(self.build_block([self.spend([(o["never_pq"], pq_witness())])], node=n3), BLOCK_ML, node=n3)
++        self.submit(self.build_block([self.spend([(o["never_slh"], slh_witness())])], node=n3), node=n3)
++        assert_equal(n3.getblockcount(), height + 2)
++
++    def test_options(self):
++        self.log.info("Options: -signetlatticetripwire needs the other rules at or below its height; Ark-0 refuses it")
++        node = self.nodes[3]
++        self.stop_node(3)
++        lattice = f"{'ab' * 32}:0"
++
++        def refused(args, message):
++            node.assert_start_raises_init_error(args, re.escape(f"Error: {message}"), match=ErrorMatch.PARTIAL_REGEX)
++        refused([f"-signettripwire=20@{lattice}", f"-signetlatticetripwire=19@{lattice}"],
++                "The p2mr_lattice_tripwire height must be at or above the p2mr_tripwire height 20, not 19.")
++        refused(["-testactivationheight=p2mr_slhdsa128s@20", f"-signetlatticetripwire=19@{lattice}"],
++                "The p2mr_lattice_tripwire height must be at or above the p2mr_slhdsa128s height 20, not 19.")
++        refused(["-testactivationheight=p2mr_lattice_tripwire@5", f"-signetlatticetripwire=20@{lattice}"],
++                "-signetlatticetripwire sets the height of p2mr_lattice_tripwire, which -testactivationheight cannot set too.")
++        signet = ["-regtest=0", "-signet"]
++        refused(signet + [f"-signetlatticetripwire=20@{lattice}"], "-signetlatticetripwire requires -signetchallenge.")
++        refused(signet + ["-signetchallenge=51", f"-signetlatticetripwire=20@{lattice}"], "-signetlatticetripwire requires -signetmldsa44.")
++        refused(signet + ["-signetchallenge=51", "-signetmldsa44=5", f"-signetlatticetripwire=20@{lattice}"],
++                "-signetlatticetripwire requires -signettripwire.")
++        refused(signet + ["-signetchallenge=51", "-signetmldsa44=5", f"-signettripwire=10@{lattice}", f"-signetlatticetripwire=20@{lattice}"],
++                "-signetlatticetripwire requires -signetslhdsa128s.")
++        refused(signet + ["-signetchallenge=51", "-signetmldsa44=5", f"-signettripwire=10@{lattice}", "-signetslhdsa128s=21",
++                          f"-signetlatticetripwire=20@{lattice}"],
++                "-signetlatticetripwire height must be at or above the -signetslhdsa128s height 21, not 20.")
++        refused(signet + ["-signetchallenge=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae",
++                          f"-signetlatticetripwire=20@{lattice}"],
++                "-signetlatticetripwire cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        self.log.info("Options: refused on the chains it is not for, whatever its value")
++        refused(["-regtest=0", "-signetlatticetripwire=garbage"], "-signetlatticetripwire can only be used with signet or regtest.")
++
++
++if __name__ == '__main__':
++    P2MRLatticeTripwireTest(__file__).main()
+diff --git a/test/functional/feature_p2mr_lattice_tripwire_signet.py b/test/functional/feature_p2mr_lattice_tripwire_signet.py
+new file mode 100644
+index 0000000..b8af93c
+--- /dev/null
++++ b/test/functional/feature_p2mr_lattice_tripwire_signet.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the P2MR lattice tripwire rules on a custom signet, and their absence on Ark-0
++(doc/p2mr-lattice-tripwire.md).
++
++Node 0 runs a custom signet with -signetlatticetripwire, whose one lattice tripwire output never
++existed: from the height of the rules, ML-DSA-44 checks in leaf version 0xe2 are disabled, which
++gettripwireinfo and getdeploymentinfo report, and the startup log names the rules. Node 1 runs the
++Ark-0 signet, whose height and lattice tripwire outputs are not decided: the rules are not active
++there, the deployment is not listed, gettripwireinfo has no lattice object, and the startup log
++says so. The script rules themselves are tested on regtest (feature_p2mr_lattice_tripwire.py).
++"""
++
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal
++
++CHALLENGE = "51"
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++H1, H3, H4, H4T = 1, 3, 4, 6
++NEVER_CREATED = f"{'22' * 32}:1"
++# Signet blocks need real proof of work, about 2^22 hashes each.
++MAXTRIES = 10**9
++ARGS = [f"-signetchallenge={CHALLENGE}", f"-signetmldsa44={H1}", f"-signettripwire={H3}@{'11' * 32}:0",
++        f"-signetslhdsa128s={H4}", f"-signetlatticetripwire={H4T}@{NEVER_CREATED}"]
++
++
++class P2MRLatticeTripwireSignetTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.num_nodes = 2
++        self.setup_clean_chain = True
++        self.extra_args = [ARGS, [f"-signetchallenge={ARK0_CHALLENGE}"]]
++
++    def setup_network(self):
++        self.setup_nodes()
++
++    def run_test(self):
++        node, ark0 = self.nodes
++        self.log.info("A custom signet with -signetlatticetripwire: the parameters and the startup log")
++        assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"], {"type": "buried", "active": False, "height": H4T})
++        log = node.debug_log_path.read_text()
++        assert f"Signet P2MR lattice tripwire rules from height {H4T} in leaf version 0xe2; tripwire outputs {NEVER_CREATED}" in log
++        assert f"P2MR SLH-DSA-SHA2-128s rules active from height {H4} (leaf versions 0xc0, 0xe0, 0xe2)" in log
++        info = node.gettripwireinfo()["lattice"]
++        assert_equal(info, {"height": H4T, "leaf_version": "e2", "tripwires": [{"outpoint": NEVER_CREATED, "state": "missing"}],
++                            "mldsa_disabled_next_block": False})
++
++        self.log.info("A lattice tripwire output that never existed disables ML-DSA-44 checks in 0xe2 from the height on")
++        self.generatetodescriptor(node, H4T - 2, "raw(51)", maxtries=MAXTRIES, sync_fun=self.no_op)
++        assert_equal(node.gettripwireinfo()["lattice"]["mldsa_disabled_next_block"], False)
++        with node.assert_debug_log([f"P2MR lattice tripwire rules active from height {H4T}, reached by block ",
++                                    f"lattice tripwire outputs {NEVER_CREATED} missing; ML-DSA-44 checks in leaf version 0xe2 are disabled for the next block"]):
++            self.generatetodescriptor(node, 1, "raw(51)", maxtries=MAXTRIES, sync_fun=self.no_op)
++            assert_equal(node.gettripwireinfo()["lattice"]["mldsa_disabled_next_block"], True)
++            self.generatetodescriptor(node, 1, "raw(51)", maxtries=MAXTRIES, sync_fun=self.no_op)
++        assert_equal(node.getdeploymentinfo()["deployments"]["p2mr_lattice_tripwire"]["active"], True)
++        assert "P2MR_LATTICE_TRIPWIRE" in node.getdeploymentinfo()["script_flags"]
++
++        self.log.info("Ark-0: the lattice tripwire rules are not active, and the node says so")
++        assert "p2mr_lattice_tripwire" not in ark0.getdeploymentinfo()["deployments"]
++        assert "lattice" not in ark0.gettripwireinfo()
++        log = ark0.debug_log_path.read_text()
++        assert "P2MR lattice tripwire rules (leaf version 0xe2) are not active on the Ark-0 signet: their height and outputs are not decided yet" in log
++        assert "P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)" in log
++        assert "P2MR lattice tripwire rules from height" not in log
++
++
++if __name__ == '__main__':
++    P2MRLatticeTripwireSignetTest(__file__).main()
+diff --git a/test/functional/feature_p2mr_lattice_tripwire_storage.py b/test/functional/feature_p2mr_lattice_tripwire_storage.py
+new file mode 100644
+index 0000000..cf2fc19
+--- /dev/null
++++ b/test/functional/feature_p2mr_lattice_tripwire_storage.py
+@@ -0,0 +1,333 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the P2MR lattice tripwire rules with assumeutxo and with pruning (doc/p2mr-lattice-tripwire.md).
++
++What feature_p2mr_tripwire.py does for leaf version 0xe0, for leaf version 0xe2. The state the rules
++decide on, whether a lattice tripwire output is missing from the UTXO set, comes from the chainstate's
++own UTXO set, not from block data and not from another chainstate.
++
++  node 0  builds the chain up to the regtest assumeutxo snapshot at 299 exactly as
++          feature_assumeutxo.py does, before any other node; then the rules for the pruning part
++  node 1  loads that snapshot with a lattice tripwire output that block 200, below the snapshot,
++          spends, and validates blocks 200 to 299 in the background
++  node 2  pruned (-fastprune -prune=1), with the rules of node 0 for the pruning part
++
++The blocks up to 299 are fixed by the snapshot's hash, so they hold no spend of a 0xe2 leaf: what the
++background chainstate decides there shows only in what it logs and in finishing without a fault. The
++unit test p2mr_lattice_tripwire_tests/state_from_view shows that ConnectBlock reads the state from the
++view it is given.
++"""
++
++import hashlib
++
++from test_framework.blocktools import add_witness_commitment, create_block, create_coinbase
++from test_framework.messages import COIN, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut
++from test_framework.p2mr_lattice_tripwire import (
++    MLDSA_DISABLED_ERROR,
++    lattice_tripwire_tree,
++    mldsa44_any_leaf_witness,
++    pq2_tree,
++    slhdsa128s_leaf_witness,
++)
++from test_framework.p2mr_mldsa44 import mldsa44_keygen
++from test_framework.p2mr_slhdsa128s import slhdsa128s_keygen
++from test_framework.test_framework import BitcoinTestFramework
++from test_framework.util import assert_equal, assert_raises_rpc_error
++from test_framework.wallet import MiniWallet
++
++START_HEIGHT = 199
++SNAPSHOT_BASE_HEIGHT = 299
++SNAPSHOT_BASE_HASH = "7cc695046fec709f8c9394b6f928f81e81fd3ac20977bb68760fa1faa7916ea2"
++# Node 1's lattice height: above the creation of its lattice tripwire output, below block 200 that spends it.
++SNAPSHOT_H4T = 150
++FUND_SATS = 100_000
++FEE_SATS = 5_000
++
++MEMPOOL_ML = f"mempool-script-verify-flag-failed ({MLDSA_DISABLED_ERROR})"
++BLOCK_ML = f"block-script-verify-flag-failed ({MLDSA_DISABLED_ERROR})"
++
++
++def seckey(tag):
++    return hashlib.sha256(b"feature_p2mr_lattice_tripwire_storage " + tag).digest()
++
++
++PQ_PUB, PQ_SEC = mldsa44_keygen(seckey(b"ml-dsa-44"))
++L2_PUB, L2_SEC = mldsa44_keygen(seckey(b"destroyed"))
++L3_PUB, L3_SEC = mldsa44_keygen(seckey(b"drill"))
++SLH_PUB, SLH_SEC = slhdsa128s_keygen(hashlib.sha512(b"feature_p2mr_lattice_tripwire_storage slh").digest()[:48])
++TREE_L2, TREE_L3 = (lattice_tripwire_tree(pk) for pk in (L2_PUB, L3_PUB))
++PQ2 = pq2_tree(PQ_PUB, SLH_PUB)
++
++
++def output(tx, n=0):
++    return {"txid": tx.txid_int, "vout": n, "value": tx.vout[n].nValue, "script_pubkey": tx.vout[n].scriptPubKey}
++
++
++def outpoint(utxo):
++    return f"{utxo['txid']:064x}:{utxo['vout']}"
++
++
++def pq_witness(tree=PQ2, name="pq", key=PQ_SEC):
++    leaf = tree.leaves[name]
++    return lambda tx, spent, index: mldsa44_any_leaf_witness(key, leaf, tx, spent, index)
++
++
++def slh_witness():
++    leaf = PQ2.leaves["slh"]
++    return lambda tx, spent, index: slhdsa128s_leaf_witness(SLH_SEC, leaf, tx, spent, index)
++
++
++class P2MRLatticeTripwireStorageTest(BitcoinTestFramework):
++    def set_test_params(self):
++        # The cached chain up to 199, which the regtest assumeutxo snapshot at 299 builds on.
++        self.num_nodes = 3
++        self.rpc_timeout = 120
++        noban = "-whitelist=noban@127.0.0.1"
++        self.base_args = [[noban], [noban], [noban, "-fastprune", "-prune=1"]]
++        self.extra_args = [list(args) for args in self.base_args]
++
++    def setup_network(self):
++        # Disconnected, and without the block setup_nodes() mines on the cached chain: node 0 builds
++        # the snapshot chain on its own, and node 1 only gets its headers.
++        self.add_nodes(self.num_nodes, self.extra_args)
++        self.start_nodes()
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def wallet_witness(self, tx, spent, index):
++        return list(self.wallet_stack)
++
++    def wallet_input(self):
++        utxo = self.wallet.get_utxo(confirmed_only=True)
++        return ({"txid": int(utxo["txid"], 16), "vout": utxo["vout"], "value": int(utxo["value"] * COIN),
++                 "script_pubkey": self.wallet.get_output_script()}, self.wallet_witness)
++
++    def spend(self, inputs, *, outputs=None, version=2):
++        tx = CTransaction()
++        tx.version = version
++        tx.vin = [CTxIn(COutPoint(utxo["txid"], utxo["vout"]), b"", 0xfffffffd) for utxo, _ in inputs]
++        total = sum(utxo["value"] for utxo, _ in inputs)
++        tx.vout = outputs if outputs is not None else [CTxOut(total - FEE_SATS, self.wallet.get_output_script())]
++        spent = [CTxOut(utxo["value"], utxo["script_pubkey"]) for utxo, _ in inputs]
++        tx.wit.vtxinwit = [CTxInWitness() for _ in inputs]
++        for index, (_, make) in enumerate(inputs):
++            tx.wit.vtxinwit[index].scriptWitness.stack = make(tx, spent, index)
++        return tx
++
++    def funding(self, script_pubkeys):
++        """A transaction paying FUND_SATS to each script, from the wallet."""
++        utxo, witness = self.wallet_input()
++        outputs = [CTxOut(FUND_SATS, spk) for spk in script_pubkeys]
++        outputs.append(CTxOut(utxo["value"] - FUND_SATS * len(outputs) - FEE_SATS, self.wallet.get_output_script()))
++        return self.spend([(utxo, witness)], outputs=outputs)
++
++    def build_block(self, txs, *, node, prev=None, nudge=0):
++        prev = prev or node.getbestblockhash()
++        header = node.getblockheader(prev)
++        block = create_block(int(prev, 16), create_coinbase(header["height"] + 1), header["mediantime"] + 1 + nudge, txlist=txs)
++        add_witness_commitment(block)
++        block.solve()
++        return block
++
++    def submit(self, block, expected=None, *, node):
++        assert_equal(node.submitblock(block.serialize().hex()), expected)
++
++    def lattice(self, node):
++        return node.gettripwireinfo()["lattice"]
++
++    def state_log(self, outpoints, states, checks):
++        listed = ", ".join(f"{o} {state}" for o, state in zip(outpoints, states))
++        return f"lattice tripwire outputs {listed}; ML-DSA-44 checks in leaf version 0xe2 are {checks} for the next block"
++
++    # ------------------------------------------------------------------
++    # Test body
++    # ------------------------------------------------------------------
++
++    def run_test(self):
++        snapshot = self.build_snapshot_chain()
++        self.connect_nodes(0, 2)
++        self.sync_blocks([self.nodes[0], self.nodes[2]])
++        self.wallet.rescan_utxos()
++        probe = CTransaction()
++        probe.vin = [CTxIn()]
++        self.wallet.sign_tx(probe)
++        self.wallet_stack = list(probe.wit.vtxinwit[0].scriptWitness.stack)
++
++        self.test_assumeutxo(snapshot)
++        self.test_pruning()
++
++    def build_snapshot_chain(self):
++        self.log.info("Mine blocks 200 to 299 as feature_assumeutxo.py does, for the snapshot regtest knows")
++        n0 = self.nodes[0]
++        assert_equal(n0.getblockcount(), START_HEIGHT)
++        n0.setmocktime(n0.getblockheader(n0.getbestblockhash())["time"])
++        self.wallet = MiniWallet(n0)
++        for i in range(SNAPSHOT_BASE_HEIGHT - START_HEIGHT):
++            if i % 3 == 0:
++                self.wallet.send_self_transfer(from_node=n0)
++            self.generate(n0, nblocks=1, sync_fun=self.no_op)
++        assert_equal(n0.getbestblockhash(), SNAPSHOT_BASE_HASH)
++        return n0.dumptxoutset("utxos.dat", "latest")["path"]
++
++    def test_assumeutxo(self, snapshot):
++        self.log.info("assumeutxo: the snapshot chainstate is past a lattice tripwire spend the background one has not reached")
++        n0, n1, n2 = self.nodes[0], self.nodes[1], self.nodes[2]
++        # Node 1's lattice tripwire output: the one the first transaction of block 200 spends, created far below.
++        spend = n0.getblock(n0.getblockhash(START_HEIGHT + 1), 2)["tx"][1]["vin"][0]
++        created = next(h for h in range(START_HEIGHT + 1) if n0.getblock(n0.getblockhash(h))["tx"][0] == spend["txid"])
++        assert created < SNAPSHOT_H4T < START_HEIGHT
++        tripwire = f"{spend['txid']}:{spend['vout']}"
++        with n1.assert_debug_log([f"P2MR lattice tripwire rules from height {SNAPSHOT_H4T} in leaf version 0xe2; tripwire outputs {tripwire}",
++                                  f"P2MR lattice tripwire state at height {START_HEIGHT}: "
++                                  + self.state_log([tripwire], ["unspent"], "enabled")]):
++            self.restart_node(1, extra_args=self.base_args[1] + [f"-signetlatticetripwire={SNAPSHOT_H4T}@{tripwire}"])
++        n1.setmocktime(n0.getblockheader(n0.getbestblockhash())["time"])
++        for height in range(START_HEIGHT + 1, SNAPSHOT_BASE_HEIGHT + 1):
++            n1.submitheader(n0.getblock(n0.getblockhash(height), 0))
++        assert_equal(n1.loadtxoutset(snapshot)["base_height"], SNAPSHOT_BASE_HEIGHT)
++        assert_equal([chainstate["blocks"] for chainstate in n1.getchainstates()["chainstates"]], [START_HEIGHT, SNAPSHOT_BASE_HEIGHT])
++        expected = {"height": SNAPSHOT_H4T, "leaf_version": "e2", "tripwires": [{"outpoint": tripwire, "state": "missing"}],
++                    "mldsa_disabled_next_block": True}
++        assert_equal(self.lattice(n1), expected)
++        assert_equal(n1.gettripwireinfo()["tip_height"], SNAPSHOT_BASE_HEIGHT)
++
++        # The snapshot chainstate decides on its own UTXO set, from the first block after the snapshot:
++        # before block 300, the mempool refuses an ML-DSA-44 spend of 0xe2 that spends an unconfirmed
++        # output; and block 300 itself, with the funding and that spend, is refused, while one with
++        # the funding and an SLH-DSA spend of 0xe2 is taken.
++        funding = self.funding([PQ2.scriptPubKey] * 5)
++        n1.sendrawtransaction(funding.serialize().hex())
++        pq_300 = self.spend([(output(funding, 0), pq_witness())])
++        slh_300 = self.spend([(output(funding, 1), slh_witness())])
++        assert_equal(n1.testmempoolaccept([pq_300.serialize().hex()])[0]["reject-reason"], MEMPOOL_ML)
++        assert n1.testmempoolaccept([slh_300.serialize().hex()])[0]["allowed"]
++        assert_equal(n1.getblockcount(), SNAPSHOT_BASE_HEIGHT)
++        self.submit(self.build_block([funding, pq_300], node=n1), BLOCK_ML, node=n1)
++        first = self.build_block([funding, slh_300], node=n1)
++        self.submit(first, node=n1)
++        assert_equal(n1.getblockcount(), SNAPSHOT_BASE_HEIGHT + 1)
++        # And at 301, on confirmed outputs.
++        pq = self.spend([(output(funding, 2), pq_witness())])
++        slh = self.spend([(output(funding, 3), slh_witness())])
++        assert_equal(n1.testmempoolaccept([pq.serialize().hex()])[0]["reject-reason"], MEMPOOL_ML)
++        assert n1.testmempoolaccept([slh.serialize().hex()])[0]["allowed"]
++        self.submit(self.build_block([pq], node=n1), BLOCK_ML, node=n1)
++        second = self.build_block([slh], node=n1)
++        self.submit(second, node=n1)
++        assert_equal(n1.getchainstates()["chainstates"][0]["blocks"], START_HEIGHT)
++        # The other nodes continue from the same blocks; node 0 and node 2 have no lattice rules yet.
++        for block in (first, second):
++            self.submit(block, node=n0)
++        self.sync_blocks([n0, n2])
++        self.late_pq = output(funding, 4)
++
++        self.log.info("assumeutxo: the background chainstate replays the spend in block 200 without the log of the active chain")
++        with n1.assert_debug_log([], unexpected_msgs=[f"P2MR lattice tripwire {tripwire} spent by",
++                                                      "P2MR lattice tripwire rules active from height"]):
++            self.connect_nodes(1, 0)
++            self.wait_until(lambda: len(n1.getchainstates()["chainstates"]) == 1)
++        self.sync_blocks([n0, n1])
++        self.disconnect_nodes(1, 0)
++        assert_equal(n1.getchainstates()["chainstates"][0]["blocks"], SNAPSHOT_BASE_HEIGHT + 2)
++        self.log.info("assumeutxo: after the background validation, and after a restart, the state and the refusals are the same")
++        for restart in (False, True):
++            if restart:
++                with n1.assert_debug_log([f"P2MR lattice tripwire state at height {SNAPSHOT_BASE_HEIGHT + 2}: "
++                                          + self.state_log([tripwire], ["missing"], "disabled")]):
++                    self.restart_node(1, extra_args=self.base_args[1] + [f"-signetlatticetripwire={SNAPSHOT_H4T}@{tripwire}"])
++            assert_equal(self.lattice(n1), expected)
++            late = self.spend([(self.late_pq, pq_witness())])
++            assert_equal(n1.testmempoolaccept([late.serialize().hex()])[0]["reject-reason"], MEMPOOL_ML)
++            self.submit(self.build_block([late], node=n1, nudge=int(restart)), BLOCK_ML, node=n1)
++        self.stop_node(1)
++
++    def test_pruning(self):
++        n0, n2 = self.nodes[0], self.nodes[2]
++        main = [n0, n2]
++        self.log.info("Pruning: node 2 prunes, with the rules, before a lattice tripwire output is spent")
++        tx = self.funding([TREE_L2.scriptPubKey, TREE_L3.scriptPubKey] + [PQ2.scriptPubKey] * 6)
++        self.wallet.sendrawtransaction(from_node=n0, tx_hex=tx.serialize().hex())
++        self.generate(n0, 1, sync_fun=lambda: self.sync_blocks(main))
++        l2, l3 = output(tx, 0), output(tx, 1)
++        outs = [output(tx, n) for n in range(2, 8)]
++        # Past the 288 blocks a pruned node keeps, so that it has pruned before it meets the trigger.
++        self.generate(n0, 300, sync_fun=lambda: self.sync_blocks(main))
++        n2.pruneblockchain(n2.getblockcount())
++        assert n2.getblockchaininfo()["pruneheight"] > 0
++        height = n0.getblockcount() + 3
++        rules = [f"-signetlatticetripwire={height}@{outpoint(l2)},{outpoint(l3)}"]
++        for node in main:
++            self.restart_node(node.index, extra_args=self.base_args[node.index] + rules)
++        self.connect_nodes(0, 2)
++        self.generate(n0, height - n0.getblockcount(), sync_fun=lambda: self.sync_blocks(main))
++
++        self.log.info("Pruning: the pruned node connects the trigger, logs it, and drops the ML-DSA-44 spend of 0xe2 from its mempool")
++        pq_mempool = self.spend([(outs[0], pq_witness())])
++        slh_mempool = self.spend([(outs[1], slh_witness())])
++        for spend in (pq_mempool, slh_mempool):
++            n2.sendrawtransaction(spend.serialize().hex())
++        trigger = self.spend([(l2, pq_witness(TREE_L2, "pq", L2_SEC))], version=4)
++        x = self.build_block([trigger], node=n0)
++        self.x_height = n0.getblockcount() + 1
++        with n2.assert_debug_log([f"P2MR lattice tripwire {outpoint(l2)} spent by {trigger.txid_hex} in block {x.hash_hex} "
++                                  f"(height {self.x_height}): OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from height {self.x_height + 1}"]):
++            self.submit(x, node=n0)
++            self.sync_blocks(main)
++        assert_equal(set(n2.getrawmempool()), {slh_mempool.txid_hex})
++        self.generate(n0, 2, sync_fun=lambda: self.sync_blocks(main))
++        states = ["missing", "unspent"]
++        assert_equal([t["state"] for t in self.lattice(n2)["tripwires"]], states)
++        assert self.lattice(n2)["mldsa_disabled_next_block"]
++
++        self.log.info("Pruning: a reorganization over the trigger, inside the blocks a pruned node keeps, brings the checks back")
++        self.disconnect_nodes(0, 2)
++        n2.invalidateblock(x.hash_hex)
++        assert_equal([t["state"] for t in self.lattice(n2)["tripwires"]], ["unspent", "unspent"])
++        assert not self.lattice(n2)["mldsa_disabled_next_block"]
++        n2.sendrawtransaction(pq_mempool.serialize().hex())
++        n2.reconsiderblock(x.hash_hex)
++        assert_equal(n2.getbestblockhash(), n0.getbestblockhash())
++        assert self.lattice(n2)["mldsa_disabled_next_block"]
++        assert pq_mempool.txid_hex not in n2.getrawmempool()
++        self.connect_nodes(0, 2)
++
++        self.log.info("Pruning: once the trigger's block is pruned, a restart rebuilds the same state from the UTXO set")
++        # A block of its own fills a block file, so that X's file ends early and can be pruned.
++        self.wallet.send_self_transfer(from_node=n0, target_vsize=70_000)
++        self.generate(n0, 1, sync_fun=lambda: self.sync_blocks(main))
++        self.generate(n0, 300, sync_fun=lambda: self.sync_blocks(main))
++        n2.pruneblockchain(n2.getblockcount())
++        assert n2.getblockchaininfo()["pruneheight"] > self.x_height
++        assert_raises_rpc_error(-1, "Block not available (pruned data)", n2.getblock, x.hash_hex)
++        tip = n2.getblockcount()
++        with n2.assert_debug_log([f"P2MR lattice tripwire state at height {tip}: "
++                                  + self.state_log([outpoint(l2), outpoint(l3)], states, "disabled")]):
++            self.restart_node(2, extra_args=self.base_args[2] + rules)
++        assert_equal(n2.gettripwireinfo(), n0.gettripwireinfo())
++        self.submit(self.build_block([self.spend([(outs[2], pq_witness())])], node=n2), BLOCK_ML, node=n2)
++        kept = self.build_block([self.spend([(outs[3], slh_witness())])], node=n2)
++        self.submit(kept, node=n2)
++
++        self.log.info("Pruning: the reorganizations pruning still allows, above the prune height, keep the state; spending L3 there too")
++        n2.invalidateblock(kept.hash_hex)
++        assert_equal([t["state"] for t in self.lattice(n2)["tripwires"]], states)
++        assert self.lattice(n2)["mldsa_disabled_next_block"]
++        trigger3 = self.spend([(l3, pq_witness(TREE_L3, "pq", L3_SEC))], version=4)
++        y = self.build_block([trigger3], node=n2, nudge=1)
++        self.submit(y, node=n2)
++        assert_equal([t["state"] for t in self.lattice(n2)["tripwires"]], ["missing", "missing"])
++        n2.invalidateblock(y.hash_hex)
++        assert_equal([t["state"] for t in self.lattice(n2)["tripwires"]], states)
++        assert self.lattice(n2)["mldsa_disabled_next_block"]
++        n2.reconsiderblock(kept.hash_hex)
++        self.connect_nodes(0, 2)
++        self.sync_blocks(main)
++        assert_equal(n2.gettripwireinfo(), n0.gettripwireinfo())
++
++
++if __name__ == '__main__':
++    P2MRLatticeTripwireStorageTest(__file__).main()
+diff --git a/test/functional/test_framework/p2mr_lattice_tripwire.py b/test/functional/test_framework/p2mr_lattice_tripwire.py
+new file mode 100644
+index 0000000..66cdd4c
+--- /dev/null
++++ b/test/functional/test_framework/p2mr_lattice_tripwire.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Helpers for P2MR leaf version 0xe2 and its lattice tripwire outputs (doc/p2mr-lattice-tripwire.md).
++
++From the height of the P2MR lattice tripwire rules, a P2MR leaf of leaf version 0xe2 at depth
++one or more executes as one of leaf version 0xc0 does; its elliptic curve checks follow the
++tripwire of leaf version 0xe0. Once a lattice tripwire output is missing from the UTXO set a
++block builds on, OP_CHECKMLDSA44 with a non-empty signature in such a leaf fails the script,
++from that block on; OP_CHECKSLHDSA128S is unaffected.
++
++    lattice tripwire output:  S1 of an ML-DSA-44 key and OP_RETURN, both leaf version 0xc0 at depth one
++    pq2:                      S1 and SLH1, both leaf version 0xe2 at depth one
++
++The control block of a leaf of version 0xe2 starts with 0xe3.
++"""
++
++import hashlib
++
++from .p2mr import p2mr_construct
++from .p2mr_mldsa44 import mldsa44_leaf, mldsa44_sig_chunks, mldsa44_sign_input
++from .p2mr_slhdsa128s import slhdsa128s_leaf, slhdsa128s_sig_chunks, slhdsa128s_sign_input
++from .script import CScript, OP_RETURN
++
++# The leaf version of the rules.
++LEAF_VERSION_LATTICE_TRIPWIRED = 0xe2
++# The script error of an ML-DSA-44 check with a non-empty signature in such a leaf once a lattice
++# tripwire output is missing.
++MLDSA_DISABLED_ERROR = "ML-DSA-44 signature checks are disabled in this leaf"
++# The NUMS key of the first lattice tripwire output.
++NUMS_DST = b"MLDSA44-NUMS/v1"
++NUMS_LABEL = b"lattice-tripwire/0"
++NUMS_KEY_SHA256 = "591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805"
++MLDSA44_Q = 8380417
++
++
++def nums_pubkey(dst=NUMS_DST, label=NUMS_LABEL):
++    """The NUMS ML-DSA-44 public key: X = SHAKE256(dst || 0x00 || label), rho its first 32 bytes, t by
++    rejection sampling of 23-bit numbers below q (FIPS 204 Algorithm 14), t1 = Power2Round(t).high
++    (Algorithm 35), pk = pkEncode(rho, t1) (Algorithm 22). With hashlib's SHAKE256."""
++    x = hashlib.shake_256(dst + b"\x00" + label).digest(32 + 4 * 256 * 3 * 2)
++    rho, pos, t1 = x[:32], 32, []
++    while len(t1) < 4 * 256:
++        z = x[pos] + 256 * x[pos + 1] + 65536 * (x[pos + 2] & 0x7f)
++        pos += 3
++        if z < MLDSA44_Q:
++            t1.append((z + (1 << 12) - 1) >> 13)
++    bits = n = 0
++    packed = bytearray()
++    for c in t1:
++        bits |= c << n
++        n += 10
++        while n >= 8:
++            packed.append(bits & 0xff)
++            bits >>= 8
++            n -= 8
++    pk = rho + bytes(packed)
++    assert len(pk) == 1312
++    return pk
++
++
++def lattice_tripwire_tree(pq_pubkey):
++    """A lattice tripwire output: S1 of the key and OP_RETURN, both leaf version 0xc0 at depth one."""
++    return p2mr_construct([("pq", mldsa44_leaf(pq_pubkey)), ("fail", CScript([OP_RETURN]))])
++
++
++def pq2_tree(pq_pubkey, slh_pubkey, leaf_ver=LEAF_VERSION_LATTICE_TRIPWIRED):
++    """pq2: S1 and SLH1, both of leaf version leaf_ver (0xe2 by default) at depth one."""
++    return p2mr_construct([("pq", mldsa44_leaf(pq_pubkey), leaf_ver), ("slh", slhdsa128s_leaf(slh_pubkey), leaf_ver)])
++
++
++def slhdsa128s_leaf_witness(seckey, leaf, tx, spent_utxos, input_index):
++    """The witness that spends an SLH-DSA leaf SLH1: sixteen signature chunks, the script, the control block."""
++    sig = slhdsa128s_sign_input(seckey, tx, spent_utxos, input_index, leaf.script, leaf_ver=leaf.leaf_ver)
++    return slhdsa128s_sig_chunks(sig) + [bytes(leaf.script), leaf.control_block]
++
++
++def mldsa44_any_leaf_witness(seckey, leaf, tx, spent_utxos, input_index, *, stack_below=()):
++    """The witness that spends a leaf with one OP_CHECKMLDSA44 check, with `stack_below` under the five
++    signature chunks."""
++    sig = mldsa44_sign_input(seckey, tx, spent_utxos, input_index, leaf.script, leaf_ver=leaf.leaf_ver)
++    return list(stack_below) + mldsa44_sig_chunks(sig) + [bytes(leaf.script), leaf.control_block]
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index 4673f0f..ee1282f 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -287,6 +287,9 @@ BASE_SCRIPTS = [
+     'p2p_initial_headers_sync.py',
+     'feature_nulldummy.py',
+     'feature_p2mr.py',
++    'feature_p2mr_lattice_tripwire.py',
++    'feature_p2mr_lattice_tripwire_signet.py',
++    'feature_p2mr_lattice_tripwire_storage.py',
+     'feature_p2mr_mldsa44.py',
+     'feature_p2mr_signet.py',
+     'feature_p2mr_slhdsa128s.py',
+-- 
+2.43.0
+

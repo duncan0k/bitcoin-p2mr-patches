@@ -1,0 +1,278 @@
+From b9e5fd56c0a3e73fab4b7dc21ebd5c85e95b5531 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:02:41 +0000
+Subject: [PATCH 105/105] doc: describe P2MR leaf version 0xe2 and its lattice
+ tripwire outputs
+
+doc/p2mr-lattice-tripwire.md describes where leaf version 0xe2 executes,
+the lattice tripwire outputs and what present means for them, the NUMS key
+and how it is computed, the execution rules and their order, the rescue
+lane in that leaf version (elliptic curve checks rescuable as in 0xe0, the
+disabled ML-DSA-44 check not), the activation on each chain and that it is
+not active on Ark-0 until its height and outputs are decided, the policy,
+with the 80-byte limit at depth zero that holds before activation too
+(rule 4T-4) and why, the RPC and the logs, and the tests. doc/p2mr.md points to it.
+---
+ doc/p2mr-lattice-tripwire.md | 224 +++++++++++++++++++++++++++++++++++
+ doc/p2mr.md                  |   7 +-
+ 2 files changed, 229 insertions(+), 2 deletions(-)
+ create mode 100644 doc/p2mr-lattice-tripwire.md
+
+diff --git a/doc/p2mr-lattice-tripwire.md b/doc/p2mr-lattice-tripwire.md
+new file mode 100644
+index 0000000..a8ec5a5
+--- /dev/null
++++ b/doc/p2mr-lattice-tripwire.md
+@@ -0,0 +1,224 @@
++# P2MR leaf version 0xe2 and its lattice tripwire outputs
++
++This build adds a P2MR leaf version, `0xe2`, whose `OP_CHECKMLDSA44` checks stop working once one of
++three designated outputs, the *lattice tripwire outputs*, is missing from the UTXO set, and whose
++elliptic curve checks follow the tripwire of leaf version `0xe0` ([p2mr-tripwire.md](p2mr-tripwire.md)).
++`OP_CHECKSLHDSA128S` ([p2mr-slhdsa128s.md](p2mr-slhdsa128s.md)) is never disabled. It is the second
++tripwire of the Ark-0 test signet (M4-T), for a second assumption: in a leaf of version `0xe2`,
++elliptic curve checks follow the tripwire of `0xe0`, ML-DSA-44 checks follow the lattice tripwire,
++and SLH-DSA checks always work. See [p2mr.md](p2mr.md) for P2MR.
++
++What it shows is narrow: a node with these rules refuses, at the block level, any `OP_CHECKMLDSA44`
++check with a non-empty signature in a leaf of version `0xe2` from the block after the one that
++spends a lattice tripwire output, or from the height of the rules if that comes later. It does not
++show that lattices or ML-DSA are broken, and it cannot warn of it: a secret attacker would not
++spend these outputs, and on a signet with one block signer the operator can keep such a spend out
++of the chain, or spend the output with a key it holds. This build is not part of BIP 360, and it is
++not proposed for mainnet.
++
++**On the Ark-0 signet these rules are not active.** Their height (`H4T`) and the three outputs are
++not decided yet: `ARK0_LATTICE_TRIPWIRE_HEIGHT` is `std::numeric_limits<int>::max()` and the list of
++outputs is empty, so leaf version `0xe2` stays an unknown leaf version there, and a node says so at
++startup. A later commit sets both, as the outputs of leaf version `0xe0` were set (see
++[Activation](#activation)).
++
++## Where leaf version 0xe2 executes
++
++The control block of a leaf of version `0xe2` starts with `0xe3`. A spend through such a leaf:
++
++- at depth zero (a control block of one byte) succeeds without executing the leaf, at every
++  height, like a P2MR leaf of any version. Wallets must never create such an output;
++- at depth one or more, below the height of the rules, succeeds without executing the leaf, as a
++  leaf of an unknown version. Policy refuses such spends, and no coins should be sent to such
++  leaves before the height;
++- at depth one or more, from the height on (`SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE`), executes the
++  leaf exactly as a leaf of version `0xc0`: BIP 342 rules, the validation weight budget, the
++  `OP_SUCCESSx` scan, the signature message, `OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S`.
++
++The tapleaf hash commits to the leaf version, so a signature made for a leaf of version `0xc0` or
++`0xe0` does not verify in a leaf of version `0xe2` with the same script, and the other way round. In
++P2TR, `0xe2` stays an unknown leaf version.
++
++## Lattice tripwire outputs
++
++The rules name the lattice tripwire outputs by outpoint. One is **present** while it is in the UTXO
++set and was created below the height of these rules (`P2MRLatticeTripwireHeight`), the definition of
++the tripwire outputs of `0xe0` with the cutoff at this height instead of theirs
++(`IsP2MRTripwirePresent` takes the cutoff as a parameter). So:
++
++- an output that is spent is missing from the block after the one that spends it; the block that
++  spends it is checked as before;
++- an outpoint that was never created is missing from the height of the rules on: the rules fail
++  closed;
++- an output that a deep reorganization moves to the height of the rules or above is still missing;
++- only a reorganization that undoes the spend brings the output back, and with it the checks,
++  unless another one is missing.
++
++The two tripwires are independent: either can be missing, and a reorganization can bring back one
++and not the other. The state is the UTXO set itself: there is nothing else to restore after a
++restart, `-reindex`, `-reindex-chainstate` or pruning.
++
++On Ark-0 the three outputs will be P2MR outputs of two leaves of version `0xc0` at depth one: the
++ML-DSA-44 template S1 of a key, and `OP_RETURN`. The leaf with the key cannot be of version `0xe2`:
++before the height anyone could spend it, and after a trigger it could not be spent at all.
++`OP_CHECKMLDSA44` in `0xc0` is never disabled.
++
++| Output | Key | Label |
++|---|---|---|
++| L1 | the NUMS key below: nobody has a secret for it | `NUMS ML-DSA-44` |
++| L2 | generated once, its secret destroyed (the operator says so; it cannot be proved) | `destroyed key` |
++| L3 | the operator holds it and spends it at an announced time to trigger the drill | `drill` |
++
++The NUMS key is computed from a domain separation tag and a label:
++
++```
++X   = SHAKE256("MLDSA44-NUMS/v1" || 0x00 || "lattice-tripwire/0"), read in order
++rho = the first 32 bytes of X
++for i in 0..3, j in 0..255:
++    repeat: (b0, b1, b2) = the next 3 bytes; z = b0 + 256*b1 + 65536*(b2 mod 128)   # FIPS 204 Alg. 14
++    until z < q;  t[i][j] = z
++t1 = Power2Round(t).high (d = 13, Alg. 35);  pk = pkEncode(rho, t1)  # Alg. 22, 1312 bytes
++```
++
++Its SHA256 is `591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805`
++(`P2MR_LATTICE_NUMS_KEY_SHA256`), and its output of the shape above has the scriptPubKey
++`52208fda4317667005f0a85352aeae313b38d0c4d9476a43b80b9ef64dba29c8dd56`. A unit test computes both
++again with the SHAKE256 of the vendored mldsa-native, the functional test framework with Python's
++`hashlib`. Nobody can compute a signing key for it under the MLWE and SelfTargetMSIS assumptions;
++that is not a proof.
++
++## Execution
++
++In a leaf of version `0xe2` that executes:
++
++1. **Elliptic curve checks** (`OP_CHECKSIG`, `OP_CHECKSIGVERIFY`, `OP_CHECKSIGADD` with a 32-byte
++   key and a non-empty signature) follow the tripwire of `0xe0` exactly: the leaf sets the same
++   execution flag (`m_tripwired_leaf`), and they fail with `SCRIPT_ERR_P2MR_EC_DISABLED` under
++   `SCRIPT_VERIFY_P2MR_EC_DISABLED`.
++2. **`OP_CHECKMLDSA44`** with any non-empty signature chunk fails the script under
++   `SCRIPT_VERIFY_P2MR_MLDSA_DISABLED`, with `SCRIPT_ERR_P2MR_MLDSA_DISABLED` ("ML-DSA-44 signature
++   checks are disabled in this leaf"). This is a failure, not a false result, so `OP_NOT` cannot turn
++   it around. The check comes after the validation weight is charged (250) and the public key chunks
++   are checked, and before the signature chunks, their hash type, the signature cache and the
++   verifier are looked at. So: a stack too short, a budget too small and a public key chunk of the
++   wrong size fail as before; any non-empty signature fails as disabled, valid or not, whatever its
++   chunk sizes and hash type; a chunk of 521 bytes in the initial stack still fails as `PUSH_SIZE`
++   before the script runs; five empty chunks still push false.
++3. **`OP_CHECKSLHDSA128S`** is not affected.
++
++Leaves of version `0xc0` and `0xe0`, P2TR, witness v0 and legacy scripts are not affected by
++`SCRIPT_VERIFY_P2MR_MLDSA_DISABLED`; `0xe0` keeps its meaning. What can no longer be spent once the
++lattice tripwire is missing: a leaf of version `0xe2` whose only path is an ML-DSA-44 check, such as
++an "ML-DSA-44 AND SLH-DSA" leaf; and once elliptic curve checks are disabled too, template S2 in
++`0xe2`. Wallets create neither.
++
++The flag is decided once per block, in `ConnectBlock`, next to `SCRIPT_VERIFY_P2MR_EC_DISABLED` and
++from the same view, the UTXO set the block builds on, before any of its transactions is applied:
++so a block that spends a lattice tripwire output keeps ML-DSA-44 checks working for all its inputs,
++before and after that spend. `TestBlockValidity`, `VerifyDB` at level 4 and the background
++chainstate of an assumeutxo snapshot each read their own view. The script cache is keyed on the
++flags, and the check comes before the signature cache, so neither cache can let a disabled check
++pass.
++
++### The rescue lane
++
++The rescue lane of M4-R ([p2mr-rescue.md](p2mr-rescue.md)) applies wherever `m_tripwired_leaf` is
++set and `SCRIPT_VERIFY_P2MR_NO_RESCUE` is not. Leaf version `0xe2` sets it, so from the height of the
++rescue lane and of these rules, whichever is higher, an elliptic curve check in an executed leaf of
++version `0xe2` whose signature is a rescue token is checked as a rescue (rule 4R-4). Such a spend is
++valid in a block, but not standard: template R1, the only relayed rescue, is of leaf version `0xe0`,
++and the annex of any other spend is not standard.
++
++The `OP_CHECKMLDSA44` check that the lattice tripwire disables is **not** rescuable in this build (a
++later M4-R2 may make it so): a rescue token in place of an ML-DSA-44 signature is a signature chunk
++like any other, which fails as disabled, or for its size while the checks still work.
++
++## Activation
++
++A buried deployment, `p2mr_lattice_tripwire`, the last of the buried deployments, sets
++`SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE` on blocks at or above its height where P2MR is active.
++
++- **Ark-0**: not active (see above). When it is set, `H4T` is the height at the release plus seven
++  days of blocks (6720), rounded up to the thousand; the build asserts that it is at or above the
++  height of `OP_CHECKSLHDSA128S` (32000) and above those of the tripwire rules of `0xe0` (30000) and
++  of `OP_CHECKMLDSA44`. While the height is "never", there is no creation height and no output; once it
++  is finite, the build requires a creation height below it and exactly three distinct outputs, in the
++  order and with the labels above, the first with the NUMS key.
++- **Another custom signet**: `-signetlatticetripwire=<height>@<txid:vout>[,<txid:vout>...]`, which
++  requires `-signetchallenge`, `-signetmldsa44`, `-signettripwire` and `-signetslhdsa128s`, the
++  heights of the last two at or below its own. Ark-0 and the default signet refuse it. An outpoint
++  whose txid is null is refused: no output has it, and every coinbase input names it.
++- **Regtest**: from where `OP_CHECKMLDSA44`, leaf version `0xe0` and `OP_CHECKSLHDSA128S` all execute
++  (genesis by default), without lattice tripwire outputs, unless
++  `-testactivationheight=p2mr_lattice_tripwire@N` moves it, or `-signetlatticetripwire` sets the height
++  and the outputs. A node refuses to start when the final height is below that of `p2mr_mldsa44`,
++  `p2mr_tripwire` or `p2mr_slhdsa128s`: the mempool's removals below the heights of the two opcodes
++  look at leaf versions `0xc0` and `0xe0` only, and leave `0xe2` to the removal below its own height.
++- **Mainnet, testnet3, testnet4, the default signet**: never. The option is refused there.
++
++`SCRIPT_VERIFY_P2MR_MLDSA_DISABLED` is not a deployment: validation adds it for a block, from the
++height on, when a lattice tripwire output is missing from the UTXO set the block builds on.
++
++The script flags take bits 27 (`SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE`, an execution flag like
++`SCRIPT_VERIFY_P2MR_TRIPWIRE`) and 28 (`SCRIPT_VERIFY_P2MR_MLDSA_DISABLED`, a restricting flag like
++`SCRIPT_VERIFY_P2MR_EC_DISABLED`).
++
++These rules only make more blocks invalid: for given parameters and the same parent view, the blocks
++a node with them accepts are a subset of those an M4-R node accepts, to which a leaf of version
++`0xe2` is an unknown one. A node that upgrades after the height has not checked the blocks it already
++has: it must run `-reindex-chainstate` (a pruned node `-reindex`), without `-assumevalid`.
++
++## Policy
++
++- While the next block is below the height, the mempool's script flags leave out
++  `SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE`, so a spend of a leaf of version `0xe2` at depth one or more
++  is refused as one of an unknown leaf version (`DISCOURAGE_UPGRADABLE_TAPROOT_VERSION`), with
++  `-acceptnonstdtxn=1` too.
++- From the height, the mempool adds `SCRIPT_VERIFY_P2MR_MLDSA_DISABLED` as it will apply to the next
++  block, from the confirmed UTXO set, in its policy and its consensus script checks: a lattice
++  tripwire spend only in the mempool changes nothing. The reject reason is
++  `mempool-script-verify-flag-failed (ML-DSA-44 signature checks are disabled in this leaf)`.
++- `IsWitnessStandard` treats `0xe2` as `0xc0` and `0xe0`, at every height and at depth zero too:
++  stack elements of at most 80 bytes, with the exceptions of templates S1 and SLH1. Template S2 is
++  not standard in `0xe2`.
++- This is a policy change that holds before the rules activate, on every network, Ark-0 included: a
++  spend of a lone leaf of version `0xe2` (depth zero) with a stack element over 80 bytes, which a node
++  without this series relays, is not standard here (rule 4T-4). The limit does not depend on the
++  height, as M3 decided for `0xe0`: a limit that started at the height would leave transactions in
++  the mempool that the next block's policy refuses, which the mempool would have to check again at
++  that boundary.
++- When a block makes either state turn from enabled to disabled, the mempool checks every spend of a
++  leaf of version `0xe0` or `0xe2` again, once, with the flags of the next block, and removes those
++  that fail with their descendants. During a reorganization it does so after the transactions of the
++  disconnected blocks are back, whenever either final state is disabled. A reorganization below the
++  height removes the spends of leaves of version `0xe2` at depth one or more, with their descendants,
++  whatever the leaf holds.
++
++## RPC and logs
++
++`gettripwireinfo` has a `lattice` object where these rules have a height, from the same snapshot as
++the rest: `height`, `leaf_version` (`"e2"`), `tripwires` (each with `outpoint`, `state`, and on Ark-0
++`key_sha256` and `label`), and `mldsa_disabled_next_block`. `ec_disabled_next_block` applies to leaf
++version `0xe2` too. `getdeploymentinfo` lists `p2mr_lattice_tripwire`.
++
++A node logs the rules at startup (`P2MR lattice tripwire rules from height H4T in leaf version 0xe2;
++tripwire outputs ...`) and their state (`P2MR lattice tripwire state at height N: ...`), the state
++again when the chain reaches the height, and each spend of a lattice tripwire output once its block
++is the tip of the active chain:
++
++```
++P2MR lattice tripwire <txid:vout> (<label>) spent by <txid> in block <hash> (height N): OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from height max(H4T, N+1)
++```
++
++or `is already disabled`. Block proposals, blocks that fail, `VerifyDB` and the background
++chainstate of an assumeutxo snapshot log nothing.
++
++## Tests
++
++- `src/test/p2mr_lattice_tripwire_tests.cpp`: the parameters on every chain, Ark-0 inactive, the NUMS
++  key computed again, the options, the state, the view `ConnectBlock` reads, the policy.
++- `src/test/data/script_tests.json`, the block of `test/util/generate_p2mr_lattice_tripwire_script_tests.py`:
++  every combination of the three flags.
++- `src/test/p2mr_ts_m4_tests.cpp`: the pq2 spends of p2mr-ts at `0xe2`, signed by another implementation.
++- `test/functional/feature_p2mr_lattice_tripwire.py` and `feature_p2mr_lattice_tripwire_signet.py`.
++- The fuzz targets `p2mr_mldsa44`, `p2mr_rescue` and `script_flags`.
+diff --git a/doc/p2mr.md b/doc/p2mr.md
+index 0f5a151..ead665b 100644
+--- a/doc/p2mr.md
++++ b/doc/p2mr.md
+@@ -12,7 +12,9 @@ whose elliptic curve checks stop working once a tripwire output is spent, and th
+ `OP_CHECKSLHDSA128S` described in [p2mr-slhdsa128s.md](p2mr-slhdsa128s.md) checks SLH-DSA-SHA2-128s
+ signatures in P2MR leaves. [p2mr-rescue.md](p2mr-rescue.md) describes the rescue lane, in which an
+ elliptic curve check of leaf version `0xe0` can pass with a proof of knowledge of the seed behind its
+-key instead of a signature.
++key instead of a signature. [p2mr-lattice-tripwire.md](p2mr-lattice-tripwire.md) describes leaf version
++`0xe2`, whose elliptic curve checks follow those of `0xe0` and whose `OP_CHECKMLDSA44` checks stop
++working once a lattice tripwire output is spent.
+ 
+ ## Output format
+ 
+@@ -60,7 +62,8 @@ Let `q` be the 32-byte witness program.
+ 10. For any other leaf version the spend succeeds without executing the script.
+     `SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION` makes this non-standard, so such spends
+     are rejected by the mempool but accepted in blocks. Leaf version `0xe0` is executed like `0xc0`
+-    once the P2MR tripwire rules apply ([p2mr-tripwire.md](p2mr-tripwire.md)).
++    once the P2MR tripwire rules apply ([p2mr-tripwire.md](p2mr-tripwire.md)), and leaf version
++    `0xe2` once the P2MR lattice tripwire rules do ([p2mr-lattice-tripwire.md](p2mr-lattice-tripwire.md)).
+ 11. The signature message is the BIP 342 common signature message, unchanged. It commits to the
+     actual `OP_2 <root>` scriptPubKey through the spent scripts hash.
+ 
+-- 
+2.43.0
+

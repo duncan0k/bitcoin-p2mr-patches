@@ -79,6 +79,19 @@ spec:
             - { name: ARK0_PQ_BLOCK_SEED_FILE, value: "/pq/seed" }
             - { name: ARK0_PQ_BLOCK_FROM, value: "18000" }
             - { name: ARK0_PQ_BLOCK_KEY_SHA256, value: "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad" }
+            # M4-B (doc/signet-slhblock.md), the SLH-DSA block signature next to
+            # M2's. Not active on Ark-0: its height (H4T) and key are not decided,
+            # and ark0.py refuses to mine Ark-0 blocks while any ARK0_SLH_*
+            # variable is set. Once both are fixed in the Core series and in
+            # ark0.py, the three lines below go in, with a start at least 1,920
+            # blocks before the height (ark0.py checks it) and the SHA256 of the
+            # key the nodes log at startup; blockreservedweight=48000 on node A
+            # (10-configmap.yaml) must already be live.
+            #   - { name: ARK0_SLH_BLOCK_KEY_FILE, value: "/slh/key" }
+            #   - { name: ARK0_SLH_BLOCK_FROM, value: "<H4T - 1920 or lower>" }
+            #   - { name: ARK0_SLH_BLOCK_KEY_SHA256, value: "<SHA256 of the public key>" }
+            # The signer program; the image sets this default too.
+            - { name: ARK0_SLH_SIGNER, value: "/usr/local/bin/signet-slh-sign" }
           resources:
             requests: { cpu: "250m", memory: "256Mi" }
             limits: { cpu: "2", memory: "2Gi" }
@@ -93,6 +106,10 @@ spec:
             - { name: signer, mountPath: /signer, readOnly: true }
             # The ML-DSA-44 block key's seed, read at every block from 18000 on.
             - { name: pq, mountPath: /pq, readOnly: true }
+            # The SLH-DSA block key of M4-B: the 48 bytes SK.seed || SK.prf ||
+            # PK.seed under the key "key". Only signet-slh-sign reads it, at every
+            # block once ARK0_SLH_BLOCK_KEY_FILE points here.
+            - { name: slh, mountPath: /slh, readOnly: true }
       volumes:
         - name: home
           emptyDir: {}
@@ -114,4 +131,14 @@ spec:
         - name: pq
           secret:
             secretName: ark0-pq-signer
+            defaultMode: 0440
+        # Made by the operator from 48 bytes of the system CSPRNG, never from this
+        # repository (contrib/k3s/ark0/README.md, "M4-B"). Optional while M4-B is
+        # inactive on Ark-0, so that the producer starts before the Secret exists.
+        - name: slh
+          secret:
+            secretName: ark0-slh-signer
+            optional: true
+            items:
+              - { key: key, path: key }
             defaultMode: 0440

@@ -1,0 +1,7 @@
+d8954910be7f2baaac04fd0f62ee50e08a4158f119f8f1dc83c1e10a0dc3f40b *0106-signet-require-an-SLH-DSA-SHA2-128s-block-signature-.patch
+1c57d9b13b4e4b194a1b7a00faf0235a41dce91031d76966c0a40687a3c2cd98 *0107-test-add-signet_slhblock_tests-and-the-p2mr-ts-vecto.patch
+6e0fa155ec8189e72457470156c3ca6740fbfe4e7fd78a82600ffc142be33558 *0108-build-add-signet-slh-sign-the-SLH-DSA-block-signer-o.patch
+791f85cc718654d2fc73d7057b5b6f2fa4db65492208a6dc7d78483e9a179a2e *0109-test-sign-signet-blocks-with-SLH-DSA-in-the-function.patch
+c0e42bbf64af62171fa3bb77da95ebf9b666eca05c167b1e5cce56a11be9e50d *0110-test-add-feature_signet_slhblock.py.patch
+850cdf879da76200146cafc8343cca7c1b9c94172323bdba657aab540ee4dd5b *0111-test-add-the-signet_blocksig-fuzz-target-for-both-si.patch
+f461253007f0a6047f18004a0ba0096fd2789d9403443a31296a7a5ee0c5ac48 *0112-doc-describe-signetslhblock.patch

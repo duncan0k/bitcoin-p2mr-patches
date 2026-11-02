@@ -173,7 +173,11 @@ contrib/k3s/run-build.sh
 The patch set names are directories under `/work/patches`, applied in the order
 given. `seed.sh` publishes `patches/` as `master`, `patches-m05/` as `m05`,
 `patches-spacing/` as `spacing`, `patches-m1/` as `m1`, `patches-m2/` as `m2`,
-`patches-m3/` as `m3`, `patches-m4/` as `m4` and `patches-m4r/` as `m4r`.
+`patches-m3/` as `m3`, `patches-m4/` as `m4`, `patches-m4r/` as `m4r`, `patches-m4t/` as `m4t` and
+`patches-m4b/` as `m4b`. M4-B is numbered on from M4-T and applies only after it, so `build.sh` refuses
+`m4b` unless `m4t` comes right before it; the tree with both is
+`PATCH_SETS="master m05 spacing m1 m2 m3 m4 m4r m4t m4b"`, which also builds `signet-slh-sign` for
+the producer image (`stage-miner.sh`).
 
 ## Configuration
 

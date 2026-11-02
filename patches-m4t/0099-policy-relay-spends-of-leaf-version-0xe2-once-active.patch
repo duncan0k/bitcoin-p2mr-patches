@@ -1,0 +1,287 @@
+From 234502a6e1d2d149a7baeffafa172f41eed54bad Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 08:45:38 +0000
+Subject: [PATCH 099/105] policy: relay spends of leaf version 0xe2 once
+ active, and check them again when a tripwire goes
+
+Like SCRIPT_VERIFY_P2MR_TRIPWIRE, SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE becomes
+a mandatory, and so a standard, script verification flag, which the
+mempool drops while the next block is below the height of the lattice
+tripwire rules: until then a spend of a P2MR leaf of version 0xe2 at depth
+one or more is the spend of an unknown leaf version, which
+DISCOURAGE_UPGRADABLE_TAPROOT_VERSION refuses, with -acceptnonstdtxn too,
+so no coins go into such a leaf through the mempool before its height.
+From that height the mempool adds SCRIPT_VERIFY_P2MR_MLDSA_DISABLED for the
+next block in PolicyScriptChecks and ConsensusScriptChecks, as it adds
+SCRIPT_VERIFY_P2MR_EC_DISABLED, from the confirmed UTXO set.
+
+The two tripwires share the recheck of the mempool. Elliptic curve checks
+in leaf version 0xe2 follow the tripwire of leaf version 0xe0, so the
+recheck now looks at the spends of both leaf versions, under the flags of
+the next block, which carry both states:
+
+- On a block connected without a reorganization, the states before the
+  block are recorded, and once the coins, removeForBlock and the tip are
+  this block's, the spends are checked again if either state turned from
+  enabled to disabled; once, not once per state.
+- During a reorganization ConnectTip checks nothing, and
+  MaybeUpdateMempoolForReorg, after it has put the transactions of the
+  disconnected blocks back and mended the dependencies, checks the spends
+  again whenever either final state is disabled.
+
+SpendsP2MRTripwiredLeaf did two jobs. The recheck now goes through
+SpendsP2MRDisablableLeaf, which matches leaf versions 0xe0 and 0xe2; the
+removal of spends through leaf version 0xe0 when a reorganization goes
+back below the height of the tripwire rules keeps
+SpendsP2MRTripwiredLeaf, 0xe0 only; and a new filter by the new
+deployment, SpendsP2MRLatticeTripwiredLeaf, removes the spends through
+leaf version 0xe2 at depth one or more, with their descendants, when one
+goes back below the height of the lattice tripwire rules, whatever the
+leaf holds, so on a node with -acceptnonstdtxn=1 too. The rescue lane's
+rules of the mempool do not use the old function and are unchanged: its
+template R1 is of leaf version 0xe0 only, and the annex of a rescue spend
+through a leaf of version 0xe2 is not standard, so such a spend is valid
+in a block but not relayed. The removals below the heights of
+OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S still look at leaf versions 0xc0
+and 0xe0 only: leaf version 0xe2 executes from a height at or above both,
+which the chain parameters and their options assert.
+
+IsWitnessStandard treats leaf version 0xe2 as 0xc0 and 0xe0, at every
+height, with the 80-byte limit on the stack elements and the exceptions of
+templates S1 and SLH1. Template S2, ML-DSA-44 AND Schnorr in one leaf, is
+not standard in leaf version 0xe2: either tripwire makes it unspendable.
+---
+ src/policy/policy.cpp |  11 +++--
+ src/policy/policy.h   |   3 +-
+ src/validation.cpp    | 101 +++++++++++++++++++++++++++++++++---------
+ 3 files changed, 89 insertions(+), 26 deletions(-)
+
+diff --git a/src/policy/policy.cpp b/src/policy/policy.cpp
+index 26daff3..a7e8b18 100644
+--- a/src/policy/policy.cpp
++++ b/src/policy/policy.cpp
+@@ -456,10 +456,11 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 return false;
+             }
+             const uint8_t leaf_version{static_cast<uint8_t>(control_block[0] & TAPROOT_LEAF_MASK)};
+-            if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || leaf_version == P2MR_LEAF_TRIPWIRED) {
++            if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || leaf_version == P2MR_LEAF_TRIPWIRED || leaf_version == P2MR_LEAF_LATTICE_TRIPWIRED) {
+                 // Leaf version 0xc0 (aka Tapscript, see BIP 342), and 0xe0, which executes as 0xc0 does once
+-                // the P2MR tripwire rules apply (doc/p2mr-tripwire.md). Before that, the mempool's script checks
+-                // turn its spends at depth one or more away as spends of an unknown leaf version. The limits
++                // the P2MR tripwire rules apply (doc/p2mr-tripwire.md), and 0xe2 once the P2MR lattice
++                // tripwire rules do (doc/p2mr-lattice-tripwire.md). Before that, the mempool's script checks
++                // turn their spends at depth one or more away as spends of an unknown leaf version. The limits
+                 // below hold at every height, at depth zero too, where a node without these rules has none:
+                 // policy with no boundary at that height, past which the mempool would need checking again.
+                 // A leaf that is executed (m >= 1) may use OP_CHECKMLDSA44 only as one of its two templates,
+@@ -473,6 +474,10 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+                 if (control_block.size() > P2MR_CONTROL_BASE_SIZE) {
+                     sig_chunks_at = MatchMLDSA44Template(script);
+                     if (!sig_chunks_at && HasMLDSA44Opcode(script)) return false;
++                    // In leaf version 0xe2 only S1 is a template: S2 has an elliptic curve check next to
++                    // the ML-DSA-44 one, and once either tripwire is missing it can no longer be spent
++                    // (doc/p2mr-lattice-tripwire.md).
++                    if (leaf_version == P2MR_LEAF_LATTICE_TRIPWIRED && sig_chunks_at && *sig_chunks_at != 0) return false;
+                     slhdsa128s_template = IsSLHDSA128STemplate(script);
+                     if (!slhdsa128s_template && HasSLHDSA128SOpcode(script)) return false;
+                 }
+diff --git a/src/policy/policy.h b/src/policy/policy.h
+index 15f63b9..0179e25 100644
+--- a/src/policy/policy.h
++++ b/src/policy/policy.h
+@@ -112,7 +112,8 @@ static constexpr script_verify_flags MANDATORY_SCRIPT_VERIFY_FLAGS{SCRIPT_VERIFY
+                                                              SCRIPT_VERIFY_P2MR |
+                                                              SCRIPT_VERIFY_P2MR_MLDSA44 |
+                                                              SCRIPT_VERIFY_P2MR_TRIPWIRE |
+-                                                             SCRIPT_VERIFY_P2MR_SLHDSA128S};
++                                                             SCRIPT_VERIFY_P2MR_SLHDSA128S |
++                                                             SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE};
+ 
+ /**
+  * Standard script verification flags that standard transactions will comply
+diff --git a/src/validation.cpp b/src/validation.cpp
+index d6a45c1..b64cac7 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -336,7 +336,9 @@ static bool SpendsP2MRSLHDSA128SLeaf(const CTransaction& tx, const CCoinsView& v
+ }
+ 
+ /** Whether an input of the transaction spends a P2MR output through a leaf of version 0xe0 at depth
+- *  one or more, which executes once the P2MR tripwire rules apply (doc/p2mr-tripwire.md). */
++ *  one or more, which executes once the P2MR tripwire rules apply (doc/p2mr-tripwire.md). What the
++ *  mempool removes when a reorganization goes back below their height; leaf version 0xe2 has a
++ *  height, and a filter, of its own. */
+ static bool SpendsP2MRTripwiredLeaf(const CTransaction& tx, const CCoinsView& view)
+ {
+     return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char>) {
+@@ -344,6 +346,28 @@ static bool SpendsP2MRTripwiredLeaf(const CTransaction& tx, const CCoinsView& vi
+     });
+ }
+ 
++/** Whether an input of the transaction spends a P2MR output through a leaf of version 0xe2 at depth
++ *  one or more, which executes once the P2MR lattice tripwire rules apply
++ *  (doc/p2mr-lattice-tripwire.md). What the mempool removes when a reorganization goes back below
++ *  their height. */
++static bool SpendsP2MRLatticeTripwiredLeaf(const CTransaction& tx, const CCoinsView& view)
++{
++    return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char>) {
++        return leaf_version == P2MR_LEAF_LATTICE_TRIPWIRED;
++    });
++}
++
++/** Whether an input of the transaction spends a P2MR output through a leaf of version 0xe0 or 0xe2 at
++ *  depth one or more: the leaves whose checks a tripwire can disable, elliptic curve checks in both
++ *  (doc/p2mr-tripwire.md), ML-DSA-44 checks in 0xe2 (doc/p2mr-lattice-tripwire.md). What the mempool
++ *  checks again when one of the two states turns. */
++static bool SpendsP2MRDisablableLeaf(const CTransaction& tx, const CCoinsView& view)
++{
++    return SpendsP2MRLeaf(tx, view, [](uint8_t leaf_version, std::span<const unsigned char>) {
++        return leaf_version == P2MR_LEAF_TRIPWIRED || leaf_version == P2MR_LEAF_LATTICE_TRIPWIRED;
++    });
++}
++
+ /**
+  * For the log of the rescue lane (doc/p2mr-rescue.md): the statement id and the key of the rescue
+  * check an input of a valid block made, when the input spends a P2MR output through template R1, its
+@@ -386,12 +410,22 @@ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoi
+     if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
+         flags &= ~SCRIPT_VERIFY_P2MR_SLHDSA128S;
+     }
+-    // Elliptic curve checks in those leaves fail as they will in the next block. Whether a tripwire
+-    // output is missing is read from the confirmed UTXO set: a spend of one that is only in the
+-    // mempool changes nothing until a block confirms it.
++    // Likewise, until leaf version 0xe2 executes in the next block, it stays the unknown leaf version
++    // that DISCOURAGE_UPGRADABLE_TAPROOT_VERSION keeps out of the mempool, -acceptnonstdtxn or not
++    // (doc/p2mr-lattice-tripwire.md): no coins go into such a leaf before its height through the
++    // mempool.
++    if (!DeploymentActiveAfter(tip, chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        flags &= ~SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE;
++    }
++    // Elliptic curve checks in those leaves fail as they will in the next block, and ML-DSA-44 checks
++    // in leaf version 0xe2 too. Whether a tripwire output is missing is read from the confirmed UTXO
++    // set: a spend of one that is only in the mempool changes nothing until a block confirms it.
+     if (P2MRECDisabledAfter(tip, coins, chainman)) {
+         flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
+     }
++    if (P2MRMLDSADisabledAfter(tip, coins, chainman)) {
++        flags |= SCRIPT_VERIFY_P2MR_MLDSA_DISABLED;
++    }
+     // The P2MR rescue lane (doc/p2mr-rescue.md) removes a restriction at its height rather than adding
+     // one, so it opens in the mempool only once it is open at the tip itself, not for the next block:
+     // ConsensusScriptChecks checks again with the tip's own flags, which keep
+@@ -404,9 +438,10 @@ static script_verify_flags MempoolScriptFlags(const CBlockIndex* tip, const CCoi
+ }
+ 
+ /**
+- * Whether a mempool transaction that spends a P2MR leaf of version 0xe0 fails the script checks
+- * under `flags`, the mempool's for the next block, once elliptic curve checks in such leaves fail
+- * there (doc/p2mr-tripwire.md). Its inputs are read through `view`, the confirmed UTXO set with the
++ * Whether a mempool transaction that spends a P2MR leaf of version 0xe0 or 0xe2 fails the script
++ * checks under `flags`, the mempool's for the next block, once elliptic curve checks in such leaves
++ * fail there (doc/p2mr-tripwire.md), or ML-DSA-44 checks in leaf version 0xe2
++ * (doc/p2mr-lattice-tripwire.md). Its inputs are read through `view`, the confirmed UTXO set with the
+  * mempool on top, which the caller has made consistent with the chain. Every other transaction
+  * passes untouched.
+  */
+@@ -414,7 +449,7 @@ static bool TripwiredSpendFails(const CTransaction& tx, CCoinsViewMemPool& view,
+     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+ {
+     AssertLockHeld(::cs_main);
+-    if (!SpendsP2MRTripwiredLeaf(tx, view)) return false;
++    if (!SpendsP2MRDisablableLeaf(tx, view)) return false;
+     CCoinsViewCache inputs{&view};
+     // An input that cannot be read cannot be checked, and the next block could not include the
+     // transaction either.
+@@ -491,7 +526,19 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+     // descendants. The mark is structural: no coin is read, and the leaf need not execute.
+     const bool remove_rescue_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE) &&
+                                     !DeploymentActiveAt(*Assert(m_chain.Tip()), m_chainman, Consensus::DEPLOYMENT_P2MR_RESCUE)};
+-    const bool recheck_tripwired_spends{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
++    // Likewise below its activation height leaf version 0xe2 is an unknown leaf version again
++    // (doc/p2mr-lattice-tripwire.md): its spends at depth one or more are removed, whatever the leaf
++    // holds, so on a node with -acceptnonstdtxn=1 too. A filter of its own, by its own deployment: the
++    // one of leaf version 0xe0 keeps to that leaf version and that height. Leaf version 0xe2 executes
++    // only from a height above those of OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S, so the two filters of
++    // those opcodes need not look at it.
++    const bool remove_lattice_tripwired_spends{DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE) &&
++                                               !DeploymentActiveAfter(m_chain.Tip(), m_chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)};
++    // The recheck covers both tripwires: where the reorganized chain leaves either elliptic curve checks
++    // or ML-DSA-44 checks in leaf version 0xe2 failing for the next block, every spend through a leaf
++    // of version 0xe0 or 0xe2 is checked again with the flags of the next block, which carry both.
++    const bool recheck_tripwired_spends{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman) ||
++                                        P2MRMLDSADisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
+     const script_verify_flags tripwired_flags{recheck_tripwired_spends ? MempoolScriptFlags(m_chain.Tip(), CoinsTip(), m_chainman) : SCRIPT_VERIFY_NONE};
+     CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
+ 
+@@ -512,6 +559,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
+         if (remove_tripwired_spends && SpendsP2MRTripwiredLeaf(tx, mempool_view)) return true;
+         if (remove_slhdsa128s_spends && SpendsP2MRSLHDSA128SLeaf(tx, mempool_view)) return true;
+         if (remove_rescue_spends && HasP2MRRescueRecord(tx)) return true;
++        if (remove_lattice_tripwired_spends && SpendsP2MRLatticeTripwiredLeaf(tx, mempool_view)) return true;
+         if (recheck_tripwired_spends && TripwiredSpendFails(tx, mempool_view, tripwired_flags, m_chainman.m_validation_cache)) return true;
+ 
+         // The transaction must be final.
+@@ -1356,12 +1404,16 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
+     // invalid blocks (using TestBlockValidity), however allowing such
+     // transactions into the mempool can be exploited as a DoS attack.
+     script_verify_flags currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
+-    // Elliptic curve checks in P2MR leaves of version 0xe0 fail as in PolicyScriptChecks, as they will
+-    // in the next block (doc/p2mr-tripwire.md). Where the tip is just below the activation height
+-    // the flags above leave such leaves unexecuted, and the flag added here has nothing to act on.
++    // Elliptic curve checks in P2MR leaves of version 0xe0 and 0xe2 fail as in PolicyScriptChecks, as
++    // they will in the next block (doc/p2mr-tripwire.md), and ML-DSA-44 checks in leaf version 0xe2
++    // too (doc/p2mr-lattice-tripwire.md). Where the tip is just below an activation height the flags
++    // above leave such leaves unexecuted, and the flag added here has nothing to act on.
+     if (P2MRECDisabledAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)) {
+         currentBlockScriptVerifyFlags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
+     }
++    if (P2MRMLDSADisabledAfter(m_active_chainstate.m_chain.Tip(), m_active_chainstate.CoinsTip(), m_active_chainstate.m_chainman)) {
++        currentBlockScriptVerifyFlags |= SCRIPT_VERIFY_P2MR_MLDSA_DISABLED;
++    }
+     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
+                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
+         LogError("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s", hash.ToString(), state.ToString());
+@@ -3361,9 +3413,11 @@ bool Chainstate::ConnectTip(
+     if (m_mempool) AssertLockHeld(m_mempool->cs);
+ 
+     assert(pindexNew->pprev == m_chain.Tip());
+-    // Whether elliptic curve checks in P2MR leaves of version 0xe0 fail in this block, before it
+-    // changes the UTXO set they depend on (doc/p2mr-tripwire.md).
++    // Whether elliptic curve checks in P2MR leaves of version 0xe0 and 0xe2 fail in this block, before
++    // it changes the UTXO set they depend on (doc/p2mr-tripwire.md), and ML-DSA-44 checks in leaf
++    // version 0xe2 (doc/p2mr-lattice-tripwire.md).
+     const bool ec_disabled_before{P2MRECDisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
++    const bool mldsa_disabled_before{P2MRMLDSADisabledAfter(m_chain.Tip(), CoinsTip(), m_chainman)};
+     // Read block from disk.
+     const auto time_1{SteadyClock::now()};
+     if (!block_to_connect) {
+@@ -3470,14 +3524,17 @@ bool Chainstate::ConnectTip(
+     m_chainman.UpdateIBDStatus();
+     UpdateTip(pindexNew);
+ 
+-    // When this block makes elliptic curve checks in P2MR leaves of version 0xe0 fail for the next one,
+-    // check the spends through such leaves in the mempool again, now that the coins and the tip are
+-    // both this block's (doc/p2mr-tripwire.md). Those that fail go, with their descendants. During a
+-    // reorganization MaybeUpdateMempoolForReorg does this instead, after it has put the transactions
+-    // of the disconnected blocks back, since the inputs of some spends are among them, and mended the
+-    // lock points that refer to those blocks. The caller tells whether this is one: disconnectpool
+-    // can be empty by now, once the blocks connected have confirmed all it held.
+-    if (m_mempool && !reorganizing && !ec_disabled_before && P2MRECDisabledAfter(pindexNew, CoinsTip(), m_chainman)) {
++    // When this block makes elliptic curve checks in P2MR leaves of version 0xe0 and 0xe2 fail for the
++    // next one, or ML-DSA-44 checks in leaf version 0xe2 (doc/p2mr-lattice-tripwire.md), check the
++    // spends through such leaves in the mempool again, once, with both states, now that the coins and
++    // the tip are both this block's (doc/p2mr-tripwire.md). Those that fail go, with their
++    // descendants. During a reorganization MaybeUpdateMempoolForReorg does this instead, after it has
++    // put the transactions of the disconnected blocks back, since the inputs of some spends are among
++    // them, and mended the lock points that refer to those blocks. The caller tells whether this is
++    // one: disconnectpool can be empty by now, once the blocks connected have confirmed all it held.
++    const bool ec_disabled_turned{!ec_disabled_before && P2MRECDisabledAfter(pindexNew, CoinsTip(), m_chainman)};
++    const bool mldsa_disabled_turned{!mldsa_disabled_before && P2MRMLDSADisabledAfter(pindexNew, CoinsTip(), m_chainman)};
++    if (m_mempool && !reorganizing && (ec_disabled_turned || mldsa_disabled_turned)) {
+         const script_verify_flags flags{MempoolScriptFlags(pindexNew, CoinsTip(), m_chainman)};
+         CCoinsViewMemPool mempool_view{&CoinsTip(), *m_mempool};
+         m_mempool->removeForReorg(m_chain, [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
+-- 
+2.43.0
+

@@ -1,0 +1,663 @@
+From 537a7cf4428d57d25583f6380bf9e2cded7e1297 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:13:16 +0000
+Subject: [PATCH 109/112] test: sign signet blocks with SLH-DSA in the
+ functional framework, and test signet-slh-sign
+
+test_framework/signet_slh.py: slh_coinbase, slh_merkle and slh_msg, the form
+of the SLH output, and the four steps a block producer goes through, each a
+function of its own (insert_signet_slh_placeholder, signet_slh_message, the
+signer, set_signet_slh_signature followed by add_signet_pq_signature) and all
+four in add_signet_slh_and_pq_signatures. The Ark-0 producer calls the same
+functions. Signers: signet-slh-sign through program_slh_signer, or pure
+Python; signet_slh_sign_program finds the program the build made (the
+production one, or the sanitizer test build). program_slh_signer and program_slh_pubkey kill the program after a
+timeout (30 s and 10 s), read its output only after exit 0, and, given the
+public key a producer checked, verify the signature again under it
+(check_slh_signature). Checks a producer depends on raise rather than assert.
+
+tool_signet_slh_sign.py: the program's interface, with nineteen malformed
+inputs that must give a non-zero exit and an empty standard output; the
+message read before the key file is opened; the running signer not dumpable
+(root owns its /proc/<pid>/status while it waits on standard input, where a
+control process of the same user owns its own); its public key against the
+framework's key generation; hedged signatures over the slh_msg of the p2mr-ts
+vectors against the Python verifier; the fault build's two faults, which print
+nothing; the framework's side with fake signers (one that hangs and is killed,
+half a signature with exit 1, -pubkey right but signed with another key, a
+valid-length signature that does not verify); and blocks it signs, which a
+node with -signetslhblock accepts. Each test skips with its reason when its
+program is not built.
+---
+ test/functional/test_framework/signet_slh.py | 266 +++++++++++++++
+ test/functional/test_runner.py               |   1 +
+ test/functional/tool_signet_slh_sign.py      | 332 +++++++++++++++++++
+ 3 files changed, 599 insertions(+)
+ create mode 100644 test/functional/test_framework/signet_slh.py
+ create mode 100755 test/functional/tool_signet_slh_sign.py
+
+diff --git a/test/functional/test_framework/signet_slh.py b/test/functional/test_framework/signet_slh.py
+new file mode 100644
+index 0000000..3ac4c15
+--- /dev/null
++++ b/test/functional/test_framework/signet_slh.py
+@@ -0,0 +1,266 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Signet blocks signed with SLH-DSA-SHA2-128s next to ML-DSA-44 (doc/signet-slhblock.md).
++
++A signet given -signetslhblock=<pubkey>@<height> (which needs -signetpqblock at or below that
++height) requires, from that height on, an SLH output right before the witness commitment output
++of every block, at vout[c - 1] where c is the commitment's index:
++
++    nValue 0, scriptPubKey  6a 4d b51e "PQH1" 01 <7856-byte signature>   (7865 bytes)
++
++The signature covers slh_msg = TaggedHash("SignetSLHBlock", SHA256(challenge) || nVersion ||
++hashPrevBlock || slh_merkle || nTime), where slh_merkle is the merkle root with the coinbase
++replaced by slh_coinbase: the coinbase the ML-DSA-44 signature covers (signet_pq.py), with the
++SLH output cut back to 6a 05 "PQH1" 01.
++
++The ML-DSA-44 message covers the SLH output as it is, so the SLH signature is made first. A block
++producer goes through the four steps of add_signet_slh_and_pq_signatures, then signs the signet
++solution over the result as before. The Ark-0 block producer (contrib/k3s/ark0/producer/ark0.py
++in the patch repository) calls that function, so the functional tests run its code path.
++
++Checks that a block producer depends on raise RuntimeError rather than use assert, which
++python -O removes.
++"""
++
++import hashlib
++import os
++import subprocess
++
++from .key import TaggedHash
++from .messages import CTxOut, ser_uint256
++from .p2mr_slhdsa128s import SLHDSA128S_SIGNATURE_SIZE, slhdsa128s_sign, slhdsa128s_verify
++from .script import CScriptOp, OP_RETURN
++from .signet_pq import (
++    SIGNET_PQ_HEADER,
++    SIGNET_PQ_VERSION,
++    WITNESS_COMMITMENT_SIZE,
++    add_signet_pq_signature,
++    signet_pq_coinbase,
++    witness_commitment_index,
++)
++
++SIGNET_SLH_HEADER = b"PQH1"
++SIGNET_SLH_VERSION = 0x01
++SIGNET_SLH_CONTEXT = b"SIGNET/SLHBLOCK/EXP0"
++# Header, version and signature: 4 + 1 + 7856 = 7861 = 0x1eb5, so OP_PUSHDATA2 is the shortest push.
++SIGNET_SLH_PUSH_SIZE = len(SIGNET_SLH_HEADER) + 1 + SLHDSA128S_SIGNATURE_SIZE
++# The first 9 bytes of the SLH output script: OP_RETURN, OP_PUSHDATA2 and its length, header, version.
++SIGNET_SLH_SCRIPT_PREFIX = (bytes([OP_RETURN, 0x4d]) + SIGNET_SLH_PUSH_SIZE.to_bytes(2, "little")
++                            + SIGNET_SLH_HEADER + bytes([SIGNET_SLH_VERSION]))
++SIGNET_SLH_SCRIPT_SIZE = len(SIGNET_SLH_SCRIPT_PREFIX) + SLHDSA128S_SIGNATURE_SIZE
++# The SLH output as slh_coinbase has it, and as a block producer inserts it before signing.
++SIGNET_SLH_PLACEHOLDER = bytes([OP_RETURN, 5]) + SIGNET_SLH_HEADER + bytes([SIGNET_SLH_VERSION])
++# The PQ push of the witness commitment output as pq_coinbase has it.
++SIGNET_PQ_CUT_PUSH = CScriptOp.encode_op_pushdata(SIGNET_PQ_HEADER + bytes([SIGNET_PQ_VERSION]))
++
++assert SIGNET_SLH_PUSH_SIZE == 7861 and SIGNET_SLH_SCRIPT_SIZE == 7865
++assert SIGNET_SLH_PLACEHOLDER.hex() == "6a055051483101"
++
++
++def _require(condition, message):
++    if not condition:
++        raise RuntimeError(message)
++
++
++def signet_slh_script(signature):
++    """The script of the SLH output for a signature."""
++    _require(len(signature) == SLHDSA128S_SIGNATURE_SIZE, "an SLH-DSA-SHA2-128s signature is 7856 bytes")
++    return SIGNET_SLH_SCRIPT_PREFIX + bytes(signature)
++
++
++def signet_slh_index(block):
++    """Index of the SLH output: the one right before the witness commitment. None without a
++    commitment, or when the commitment is the first output."""
++    c = witness_commitment_index(block)
++    return None if c is None or c < 1 else c - 1
++
++
++def signet_slh_coinbase(block):
++    """slh_coinbase (rule 4B-3): pq_coinbase with the output before the commitment cut back to
++    6a 05 "PQH1" 01."""
++    index = signet_slh_index(block)
++    _require(index is not None, "the block has no output before its witness commitment")
++    coinbase = signet_pq_coinbase(block)
++    coinbase.vout[index] = CTxOut(coinbase.vout[index].nValue, SIGNET_SLH_PLACEHOLDER)
++    return coinbase
++
++
++def signet_slh_merkle_root(block):
++    """slh_merkle: the merkle root over slh_coinbase and the block's other transactions."""
++    hashes = [ser_uint256(signet_slh_coinbase(block).txid_int)] + [ser_uint256(tx.txid_int) for tx in block.vtx[1:]]
++    return block.get_merkle_root(hashes)
++
++
++def signet_slh_message(block, challenge):
++    """slh_msg, the 32-byte message of the SLH-DSA block signature."""
++    data = (hashlib.sha256(bytes(challenge)).digest()
++            + block.nVersion.to_bytes(4, "little", signed=True)
++            + ser_uint256(block.hashPrevBlock)
++            + ser_uint256(signet_slh_merkle_root(block))
++            + block.nTime.to_bytes(4, "little"))
++    _require(len(data) == 104, "the slh_msg preimage is 104 bytes")
++    return TaggedHash("SignetSLHBlock", data)
++
++
++def signet_slh_signature(block):
++    """The signature in the block's SLH output, or None when that output is not in the required
++    form (the node's structural checks, rules 4B-1 and 4B-2, by bytes at fixed offsets)."""
++    index = signet_slh_index(block)
++    if index is None:
++        return None
++    outs = block.vtx[0].vout
++    script = bytes(outs[index].scriptPubKey)
++    if outs[index].nValue != 0 or len(script) != SIGNET_SLH_SCRIPT_SIZE or script[:9] != SIGNET_SLH_SCRIPT_PREFIX:
++        return None
++    if any(i != index and bytes(o.scriptPubKey)[:8] == SIGNET_SLH_SCRIPT_PREFIX[:8] for i, o in enumerate(outs)):
++        return None
++    return script[9:]
++
++
++def verify_signet_slh_signature(block, pubkey, challenge):
++    """Whether the block carries a valid SLH-DSA block signature by pubkey (pure Python)."""
++    signature = signet_slh_signature(block)
++    return signature is not None and slhdsa128s_verify(pubkey, signet_slh_message(block, challenge), signature,
++                                                       context=SIGNET_SLH_CONTEXT)
++
++
++def python_slh_signer(seckey):
++    """A signer in pure Python (slow: seconds per signature), hedged like the signer program."""
++    return lambda msg: slhdsa128s_sign(seckey, msg, context=SIGNET_SLH_CONTEXT, addrnd=os.urandom(16))
++
++
++# How long signet-slh-sign may take before it is killed: signing (measured p99 about 0.8 s on a
++# 2.1 GHz Xeon) and -pubkey (key generation only). A signer that hangs must not stop a producer.
++SIGNER_TIMEOUT = 30
++PUBKEY_TIMEOUT = 10
++
++
++def _run_signer(args, stdin, timeout, what):
++    """Run signet-slh-sign; its standard output, only when it exits 0. On any other exit the output
++    is ignored, whatever it holds (the program's interface: it can be part of a result whose
++    writing failed). On a timeout the child is killed (subprocess.run does that) and this raises."""
++    try:
++        p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
++    except subprocess.TimeoutExpired:
++        raise RuntimeError(f"signet-slh-sign {what} did not finish within {timeout} s and was killed")
++    except OSError as e:
++        raise RuntimeError(f"signet-slh-sign {what} could not be run: {e}")
++    _require(p.returncode == 0,
++             f"signet-slh-sign {what} failed with code {p.returncode}: {p.stderr.decode(errors='replace').strip()}")
++    try:
++        return bytes.fromhex(p.stdout.decode().strip())
++    except (UnicodeDecodeError, ValueError):
++        raise RuntimeError(f"signet-slh-sign {what} printed no hexadecimal result")
++
++
++def check_slh_signature(pubkey, message, signature):
++    """Raise unless signature is a valid SLH-DSA block signature of message under pubkey (the
++    Python verifier, about 2.5 ms). A producer calls it with the public key whose hash it checked,
++    which binds that check to the key that actually signed."""
++    _require(len(signature) == SLHDSA128S_SIGNATURE_SIZE, "the SLH signer returned no 7856-byte signature")
++    _require(slhdsa128s_verify(pubkey, message, signature, context=SIGNET_SLH_CONTEXT),
++             "the SLH signature does not verify under the checked public key")
++
++
++def program_slh_signer(program, keyfile, *, pubkey=None, timeout=SIGNER_TIMEOUT):
++    """A signer that runs signet-slh-sign (src/signet-slh-sign.c) on a 48-byte key file: the message
++    in hex on its standard input, the signature in hex on its standard output. The program verifies
++    the signature before it prints it; this checks the exit code and the length and, given pubkey,
++    verifies the signature again under that key (check_slh_signature)."""
++    def sign(msg):
++        _require(len(msg) == 32, "slh_msg is 32 bytes")
++        signature = _run_signer([program, keyfile], (bytes(msg).hex() + "\n").encode(), timeout, "signing")
++        _require(len(signature) == SLHDSA128S_SIGNATURE_SIZE, "signet-slh-sign printed no 7856-byte signature")
++        if pubkey is not None:
++            check_slh_signature(pubkey, msg, signature)
++        return signature
++    return sign
++
++
++def signet_slh_sign_program(config):
++    """The signer program the build made, from config.ini: signet-slh-sign, or in a build with
++    SANITIZERS the test-only signet-slh-sign-sanitizer-test (never the production name there).
++    None when neither is built."""
++    components = config["components"]
++    bindir = os.path.join(config["environment"]["BUILDDIR"], "bin")
++    for flag, name in (("BUILD_SIGNET_SLH_SIGNER", "signet-slh-sign"),
++                       ("BUILD_SIGNET_SLH_SIGN_SANITIZER_TEST", "signet-slh-sign-sanitizer-test")):
++        if components.getboolean(flag, fallback=False):
++            return os.path.join(bindir, name)
++    return None
++
++
++SIGNET_SLH_SIGN_NOT_BUILT = ("signet-slh-sign is not built (it is Linux only, needs -DBUILD_SIGNET_SLH_SIGNER=ON, "
++                             "and with SANITIZERS only its test build, -DSIGNET_SLH_SIGN_ALLOW_SANITIZERS=ON)")
++
++
++def program_slh_pubkey(program, keyfile, *, timeout=PUBKEY_TIMEOUT):
++    """The public key of a key file, as signet-slh-sign -pubkey prints it."""
++    pubkey = _run_signer([program, "-pubkey", keyfile], b"", timeout, "-pubkey")
++    _require(len(pubkey) == 32, "signet-slh-sign -pubkey printed no 32-byte key")
++    return pubkey
++
++
++def insert_signet_slh_placeholder(block):
++    """Step 1: insert the placeholder SLH output right before the witness commitment output (whose
++    index goes up by one) and append the cut PQ push to the commitment output. The coinbase is then
++    slh_coinbase itself. Returns the index of the SLH output."""
++    c = witness_commitment_index(block)
++    _require(c is not None, "the block has no witness commitment")
++    commitment = block.vtx[0].vout[c]
++    _require(len(bytes(commitment.scriptPubKey)) == WITNESS_COMMITMENT_SIZE,
++             "the witness commitment output already carries pushes")
++    _require(not any(bytes(o.scriptPubKey)[:8] == SIGNET_SLH_SCRIPT_PREFIX[:8] or bytes(o.scriptPubKey) == SIGNET_SLH_PLACEHOLDER
++                     for o in block.vtx[0].vout), "the coinbase already has an SLH output")
++    commitment.scriptPubKey = bytes(commitment.scriptPubKey) + SIGNET_PQ_CUT_PUSH
++    # Inserted, never appended: the commitment output stays last, as getblocktemplate's users
++    # (contrib/signet/miner's finish_block, which puts the signet solution on vout[-1]) expect.
++    block.vtx[0].vout.insert(c, CTxOut(0, SIGNET_SLH_PLACEHOLDER))
++    block.hashMerkleRoot = block.calc_merkle_root()
++    _require(witness_commitment_index(block) == c + 1, "the witness commitment did not move to the end")
++    return c
++
++
++def set_signet_slh_signature(block, index, signature, challenge, message):
++    """Step 4, first half: replace the placeholder at index with the full SLH output and cut the
++    commitment output back to its 38 bytes, ready for the ML-DSA-44 signature. Checks that the
++    message has not changed: the full output is cut back again when it is computed."""
++    _require(len(signature) == SLHDSA128S_SIGNATURE_SIZE, "the SLH signer returned no 7856-byte signature")
++    coinbase = block.vtx[0]
++    _require(bytes(coinbase.vout[index].scriptPubKey) == SIGNET_SLH_PLACEHOLDER, "no placeholder at the SLH output")
++    coinbase.vout[index] = CTxOut(0, signet_slh_script(signature))
++    commitment = coinbase.vout[index + 1]
++    _require(bytes(commitment.scriptPubKey)[WITNESS_COMMITMENT_SIZE:] == SIGNET_PQ_CUT_PUSH, "the commitment output changed")
++    commitment.scriptPubKey = bytes(commitment.scriptPubKey)[:WITNESS_COMMITMENT_SIZE]
++    block.hashMerkleRoot = block.calc_merkle_root()
++    _require(signet_slh_message(block, challenge) == message, "slh_msg changed with the full SLH output")
++    _require(signet_slh_signature(block) == bytes(signature), "the SLH output is not in the required form")
++
++
++def add_signet_slh_and_pq_signatures(block, challenge, slh_sign, pq_seckey, *, pq_rnd=None):
++    """Sign a block with SLH-DSA, then ML-DSA-44, in the only order that works (doc/signet-slhblock.md):
++
++    1. insert_signet_slh_placeholder: the placeholder SLH output and the cut PQ push; the coinbase
++       is slh_coinbase;
++    2. signet_slh_message: slh_msg;
++    3. slh_sign(slh_msg), which must verify its signature before returning it (signet-slh-sign does);
++    4. set_signet_slh_signature: the full SLH output in place of the placeholder; then
++       add_signet_pq_signature, whose message covers the SLH signature.
++
++    The caller then signs the signet solution over the block as before (generate_psbt,
++    walletprocesspsbt, finish_block). Returns (SLH signature, ML-DSA-44 signature). The Ark-0
++    producer calls the same functions in the same order.
++
++    The block must come from a template with the witness commitment last and nothing after it."""
++    challenge = bytes(challenge)
++    index = insert_signet_slh_placeholder(block)
++    message = signet_slh_message(block, challenge)
++    # The coinbase as it stands is slh_coinbase: its own merkle root gives the same message.
++    _require(block.vtx[0].txid_int == signet_slh_coinbase(block).txid_int, "the placeholder coinbase is not slh_coinbase")
++    signature = bytes(slh_sign(message))
++    set_signet_slh_signature(block, index, signature, challenge, message)
++    pq_signature = add_signet_pq_signature(block, pq_seckey, challenge, rnd=pq_rnd)
++    _require(signet_slh_signature(block) == signature, "the SLH output is not in the required form")
++    return signature, pq_signature
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index ee1282f..b219ce7 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -186,6 +186,7 @@ BASE_SCRIPTS = [
+     'tool_wallet.py',
+     'tool_utils.py',
+     'tool_signet_miner.py',
++    'tool_signet_slh_sign.py',
+     'wallet_txn_clone.py',
+     'wallet_txn_clone.py --segwit',
+     'rpc_getchaintips.py',
+diff --git a/test/functional/tool_signet_slh_sign.py b/test/functional/tool_signet_slh_sign.py
+new file mode 100755
+index 0000000..b9ab3a0
+--- /dev/null
++++ b/test/functional/tool_signet_slh_sign.py
+@@ -0,0 +1,332 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test signet-slh-sign, the SLH-DSA block signer of a signet block producer (doc/signet-slhblock.md).
++
++- its interface: a 48-byte key file, the 32-byte message as 64 hexadecimal characters on standard
++  input, the signature in hexadecimal on standard output, and on any malformed input a non-zero
++  exit with nothing on standard output;
++- its public key, against the Python key generation of the test framework;
++- its signatures, over the slh_msg of the p2mr-ts vectors, against the Python verifier, hedged;
++- against the node's verifier: a block it signs is accepted by a node with -signetslhblock;
++- a build that corrupts every signature before verifying it, and one whose random source fails,
++  print nothing (the fault build, skipped with a reason when it is not built);
++- the running signer is not dumpable (the owner of /proc/<pid>/status while it waits on standard
++  input), and it reads the message before it opens the key file;
++- the framework's side (program_slh_signer, program_slh_pubkey): a signer that hangs is killed after
++  the timeout; the output of a non-zero exit is ignored, half a signature included; a signer whose
++  -pubkey gives the expected key but which signs with another, or prints a valid-length signature
++  that does not verify, is caught by the check against the checked public key.
++
++The node only verifies; the signer links the same vendored slhdsa-c (src/crypto/slhdsa128s/).
++"""
++
++import importlib.machinery
++import importlib.util
++import json
++import logging
++import os
++import subprocess
++import sys
++import time
++
++from test_framework.messages import CBlock, CBlockHeader, CTransaction, from_hex, uint256_from_str
++from test_framework.p2mr_slhdsa128s import slhdsa128s_keygen, slhdsa128s_verify
++from test_framework.script import CScript, OP_TRUE
++from test_framework.signet_pq import signet_pq_keygen
++from test_framework.signet_slh import (
++    SIGNET_SLH_SIGN_NOT_BUILT,
++    signet_slh_sign_program,
++    SIGNET_SLH_CONTEXT,
++    check_slh_signature,
++    add_signet_slh_and_pq_signatures,
++    program_slh_pubkey,
++    program_slh_signer,
++    signet_slh_message,
++    verify_signet_slh_signature,
++)
++from test_framework.test_framework import BitcoinTestFramework, SkipTest
++from test_framework.util import assert_equal
++
++# Test keys only, from public strings.
++SLH_SEED = bytes(range(48))
++PQ_PUBKEY, PQ_SECKEY = signet_pq_keygen(bytes.fromhex("33" * 32))
++
++
++class SignetSLHSignTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.setup_clean_chain = True
++        self.num_nodes = 1
++
++    def skip_test_if_missing_module(self):
++        if signet_slh_sign_program(self.config) is None:
++            raise SkipTest(SIGNET_SLH_SIGN_NOT_BUILT)
++        self.skip_if_no_bitcoin_util()
++
++    def is_fault_build_compiled(self):
++        return self.config["components"].getboolean("BUILD_SIGNET_SLH_SIGN_FAULT_TEST", fallback=False)
++
++    def setup_network(self):
++        # The node starts in test_node_verifier, once the key is known.
++        self.add_nodes(self.num_nodes)
++
++    def run(self, args, stdin=b"", program=None):
++        p = subprocess.run([program or self.program] + args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++        return p.returncode, p.stdout, p.stderr.decode()
++
++    def run_test(self):
++        bindir = os.path.join(self.config["environment"]["BUILDDIR"], "bin")
++        self.program = signet_slh_sign_program(self.config)
++        self.fault_program = os.path.join(bindir, "signet-slh-sign-fault-test")
++        self.keyfile = os.path.join(self.options.tmpdir, "slh.key")
++        with open(self.keyfile, "wb") as f:
++            f.write(SLH_SEED)
++        self.test_interface()
++        self.test_message_first()
++        self.test_not_dumpable()
++        self.test_pubkey()
++        self.test_vectors()
++        self.test_fault()
++        self.test_framework_side()
++        self.test_node_verifier()
++
++    def test_interface(self):
++        self.log.info("Malformed input: a non-zero exit and nothing on standard output")
++        msg = bytes(range(32)).hex()
++        tmp = self.options.tmpdir
++        files = {}
++        for name, content in {"short": SLH_SEED[:47], "long": SLH_SEED + b"\n", "hex": SLH_SEED.hex().encode(), "empty": b""}.items():
++            files[name] = os.path.join(tmp, f"key-{name}")
++            with open(files[name], "wb") as f:
++                f.write(content)
++        cases = [
++            ("no arguments", [], msg.encode()),
++            ("two key files", [self.keyfile, self.keyfile], msg.encode()),
++            ("an unknown option", ["-x", self.keyfile], msg.encode()),
++            ("-pubkey without a file", ["-pubkey"], b""),
++            ("a missing key file", [os.path.join(tmp, "missing")], msg.encode()),
++            ("a 47-byte key", [files["short"]], msg.encode()),
++            ("a 49-byte key", [files["long"]], msg.encode()),
++            ("a key in hex", [files["hex"]], msg.encode()),
++            ("an empty key", [files["empty"]], msg.encode()),
++            ("no message", [self.keyfile], b""),
++            ("63 hex characters", [self.keyfile], msg[:-1].encode()),
++            ("65 hex characters", [self.keyfile], (msg + "0").encode()),
++            ("66 hex characters", [self.keyfile], (msg + "00").encode()),
++            ("a non-hex character", [self.keyfile], ("g" + msg[1:]).encode()),
++            ("a space", [self.keyfile], (" " + msg[1:]).encode()),
++            ("two newlines", [self.keyfile], (msg + "\n\n").encode()),
++            ("a carriage return", [self.keyfile], (msg + "\r\n").encode()),
++            ("a prefix 0x", [self.keyfile], ("0x" + msg[2:]).encode()),
++            ("the raw 32 bytes", [self.keyfile], bytes(range(32))),
++        ]
++        for name, args, stdin in cases:
++            self.log.debug(f"  {name}")
++            code, out, err = self.run(args, stdin)
++            assert code != 0, name
++            assert_equal(out, b"")
++            assert err, name
++
++        self.log.info("Well-formed input: the signature in hex, with or without a final newline, upper case too")
++        for stdin in (msg.encode(), (msg + "\n").encode(), msg.upper().encode()):
++            code, out, err = self.run([self.keyfile], stdin)
++            assert_equal((code, err), (0, ""))
++            assert out.endswith(b"\n") and out.count(b"\n") == 1
++            assert_equal(len(out.strip()), 2 * 7856)
++            # Nothing of the key is printed: not the seed bytes nor their hex.
++            assert SLH_SEED.hex().encode() not in out and SLH_SEED[:16].hex().encode() not in out
++
++    def test_pubkey(self):
++        self.log.info("-pubkey prints the key the framework derives from the same 48 bytes")
++        pubkey, _ = slhdsa128s_keygen(SLH_SEED)
++        assert_equal(program_slh_pubkey(self.program, self.keyfile), pubkey)
++        self.pubkey = pubkey
++
++    def test_vectors(self):
++        self.log.info("Signatures over the slh_msg of the p2mr-ts vectors verify, and are hedged")
++        path = os.path.join(self.config["environment"]["SRCDIR"], "src", "test", "data", "signet_slhblock_p2mr_ts.json")
++        with open(path, encoding="utf-8") as f:
++            cases = json.load(f)[1]["cases"]
++        sign = program_slh_signer(self.program, self.keyfile)
++        for case in cases:
++            given = case["given"]
++            block = CBlock()
++            block.nVersion = given["version"]
++            block.hashPrevBlock = uint256_from_str(bytes.fromhex(given["prevBlockHash"]))
++            block.nTime = given["time"]
++            block.vtx = [from_hex(CTransaction(), given["coinbase"])] + [TxidOnly(t) for t in given["otherTxids"]]
++            msg = signet_slh_message(block, bytes.fromhex(given["challenge"]))
++            assert_equal(msg.hex(), case["expected"]["slhMsg"])
++            first, second = sign(msg), sign(msg)
++            assert first != second
++            for sig in (first, second):
++                assert slhdsa128s_verify(self.pubkey, msg, sig, context=SIGNET_SLH_CONTEXT)
++                assert not slhdsa128s_verify(self.pubkey, msg, sig)  # OP_CHECKSLHDSA128S's context
++                assert not slhdsa128s_verify(self.pubkey, bytes(31) + b"\x01", sig, context=SIGNET_SLH_CONTEXT)
++
++    def test_message_first(self):
++        self.log.info("The message is read and checked before the key file is opened")
++        for keyfile in (os.path.join(self.options.tmpdir, "missing"), self.options.tmpdir):
++            code, out, err = self.run([keyfile], b"not a message")
++            assert code != 0 and out == b""
++            assert "standard input must be" in err and "key file" not in err, err
++
++    def run_as_other_user(self, args):
++        """Start args with a uid that is not root, waiting on its standard input: as nobody when this
++        test runs as root, as this user otherwise."""
++        def demote():
++            if os.geteuid() == 0:
++                os.setgid(65534)
++                os.setuid(65534)
++        return subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=demote)
++
++    def test_not_dumpable(self):
++        self.log.info("The running signer is not dumpable")
++        # For a non-dumpable process the kernel makes root the owner of /proc/<pid>/ (task_dump_owner
++        # in fs/proc/base.c); a dumpable process of a non-root user owns its own. A control process
++        # of the same user shows that this test tells the two apart.
++        uid = 65534 if os.geteuid() == 0 else os.geteuid()
++        if uid == 0:
++            raise AssertionError("cannot tell the owner apart as root")
++        keyfile = os.path.join(self.options.tmpdir, "slh-world-readable.key")
++        fd = os.open(keyfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
++        os.write(fd, SLH_SEED)
++        os.close(fd)
++        for args, owner in (([self.program, keyfile], 0), ([sys.executable, "-c", "import sys; sys.stdin.read()"], uid)):
++            p = self.run_as_other_user(args)
++            try:
++                deadline = time.time() + 10
++                while True:
++                    # Wait until the program runs (after exec), not the forked test process.
++                    with open(f"/proc/{p.pid}/cmdline", "rb") as f:
++                        if f.read().split(b"\0")[0] == args[0].encode():
++                            break
++                    assert time.time() < deadline
++                    time.sleep(0.05)
++                time.sleep(0.2)
++                assert_equal(os.stat(f"/proc/{p.pid}/status").st_uid, owner)
++            finally:
++                p.stdin.close()
++                p.wait()
++        os.remove(keyfile)
++
++    def test_fault(self):
++        if not self.is_fault_build_compiled():
++            self.log.info("Skipping the fault build: it is built only with the tests (BUILD_TESTS) on Linux")
++            return
++        self.log.info("A signature that does not verify is never printed")
++        msg = bytes(range(32)).hex().encode()
++        code, out, err = self.run([self.keyfile], msg, program=self.fault_program)
++        assert code != 0
++        assert_equal(out, b"")
++        assert "does not verify" in err
++        self.log.info("A random source that fails: nothing printed")
++        env = dict(os.environ, SIGNET_SLH_SIGN_TEST_FAULT="random")
++        p = subprocess.run([self.fault_program, self.keyfile], input=msg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
++        assert p.returncode != 0 and p.stdout == b""
++        assert "cannot read randomness" in p.stderr.decode()
++        # The same build still prints the public key, which involves no signature.
++        code, out, _ = self.run(["-pubkey", self.keyfile], program=self.fault_program)
++        assert_equal((code, bytes.fromhex(out.decode().strip())), (0, self.pubkey))
++
++    def fake_signer(self, name, body):
++        """A stand-in for signet-slh-sign: a Python program, executable from its creation."""
++        path = os.path.join(self.options.tmpdir, name)
++        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
++        os.write(fd, f"#!{sys.executable}\nimport os, sys, time\n{body}\n".encode())
++        os.close(fd)
++        return path
++
++    def test_framework_side(self):
++        msg = bytes(range(32))
++        real = program_slh_signer(self.program, self.keyfile)
++        signature = real(msg)
++        other_seed = bytes(47) + b"\x01"
++        _, other_seckey = slhdsa128s_keygen(other_seed)
++        from test_framework.p2mr_slhdsa128s import slhdsa128s_sign
++        other_signature = slhdsa128s_sign(other_seckey, msg, context=SIGNET_SLH_CONTEXT)
++
++        def raises(fn, needle):
++            try:
++                fn()
++            except RuntimeError as e:
++                assert needle in str(e), str(e)
++                return
++            raise AssertionError(f"no error ({needle})")
++
++        self.log.info("A signer that hangs is killed after the timeout")
++        pidfile = os.path.join(self.options.tmpdir, "sleeper.pid")
++        sleeper = self.fake_signer("sleeper", f"open({pidfile!r}, 'w').write(str(os.getpid())); time.sleep(600)")
++        start = time.time()
++        raises(lambda: program_slh_signer(sleeper, self.keyfile, timeout=2)(msg), "did not finish within 2 s")
++        raises(lambda: program_slh_pubkey(sleeper, self.keyfile, timeout=2), "did not finish within 2 s")
++        assert time.time() - start < 20
++        with open(pidfile, encoding="utf-8") as f:
++            assert not os.path.exists(f"/proc/{int(f.read())}"), "the hung signer was not killed"
++
++        self.log.info("The output of a non-zero exit is ignored: half a signature, exit 1")
++        half = self.fake_signer("half", f"sys.stdout.write({signature.hex()[:len(signature.hex()) // 2]!r}); sys.exit(1)")
++        raises(lambda: program_slh_signer(half, self.keyfile)(msg), "failed with code 1")
++        full_but_failed = self.fake_signer("full-but-failed", f"print({signature.hex()!r}); sys.exit(5)")
++        raises(lambda: program_slh_signer(full_but_failed, self.keyfile)(msg), "failed with code 5")
++
++        self.log.info("The signature is checked against the checked public key")
++        swapped = self.fake_signer("swapped", f"""if sys.argv[1] == '-pubkey':
++    print({self.pubkey.hex()!r})
++else:
++    sys.stdin.read(); print({other_signature.hex()!r})""")
++        assert_equal(program_slh_pubkey(swapped, self.keyfile), self.pubkey)
++        raises(lambda: program_slh_signer(swapped, self.keyfile, pubkey=self.pubkey)(msg), "does not verify under the checked public key")
++        broken = bytearray(signature)
++        broken[5000] ^= 1
++        invalid = self.fake_signer("invalid", f"sys.stdin.read(); print({bytes(broken).hex()!r})")
++        raises(lambda: program_slh_signer(invalid, self.keyfile, pubkey=self.pubkey)(msg), "does not verify under the checked public key")
++        # The real signer passes the same check.
++        assert_equal(len(program_slh_signer(self.program, self.keyfile, pubkey=self.pubkey)(msg)), 7856)
++        check_slh_signature(self.pubkey, msg, signature)
++
++    def test_node_verifier(self):
++        self.log.info("The node accepts blocks the program signed, from the height of the rule on")
++        node = self.nodes[0]
++        self.start_node(0, extra_args=["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@1",
++                                        f"-signetslhblock={self.pubkey.hex()}@1", "-blockreservedweight=48000"])
++        sign = program_slh_signer(self.program, self.keyfile)
++        util_argv = node.binaries.util_argv() + ["grind"]
++        miner = load_signet_miner(self.config["environment"]["SRCDIR"])
++        for _ in range(3):
++            tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++            block = miner.new_block(tmpl, bytes(CScript([OP_TRUE])))
++            add_signet_slh_and_pq_signatures(block, bytes([OP_TRUE]), sign, PQ_SECKEY)
++            assert verify_signet_slh_signature(block, self.pubkey, bytes([OP_TRUE]))
++            out = subprocess.run(util_argv + [CBlockHeader.serialize(block).hex()], stdout=subprocess.PIPE, check=True).stdout.strip()
++            block.nNonce = from_hex(CBlockHeader(), out.decode()).nNonce
++            assert_equal(node.submitblock(block.serialize().hex()), None)
++        assert_equal(node.getblockcount(), 3)
++
++
++class TxidOnly:
++    """A transaction known only by its txid (internal byte order), for the vectors."""
++    def __init__(self, txid_hex):
++        self.txid_int = uint256_from_str(bytes.fromhex(txid_hex))
++
++
++def load_signet_miner(srcdir):
++    """contrib/signet/miner as a module, the way the Ark-0 producer loads it, without the log
++    handler it installs (the test runner fails a test that writes to stderr)."""
++    path = os.path.join(srcdir, "contrib", "signet", "miner")
++    loader = importlib.machinery.SourceFileLoader("signetminer", path)
++    spec = importlib.util.spec_from_loader("signetminer", loader)
++    module = importlib.util.module_from_spec(spec)
++    root = logging.getLogger()
++    handlers = list(root.handlers)
++    loader.exec_module(module)
++    for handler in list(root.handlers):
++        if handler not in handlers:
++            root.removeHandler(handler)
++    return module
++
++
++if __name__ == '__main__':
++    SignetSLHSignTest(__file__).main()
+-- 
+2.43.0
+

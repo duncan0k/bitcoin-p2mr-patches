@@ -1,0 +1,866 @@
+From eed3f807d21d3970220e99fab89615fd06289ae6 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:02:25 +0000
+Subject: [PATCH 102/105] test: add unit tests for the P2MR lattice tripwire
+ parameters, options and state
+
+p2mr_lattice_tripwire_tests checks:
+
+- that the rules are not active on Ark-0, whose height and lattice
+  tripwire outputs are not decided: ARK0_LATTICE_TRIPWIRE_HEIGHT is
+  never, there are no outputs, and no block there executes leaf version
+  0xe2 or fails ML-DSA-44 checks in it; that the default signet, the
+  testnets and mainnet never activate them; and the static asserts on the
+  order of the Ark-0 heights;
+- the NUMS key of the first lattice tripwire output, computed again from
+  "MLDSA44-NUMS/v1" and "lattice-tripwire/0" with the SHAKE256 of the
+  vendored mldsa-native (bitcoin_mldsa_shake256, the only entry point the
+  test uses), against its SHA256 constant, and the scriptPubKey of an
+  output of the shape the three will have, against the value Python's
+  hashlib gives;
+- -signetlatticetripwire on a custom signet and on regtest, every
+  dependency it needs and the order of the heights, its syntax,
+  -testactivationheight=p2mr_lattice_tripwire@N, the default height of
+  regtest, and the refusal on the chains it is not for;
+- the state: present means unspent and created below the lattice height,
+  not the height of the tripwire rules of leaf version 0xe0; any of three
+  missing disables ML-DSA-44 checks; the two tripwires are independent;
+- that ConnectBlock reads the state from the view it is given, as
+  TestBlockValidity does: an ML-DSA-44 spend of leaf version 0xe2 with an
+  invalid signature fails as an invalid signature in a view with the
+  lattice tripwire output and as disabled without it, and a Schnorr spend
+  of leaf version 0xe2 is valid in both (this code base has no ML-DSA-44
+  signer; the functional test makes valid ones);
+- the bits of the two flags, 27 and 28;
+- with a checker that counts OP_CHECKMLDSA44 verifications: none once
+  ML-DSA-44 is disabled in leaf version 0xe2, one otherwise and elsewhere;
+- that the log of lattice tripwire spends skips the coinbase, on
+  parameters with the null outpoint made directly, as the option refuses
+  it;
+- the option's edges: given twice, an outpoint twice, a height or a vout
+  that does not fit, a null txid; regtest's default height following
+  OP_CHECKMLDSA44 too, and the refusal of a final height below that of
+  each of p2mr_mldsa44, p2mr_tripwire and p2mr_slhdsa128s;
+- IsWitnessStandard for leaf versions 0xc0, 0xe0 and 0xe2: S1 and SLH1
+  standard, S2 not in 0xe2, the 80-byte limit at depth one and zero, and
+  template R1 of the rescue lane standard in 0xe0 and not in 0xe2.
+---
+ src/test/CMakeLists.txt                  |   1 +
+ src/test/p2mr_lattice_tripwire_tests.cpp | 793 +++++++++++++++++++++++
+ 2 files changed, 794 insertions(+)
+ create mode 100644 src/test/p2mr_lattice_tripwire_tests.cpp
+
+diff --git a/src/test/CMakeLists.txt b/src/test/CMakeLists.txt
+index 749b276..ce533dc 100644
+--- a/src/test/CMakeLists.txt
++++ b/src/test/CMakeLists.txt
+@@ -73,6 +73,7 @@ add_executable(test_bitcoin
+   node_init_tests.cpp
+   node_warnings_tests.cpp
+   orphanage_tests.cpp
++  p2mr_lattice_tripwire_tests.cpp
+   p2mr_mldsa44_tests.cpp
+   p2mr_rescue_tests.cpp
+   p2mr_slhdsa128s_tests.cpp
+diff --git a/src/test/p2mr_lattice_tripwire_tests.cpp b/src/test/p2mr_lattice_tripwire_tests.cpp
+new file mode 100644
+index 0000000..2b590fe
+--- /dev/null
++++ b/src/test/p2mr_lattice_tripwire_tests.cpp
+@@ -0,0 +1,793 @@
++// Copyright (c) 2026 duncan0k
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++#include <chain.h>
++#include <chainparams.h>
++#include <coins.h>
++#include <common/args.h>
++#include <common/settings.h>
++#include <consensus/amount.h>
++#include <consensus/params.h>
++#include <consensus/validation.h>
++#include <crypto/mldsa44.h>
++#include <crypto/sha256.h>
++#include <dbwrapper.h>
++#include <deploymentinfo.h>
++#include <deploymentstatus.h>
++#include <kernel/chainparams.h>
++#include <kernel/notifications_interface.h>
++#include <key.h>
++#include <node/blockstorage.h>
++#include <primitives/block.h>
++#include <primitives/transaction.h>
++#include <policy/policy.h>
++#include <pubkey.h>
++#include <script/interpreter.h>
++#include <script/p2mr_rescue.h>
++#include <script/script.h>
++#include <sync.h>
++#include <test/util/common.h>
++#include <test/util/logging.h>
++#include <test/util/setup_common.h>
++#include <tinyformat.h>
++#include <uint256.h>
++#include <util/chaintype.h>
++#include <util/strencodings.h>
++#include <validation.h>
++#include <validationinterface.h>
++#include <node/kernel_notifications.h>
++
++#include <univalue.h>
++
++#include <boost/test/unit_test.hpp>
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <memory>
++#include <optional>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++// SHAKE256 of the vendored mldsa-native (src/crypto/mldsa44/, the FIPS 202 code ML-DSA-44 verification
++// uses), which src/crypto/mldsa44/bitcoin_mldsa44_config.h names with the prefix bitcoin_mldsa. The node
++// never calls it: only this test, to compute the NUMS key of the lattice tripwire again.
++extern "C" void bitcoin_mldsa_shake256(uint8_t* out, size_t outlen, const uint8_t* in, size_t inlen);
++
++namespace {
++constexpr int NEVER{std::numeric_limits<int>::max()};
++const std::string ARK0_CHALLENGE{"5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"};
++const std::string TXID_A(64, 'a');
++const std::string TXID_B(64, 'b');
++const std::string TXID_C(64, 'c');
++const std::string TXID_D(64, 'd');
++const std::string OUTPOINT_A{TXID_A + ":0"};
++const std::string OUTPOINT_B{TXID_B + ":1"};
++const std::string OUTPOINT_C{TXID_C + ":2"};
++const std::string OUTPOINT_D{TXID_D + ":0"};
++
++std::unique_ptr<const CChainParams> MakeParams(ChainType chain, const std::vector<std::pair<std::string, std::string>>& settings)
++{
++    ArgsManager args;
++    for (const auto& [name, value] : settings) args.ForceSetArg(name, value);
++    return CreateChainParams(args, chain);
++}
++
++/** Parameters with several values of one option (its name without the dash), and other settings. */
++std::unique_ptr<const CChainParams> MakeParamsMulti(const std::vector<std::string>& values, const std::string& name = "testactivationheight",
++                                                    ChainType chain = ChainType::REGTEST,
++                                                    const std::vector<std::pair<std::string, std::string>>& settings = {})
++{
++    ArgsManager args;
++    for (const auto& [setting, value] : settings) args.ForceSetArg(setting, value);
++    args.LockSettings([&](common::Settings& s) {
++        UniValue array{UniValue::VARR};
++        for (const std::string& value : values) array.push_back(value);
++        s.forced_settings[name] = array;
++    });
++    return CreateChainParams(args, chain);
++}
++
++/** A checker that counts OP_CHECKMLDSA44 verifications and finds every signature valid. */
++class CountingMLDSA44Checker : public BaseSignatureChecker
++{
++public:
++    mutable int calls{0};
++    bool CheckMLDSA44Signature(std::span<const unsigned char>, std::span<const unsigned char>, SigVersion, ScriptExecutionData&, ScriptError*) const override
++    {
++        ++calls;
++        return true;
++    }
++};
++
++void Fails(ChainType chain, const std::vector<std::pair<std::string, std::string>>& settings, const std::string& message)
++{
++    BOOST_CHECK_EXCEPTION(MakeParams(chain, settings), std::runtime_error, HasReason{message});
++}
++
++/** The NUMS ML-DSA-44 public key of doc/p2mr-lattice-tripwire.md: X = SHAKE256(DST || 0x00 || label),
++ *  rho its first 32 bytes, then t by rejection sampling of 23-bit numbers below q from the next
++ *  bytes (FIPS 204 Algorithm 14), t1 = Power2Round(t).high (Algorithm 35), pk = pkEncode(rho, t1)
++ *  (Algorithm 22). Written from the description, with mldsa-native's SHAKE256. */
++std::vector<unsigned char> NumsPubkey(std::string_view dst, std::string_view label)
++{
++    constexpr int32_t Q{8380417};
++    std::vector<unsigned char> input(dst.begin(), dst.end());
++    input.push_back(0x00);
++    input.insert(input.end(), label.begin(), label.end());
++    // More than enough output for 1024 coefficients; the rejection rate is below 0.1%.
++    std::vector<unsigned char> x(32 + 4 * 256 * 3 * 2);
++    bitcoin_mldsa_shake256(x.data(), x.size(), input.data(), input.size());
++    std::vector<unsigned char> pk(x.begin(), x.begin() + 32);
++    size_t pos{32};
++    uint64_t bits{0};
++    int nbits{0};
++    for (int i = 0; i < 4 * 256; ++i) {
++        int32_t z;
++        do {
++            BOOST_REQUIRE(pos + 3 <= x.size());
++            z = int32_t{x[pos]} + (int32_t{x[pos + 1]} << 8) + (int32_t{x[pos + 2] & 0x7f} << 16);
++            pos += 3;
++        } while (z >= Q);
++        const uint64_t t1{static_cast<uint64_t>((z + (1 << 12) - 1) >> 13)};
++        BOOST_REQUIRE(t1 < 1024);
++        bits |= t1 << nbits;
++        nbits += 10;
++        while (nbits >= 8) {
++            pk.push_back(static_cast<unsigned char>(bits & 0xff));
++            bits >>= 8;
++            nbits -= 8;
++        }
++    }
++    BOOST_REQUIRE_EQUAL(nbits, 0);
++    return pk;
++}
++
++/** The leaf S1 of an ML-DSA-44 public key: its three chunks, then OP_CHECKMLDSA44. */
++CScript S1(std::span<const unsigned char> pubkey)
++{
++    CScript s1;
++    size_t pos{0};
++    for (const size_t size : MLDSA44_PUBKEY_CHUNK_SIZES) {
++        s1 << std::vector<unsigned char>(pubkey.begin() + pos, pubkey.begin() + pos + size);
++        pos += size;
++    }
++    return s1 << OP_CHECKMLDSA44;
++}
++
++//! Regtest with two tripwire outputs of leaf version 0xe0 from height 100, and three lattice tripwire
++//! outputs from height 200.
++struct LatticeTripwireTestingSetup : public TestingSetup {
++    LatticeTripwireTestingSetup()
++        : TestingSetup{ChainType::REGTEST, {.extra_args = {"-signettripwire=100@dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:0",
++                                                           "-signetlatticetripwire=200@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0,"
++                                                           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1,"
++                                                           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:2"}}} {}
++};
++
++//! The 100 blocks of TestChain100Setup, with the lattice rules from height 50 and a lattice tripwire
++//! output the chain never creates.
++struct UncreatedLatticeTripwireSetup : public TestChain100Setup {
++    UncreatedLatticeTripwireSetup()
++        : TestChain100Setup{ChainType::REGTEST, {.extra_args = {"-signetlatticetripwire=50@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0"}}} {}
++};
++} // namespace
++
++BOOST_FIXTURE_TEST_SUITE(p2mr_lattice_tripwire_tests, BasicTestingSetup)
++
++// H4T and the three lattice tripwire outputs of Ark-0 are not decided: the rules stay inactive there,
++// as those of leaf version 0xe0 did before their height was set, and leaf version 0xe2 is an unknown
++// leaf version in every block. The default signet, the testnets and mainnet never activate them.
++BOOST_AUTO_TEST_CASE(ark0_inactive)
++{
++    static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT == NEVER);
++    static_assert(!ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT.has_value());
++    // The order the heights must keep once they are set (doc/p2mr-lattice-tripwire.md).
++    static_assert(ARK0_MLDSA44_HEIGHT < ARK0_PQ_BLOCK_HEIGHT && ARK0_PQ_BLOCK_HEIGHT < ARK0_TRIPWIRE_HEIGHT);
++    static_assert(ARK0_TRIPWIRE_HEIGHT < ARK0_SLHDSA128S_HEIGHT && ARK0_SLHDSA128S_HEIGHT <= ARK0_LATTICE_TRIPWIRE_HEIGHT);
++    const auto ark0{MakeParams(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}})};
++    const Consensus::Params& consensus{ark0->GetConsensus()};
++    BOOST_CHECK_EQUAL(consensus.P2MRLatticeTripwireHeight, NEVER);
++    BOOST_CHECK(consensus.p2mr_lattice_tripwires.empty());
++    BOOST_CHECK(!DeploymentEnabled(consensus, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
++    // The other rules of Ark-0 are unchanged.
++    BOOST_CHECK_EQUAL(consensus.P2MRTripwireHeight, ARK0_TRIPWIRE_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.P2MRSLHDSA128SHeight, ARK0_SLHDSA128S_HEIGHT);
++    BOOST_CHECK_EQUAL(consensus.P2MRRescueHeight, ARK0_RESCUE_HEIGHT);
++
++    // No block of Ark-0 executes leaf version 0xe2 or fails ML-DSA-44 checks in it.
++    kernel::Notifications notifications{};
++    const ChainstateManager::Options chainman_opts{
++        .chainparams = *ark0,
++        .datadir = m_args.GetDataDirNet(),
++        .notifications = notifications,
++    };
++    const node::BlockManager::Options blockman_opts{
++        .chainparams = *ark0,
++        .blocks_dir = m_args.GetBlocksDirPath(),
++        .notifications = notifications,
++        .block_tree_db_params = DBParams{
++            .path = m_args.GetDataDirNet() / "blocks" / "index",
++            .cache_bytes = 1 << 20,
++            .memory_only = true,
++        },
++    };
++    ChainstateManager chainman{m_interrupt, chainman_opts, blockman_opts};
++    const uint256 hash{1};
++    CBlockIndex block;
++    block.phashBlock = &hash;
++    for (const int height : {ARK0_SLHDSA128S_HEIGHT, ARK0_RESCUE_HEIGHT, 60'000, 1'000'000}) {
++        block.nHeight = height;
++        BOOST_CHECK(!(GetBlockScriptFlags(block, chainman) & SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE));
++        CCoinsView empty;
++        CCoinsViewCache coins{&empty};
++        BOOST_CHECK(!P2MRMLDSADisabledAfter(&block, coins, chainman));
++    }
++
++    const auto never{[](const std::unique_ptr<const CChainParams>& params) {
++        BOOST_CHECK_EQUAL(params->GetConsensus().P2MRLatticeTripwireHeight, NEVER);
++        BOOST_CHECK(params->GetConsensus().p2mr_lattice_tripwires.empty());
++    }};
++    never(MakeParams(ChainType::SIGNET, {{"-signetchallenge", "51"}}));
++    never(MakeParams(ChainType::SIGNET, {}));
++    never(MakeParams(ChainType::MAIN, {}));
++    never(MakeParams(ChainType::TESTNET, {}));
++    never(MakeParams(ChainType::TESTNET4, {}));
++
++    // An Ark-0 node says so at startup (init.cpp); the node's rule list names the deployment.
++    BOOST_CHECK_EQUAL(DeploymentName(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE), "p2mr_lattice_tripwire");
++    BOOST_CHECK(GetBuriedDeployment("p2mr_lattice_tripwire") == Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE);
++    static_assert(Consensus::ValidDeployment(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
++    static_assert(!Consensus::ValidDeployment(static_cast<Consensus::BuriedDeployment>(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE + 1)));
++}
++
++// The NUMS key of the first lattice tripwire output, computed again from its domain separation tag
++// and label with the SHAKE256 of mldsa-native, against the constant, and the P2MR output of the shape
++// the three outputs have: S1 of the key and OP_RETURN, both of version 0xc0 at depth one. The output
++// was also computed with Python's hashlib.shake_256 (the functional test framework does it again).
++BOOST_AUTO_TEST_CASE(nums_key)
++{
++    const std::vector<unsigned char> pk{NumsPubkey(P2MR_LATTICE_NUMS_DST, P2MR_LATTICE_NUMS_LABEL)};
++    BOOST_REQUIRE_EQUAL(pk.size(), MLDSA44_PUBKEY_SIZE);
++    uint256 key_hash;
++    CSHA256().Write(pk.data(), pk.size()).Finalize(key_hash.begin());
++    BOOST_CHECK_EQUAL(HexStr(key_hash), P2MR_LATTICE_NUMS_KEY_SHA256);
++    BOOST_CHECK_EQUAL(HexStr(std::span{pk}.first(8)), "8f45f006458aa1e0");
++    BOOST_CHECK_EQUAL(HexStr(std::span{pk}.last(8)), "a71c0db76c9791c0");
++
++    const uint256 root{ComputeTapbranchHash(ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, S1(pk)),
++                                            ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << OP_RETURN))};
++    BOOST_CHECK_EQUAL(HexStr(CScript{} << OP_2 << ToByteVector(root)), "52208fda4317667005f0a85352aeae313b38d0c4d9476a43b80b9ef64dba29c8dd56");
++
++    // Another label is another key; the label is what the constant binds.
++    const std::vector<unsigned char> other{NumsPubkey(P2MR_LATTICE_NUMS_DST, "lattice-tripwire/1")};
++    BOOST_CHECK(other != pk);
++}
++
++BOOST_AUTO_TEST_CASE(signet_options)
++{
++    const std::pair<std::string, std::string> challenge{"-signetchallenge", "51"}, m1{"-signetmldsa44", "5"},
++        m3{"-signettripwire", "10@" + OUTPOINT_D}, m4s{"-signetslhdsa128s", "12"};
++    std::unique_ptr<const CChainParams> params;
++    {
++        ASSERT_DEBUG_LOG("Signet P2MR lattice tripwire rules from height 20 in leaf version 0xe2; tripwire outputs " +
++                         OUTPOINT_A + ", " + OUTPOINT_B + ", " + OUTPOINT_C);
++        params = MakeParams(ChainType::SIGNET, {challenge, m1, m3, m4s,
++                                                {"-signetlatticetripwire", "20@" + OUTPOINT_A + "," + OUTPOINT_B + "," + OUTPOINT_C}});
++    }
++    const Consensus::Params& consensus{params->GetConsensus()};
++    BOOST_CHECK_EQUAL(consensus.P2MRLatticeTripwireHeight, 20);
++    BOOST_CHECK_EQUAL(consensus.DeploymentHeight(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE), 20);
++    BOOST_REQUIRE_EQUAL(consensus.p2mr_lattice_tripwires.size(), 3U);
++    BOOST_CHECK(consensus.p2mr_lattice_tripwires[0].outpoint == COutPoint(*Txid::FromHex(TXID_A), 0));
++    BOOST_CHECK(consensus.p2mr_lattice_tripwires[1].outpoint == COutPoint(*Txid::FromHex(TXID_B), 1));
++    BOOST_CHECK(consensus.p2mr_lattice_tripwires[2].outpoint == COutPoint(*Txid::FromHex(TXID_C), 2));
++    // An outpoint does not tell the key its output's leaf checks.
++    for (const auto& tripwire : consensus.p2mr_lattice_tripwires) BOOST_CHECK(!tripwire.key_sha256 && tripwire.label.empty());
++    // The tripwire outputs of leaf version 0xe0 are separate.
++    BOOST_REQUIRE_EQUAL(consensus.p2mr_tripwires.size(), 1U);
++    BOOST_CHECK_EQUAL(consensus.P2MRTripwireHeight, 10);
++    // The heights may coincide: OP_CHECKSLHDSA128S and the tripwire rules at the lattice height.
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::SIGNET, {challenge, m1, {"-signettripwire", "20@" + OUTPOINT_D}, {"-signetslhdsa128s", "20"},
++                                                     {"-signetlatticetripwire", "20@" + OUTPOINT_A}})->GetConsensus().P2MRLatticeTripwireHeight, 20);
++
++    const std::pair<std::string, std::string> lattice{"-signetlatticetripwire", "20@" + OUTPOINT_A};
++    Fails(ChainType::SIGNET, {lattice}, "-signetlatticetripwire requires -signetchallenge.");
++    Fails(ChainType::SIGNET, {{"-signetchallenge", ARK0_CHALLENGE}, lattice},
++          "-signetlatticetripwire cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++    Fails(ChainType::SIGNET, {{"-signetchallenge", "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae"}, lattice},
++          "-signetlatticetripwire cannot be used on the default signet, whose rules are fixed in the code.");
++    Fails(ChainType::SIGNET, {challenge, lattice}, "-signetlatticetripwire requires -signetmldsa44.");
++    Fails(ChainType::SIGNET, {challenge, m1, lattice}, "-signetlatticetripwire requires -signettripwire.");
++    Fails(ChainType::SIGNET, {challenge, m1, m3, lattice}, "-signetlatticetripwire requires -signetslhdsa128s.");
++    Fails(ChainType::SIGNET, {challenge, m1, {"-signettripwire", "21@" + OUTPOINT_D}, m4s, lattice},
++          "-signetlatticetripwire height must be at or above the -signettripwire height 21, not 20.");
++    Fails(ChainType::SIGNET, {challenge, m1, m3, {"-signetslhdsa128s", "21"}, lattice},
++          "-signetlatticetripwire height must be at or above the -signetslhdsa128s height 21, not 20.");
++    for (const std::string& value : {std::string{"20"}, std::string{"20@"}, "@" + OUTPOINT_A, "x@" + OUTPOINT_A, "20@" + TXID_A, "20@" + TXID_A + ":x",
++                                     "20@" + OUTPOINT_A + ",", "20@" + OUTPOINT_A + ";" + OUTPOINT_B}) {
++        Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", value}},
++              "-signetlatticetripwire must be <height>@<txid:vout>[,<txid:vout>...], not '" + value + "'.");
++    }
++    Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "0@" + OUTPOINT_A}},
++          "-signetlatticetripwire height must be at least 1 and below 2147483647, not 0.");
++    Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "20@" + OUTPOINT_A + "," + OUTPOINT_A}},
++          "-signetlatticetripwire names " + OUTPOINT_A + " more than once.");
++    // Edges of the syntax: the option twice, numbers that do not fit.
++    BOOST_CHECK_EXCEPTION(MakeParamsMulti({"20@" + OUTPOINT_A, "20@" + OUTPOINT_B}, "signetlatticetripwire", ChainType::SIGNET,
++                                          {challenge, m1, m3, m4s}),
++                          std::runtime_error, HasReason{"-signetlatticetripwire cannot be multiple values."});
++    for (const std::string& value : {"2147483648@" + OUTPOINT_A, "99999999999999999999@" + OUTPOINT_A,
++                                     "20@" + TXID_A + ":4294967296", "20@" + TXID_A + ":99999999999999999999"}) {
++        Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", value}},
++              "-signetlatticetripwire must be <height>@<txid:vout>[,<txid:vout>...], not '" + value + "'.");
++    }
++    Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "-1@" + OUTPOINT_A}},
++          "-signetlatticetripwire height must be at least 1 and below 2147483647, not -1.");
++    Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "2147483647@" + OUTPOINT_A}},
++          "-signetlatticetripwire height must be at least 1 and below 2147483647, not 2147483647.");
++    // The largest vout is an outpoint like any other, but a null txid is refused: no output has it,
++    // and every coinbase input names it with that vout.
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "20@" + TXID_A + ":4294967295"}})
++                          ->GetConsensus().p2mr_lattice_tripwires.at(0).outpoint.n, 4294967295U);
++    const std::string null_txid(64, '0');
++    for (const std::string& vout : {std::string{"4294967295"}, std::string{"0"}}) {
++        Fails(ChainType::SIGNET, {challenge, m1, m3, m4s, {"-signetlatticetripwire", "20@" + OUTPOINT_A + "," + null_txid + ":" + vout}},
++              "-signetlatticetripwire names " + null_txid + ":" + vout + ", whose txid is null: no output has it.");
++    }
++    // -signettripwire keeps its released syntax.
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::SIGNET, {challenge, m1, {"-signettripwire", "10@" + null_txid + ":4294967295"}})
++                          ->GetConsensus().p2mr_tripwires.size(), 1U);
++}
++
++BOOST_AUTO_TEST_CASE(regtest_options)
++{
++    // By default leaf version 0xe2 executes where OP_CHECKMLDSA44, leaf version 0xe0 and
++    // OP_CHECKSLHDSA128S all do, without lattice tripwire outputs.
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {})->GetConsensus().P2MRLatticeTripwireHeight, 0);
++    BOOST_CHECK(MakeParams(ChainType::REGTEST, {})->GetConsensus().p2mr_lattice_tripwires.empty());
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {{"-testactivationheight", "p2mr_tripwire@30"}})->GetConsensus().P2MRLatticeTripwireHeight, 30);
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {{"-signettripwire", "30@" + OUTPOINT_D}})->GetConsensus().P2MRLatticeTripwireHeight, 30);
++    BOOST_CHECK_EQUAL(MakeParamsMulti({"p2mr_tripwire@30", "p2mr_slhdsa128s@40"})->GetConsensus().P2MRLatticeTripwireHeight, 40);
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {{"-testactivationheight", "p2mr_lattice_tripwire@7"}})->GetConsensus().P2MRLatticeTripwireHeight, 7);
++    BOOST_CHECK_EQUAL(MakeParams(ChainType::REGTEST, {{"-testactivationheight", "p2mr_mldsa44@200"}})->GetConsensus().P2MRLatticeTripwireHeight, 200);
++    BOOST_CHECK_EQUAL(MakeParamsMulti({"p2mr_mldsa44@50", "p2mr_tripwire@60", "p2mr_slhdsa128s@40"})->GetConsensus().P2MRLatticeTripwireHeight, 60);
++    // An explicit height below the final height of any of the three is refused, whichever option gives it.
++    for (const std::string dep : {"p2mr_mldsa44", "p2mr_tripwire", "p2mr_slhdsa128s"}) {
++        BOOST_CHECK_EXCEPTION(MakeParamsMulti({dep + "@30", "p2mr_lattice_tripwire@29"}), std::runtime_error,
++                              HasReason{"The p2mr_lattice_tripwire height must be at or above the " + dep + " height 30, not 29."});
++        BOOST_CHECK_EQUAL(MakeParamsMulti({dep + "@30", "p2mr_lattice_tripwire@30"})->GetConsensus().P2MRLatticeTripwireHeight, 30);
++    }
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_mldsa44@6"}, {"-signettripwire", "7@" + OUTPOINT_D}, {"-signetlatticetripwire", "6@" + OUTPOINT_A}},
++          "The p2mr_lattice_tripwire height must be at or above the p2mr_tripwire height 7, not 6.");
++    Fails(ChainType::REGTEST, {{"-signetlatticetripwire", "5@" + std::string(64, '0') + ":4294967295"}},
++          "-signetlatticetripwire names " + std::string(64, '0') + ":4294967295, whose txid is null: no output has it.");
++    BOOST_CHECK_EXCEPTION(MakeParamsMulti({"5@" + OUTPOINT_A, "6@" + OUTPOINT_B}, "signetlatticetripwire"), std::runtime_error,
++                          HasReason{"-signetlatticetripwire cannot be multiple values."});
++
++    std::unique_ptr<const CChainParams> params;
++    {
++        ASSERT_DEBUG_LOG("P2MR lattice tripwire rules from height 5 in leaf version 0xe2; tripwire outputs " + OUTPOINT_A);
++        params = MakeParams(ChainType::REGTEST, {{"-signetlatticetripwire", "5@" + OUTPOINT_A}});
++    }
++    BOOST_CHECK_EQUAL(params->GetConsensus().P2MRLatticeTripwireHeight, 5);
++    BOOST_REQUIRE_EQUAL(params->GetConsensus().p2mr_lattice_tripwires.size(), 1U);
++    BOOST_CHECK(params->GetConsensus().p2mr_lattice_tripwires[0].outpoint == COutPoint(*Txid::FromHex(TXID_A), 0));
++    BOOST_CHECK(params->GetConsensus().p2mr_tripwires.empty());
++
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_lattice_tripwire@7"}, {"-signetlatticetripwire", "5@" + OUTPOINT_A}},
++          "-signetlatticetripwire sets the height of p2mr_lattice_tripwire, which -testactivationheight cannot set too.");
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_tripwire@6"}, {"-signetlatticetripwire", "5@" + OUTPOINT_A}},
++          "The p2mr_lattice_tripwire height must be at or above the p2mr_tripwire height 6, not 5.");
++    Fails(ChainType::REGTEST, {{"-signettripwire", "6@" + OUTPOINT_D}, {"-signetlatticetripwire", "5@" + OUTPOINT_A}},
++          "The p2mr_lattice_tripwire height must be at or above the p2mr_tripwire height 6, not 5.");
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_slhdsa128s@6"}, {"-signetlatticetripwire", "5@" + OUTPOINT_A}},
++          "The p2mr_lattice_tripwire height must be at or above the p2mr_slhdsa128s height 6, not 5.");
++    Fails(ChainType::REGTEST, {{"-testactivationheight", "p2mr_mldsa44@6"}, {"-signetlatticetripwire", "5@" + OUTPOINT_A}},
++          "The p2mr_lattice_tripwire height must be at or above the p2mr_mldsa44 height 6, not 5.");
++    BOOST_CHECK_EXCEPTION(MakeParamsMulti({"p2mr_tripwire@30", "p2mr_lattice_tripwire@29"}), std::runtime_error,
++                          HasReason{"The p2mr_lattice_tripwire height must be at or above the p2mr_tripwire height 30, not 29."});
++    Fails(ChainType::REGTEST, {{"-signetlatticetripwire", "0@" + OUTPOINT_A}},
++          "-signetlatticetripwire height must be at least 1 and below 2147483647, not 0.");
++}
++
++// On the chains it is not for, the option is refused whatever its value, not ignored.
++BOOST_AUTO_TEST_CASE(options_elsewhere)
++{
++    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::TESTNET4}) {
++        Fails(chain, {{"-signetlatticetripwire", "10@" + OUTPOINT_A}}, "-signetlatticetripwire can only be used with signet or regtest.");
++        Fails(chain, {{"-signetlatticetripwire", "garbage"}}, "-signetlatticetripwire can only be used with signet or regtest.");
++    }
++}
++
++// A lattice tripwire output is present while it is unspent and was created below the height of the
++// lattice rules, not of the tripwire rules of leaf version 0xe0; from that height on, a missing one
++// makes ML-DSA-44 checks in leaf version 0xe2 fail. The two tripwires are independent.
++BOOST_FIXTURE_TEST_CASE(state, LatticeTripwireTestingSetup)
++{
++    const ChainstateManager& chainman{*m_node.chainman};
++    const Consensus::Params& params{chainman.GetConsensus()};
++    BOOST_REQUIRE_EQUAL(params.P2MRTripwireHeight, 100);
++    BOOST_REQUIRE_EQUAL(params.P2MRLatticeTripwireHeight, 200);
++    BOOST_REQUIRE_EQUAL(params.p2mr_lattice_tripwires.size(), 3U);
++    const COutPoint a{params.p2mr_lattice_tripwires[0].outpoint};
++    const COutPoint b{params.p2mr_lattice_tripwires[1].outpoint};
++    const COutPoint c{params.p2mr_lattice_tripwires[2].outpoint};
++    const COutPoint d{params.p2mr_tripwires[0].outpoint};
++
++    // Tips whose next block is just below the height, and at it.
++    CBlockIndex below;
++    below.nHeight = 198;
++    CBlockIndex at;
++    at.nHeight = 199;
++
++    CCoinsView empty;
++    CCoinsViewCache coins{&empty};
++    const auto describe{[&](const std::string& sa, const std::string& sb, const std::string& sc, const std::string& checks) {
++        return strprintf("lattice tripwire outputs %s:0 %s, %s:1 %s, %s:2 %s; ML-DSA-44 checks in leaf version 0xe2 are %s for the next block",
++                         TXID_A, sa, TXID_B, sb, TXID_C, sc, checks);
++    }};
++
++    // Outputs that were never created are missing: the rules fail closed, from their height on.
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, a, params.P2MRLatticeTripwireHeight));
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&below, coins, chainman));
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRLatticeTripwireState(&at, coins, chainman), describe("missing", "missing", "missing", "disabled"));
++
++    // Created below the lattice height and unspent, they are present, also when created at or above
++    // the height of the tripwire rules of leaf version 0xe0, whose cutoff is not theirs.
++    const CTxOut output{1000, CScript{} << OP_TRUE};
++    coins.AddCoin(a, Coin{output, 50, false}, false);
++    coins.AddCoin(b, Coin{output, 150, false}, false);
++    coins.AddCoin(c, Coin{output, 199, false}, false);
++    BOOST_CHECK(IsP2MRTripwirePresent(coins, b, params.P2MRLatticeTripwireHeight));
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, b, params.P2MRTripwireHeight));
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&at, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRLatticeTripwireState(&at, coins, chainman), describe("unspent", "unspent", "unspent", "enabled"));
++
++    // The tripwire output of leaf version 0xe0 is missing: elliptic curve checks fail, ML-DSA-44 ones
++    // do not.
++    BOOST_CHECK(P2MRECDisabledAfter(&at, coins, chainman));
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&at, coins, chainman));
++    // And the other way round.
++    coins.AddCoin(d, Coin{output, 99, false}, false);
++    BOOST_CHECK(!P2MRECDisabledAfter(&at, coins, chainman));
++    BOOST_CHECK(coins.SpendCoin(c));
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++    BOOST_CHECK(!P2MRECDisabledAfter(&at, coins, chainman));
++    // Any one of the three is enough, from the height on.
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&below, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRLatticeTripwireState(&at, coins, chainman), describe("unspent", "unspent", "missing", "disabled"));
++    coins.AddCoin(c, Coin{output, 199, false}, false);
++    BOOST_CHECK(coins.SpendCoin(a));
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++    coins.AddCoin(a, Coin{output, 50, false}, false);
++    BOOST_CHECK(coins.SpendCoin(b));
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++
++    // Created again at the height or above, as after a deep reorganization, it stays missing.
++    coins.AddCoin(b, Coin{output, 200, false}, false);
++    BOOST_CHECK(!IsP2MRTripwirePresent(coins, b, params.P2MRLatticeTripwireHeight));
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++
++    // Only the output created below the height counts again; with two missing, bringing back one
++    // keeps the checks disabled.
++    BOOST_CHECK(coins.SpendCoin(b));
++    BOOST_CHECK(coins.SpendCoin(c));
++    coins.AddCoin(b, Coin{output, 150, false}, false);
++    BOOST_CHECK(P2MRMLDSADisabledAfter(&at, coins, chainman));
++    coins.AddCoin(c, Coin{output, 10, false}, false);
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&at, coins, chainman));
++}
++
++// Without lattice tripwire outputs, as on regtest by default, ML-DSA-44 checks never fail.
++BOOST_FIXTURE_TEST_CASE(no_lattice_tripwires, RegTestingSetup)
++{
++    const ChainstateManager& chainman{*m_node.chainman};
++    BOOST_REQUIRE_EQUAL(chainman.GetConsensus().P2MRLatticeTripwireHeight, 0);
++    BOOST_REQUIRE(chainman.GetConsensus().p2mr_lattice_tripwires.empty());
++    CBlockIndex tip;
++    tip.nHeight = 500;
++    CCoinsView empty;
++    CCoinsViewCache coins{&empty};
++    BOOST_CHECK(!P2MRMLDSADisabledAfter(&tip, coins, chainman));
++    BOOST_CHECK_EQUAL(DescribeP2MRLatticeTripwireState(&tip, coins, chainman),
++                      "lattice tripwire outputs none; ML-DSA-44 checks in leaf version 0xe2 are enabled for the next block");
++}
++
++// ConnectBlock reads the state from the view it is given, the UTXO set the block builds on, not from
++// the active chain (doc/p2mr-lattice-tripwire.md), in the same place as the state of the tripwire of
++// leaf version 0xe0. This code base has no ML-DSA-44 signer: an OP_CHECKMLDSA44 spend with a signature
++// of the right shape that is not valid fails as an invalid signature while the checks are enabled and
++// as disabled once they are, which tells the two states apart; a Schnorr spend of leaf version 0xe2
++// passes in both, since the elliptic curve checks follow the other tripwire.
++BOOST_FIXTURE_TEST_CASE(state_from_view, UncreatedLatticeTripwireSetup)
++{
++    ChainstateManager& chainman{*m_node.chainman};
++    const Consensus::Params& params{chainman.GetConsensus()};
++    BOOST_REQUIRE_EQUAL(params.p2mr_lattice_tripwires.size(), 1U);
++    BOOST_REQUIRE(params.p2mr_tripwires.empty());
++    const COutPoint tripwire{params.p2mr_lattice_tripwires[0].outpoint};
++
++    // A P2MR output of three leaves at depth two or one, <key> OP_CHECKSIG and S1 of version 0xe2,
++    // and OP_RETURN, funded in block 101.
++    const XOnlyPubKey key{coinbaseKey.GetPubKey()};
++    const CScript csig_leaf{CScript{} << ToByteVector(key) << OP_CHECKSIG};
++    const std::vector<unsigned char> pq_key(MLDSA44_PUBKEY_SIZE, 0x42);
++    const CScript s1_leaf{S1(pq_key)};
++    const uint256 csig_hash{ComputeTapleafHash(P2MR_LEAF_LATTICE_TRIPWIRED, csig_leaf)};
++    const uint256 s1_hash{ComputeTapleafHash(P2MR_LEAF_LATTICE_TRIPWIRED, s1_leaf)};
++    const uint256 fail_hash{ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << OP_RETURN)};
++    const uint256 pair_hash{ComputeTapbranchHash(csig_hash, s1_hash)};
++    const CScript script_pubkey{CScript{} << OP_2 << ToByteVector(ComputeTapbranchHash(pair_hash, fail_hash))};
++    const CMutableTransaction funding{CreateValidMempoolTransaction(m_coinbase_txns[0], 0, /*input_height=*/1, coinbaseKey,
++                                                                    script_pubkey, 1 * COIN, /*submit=*/false)};
++    CreateAndProcessBlock({funding}, CScript{} << OP_TRUE);
++    const CMutableTransaction funding2{CreateValidMempoolTransaction(m_coinbase_txns[1], 0, /*input_height=*/2, coinbaseKey,
++                                                                     script_pubkey, 1 * COIN, /*submit=*/false)};
++    CreateAndProcessBlock({funding2}, CScript{} << OP_TRUE);
++
++    const auto control_for{[&](const uint256& sibling) {
++        std::vector<unsigned char> control{static_cast<unsigned char>(P2MR_LEAF_LATTICE_TRIPWIRED | 1)};
++        control.insert(control.end(), sibling.begin(), sibling.end());
++        control.insert(control.end(), fail_hash.begin(), fail_hash.end());
++        return control;
++    }};
++
++    // The ML-DSA-44 spend of the first output: five chunks of the right sizes.
++    CMutableTransaction pq_spend;
++    pq_spend.vin.emplace_back(COutPoint{funding.GetHash(), 0});
++    pq_spend.vout.emplace_back(funding.vout[0].nValue - 1000, CScript{} << OP_TRUE);
++    std::vector<std::vector<unsigned char>> stack;
++    for (const size_t size : MLDSA44_SIG_CHUNK_SIZES) stack.emplace_back(size, 0x01);
++    stack.emplace_back(s1_leaf.begin(), s1_leaf.end());
++    stack.push_back(control_for(csig_hash));
++    pq_spend.vin[0].scriptWitness.stack = stack;
++
++    // The Schnorr spend of the second output.
++    CMutableTransaction ec_spend;
++    ec_spend.vin.emplace_back(COutPoint{funding2.GetHash(), 0});
++    ec_spend.vout.emplace_back(funding2.vout[0].nValue - 1000, CScript{} << OP_TRUE);
++    PrecomputedTransactionData txdata;
++    txdata.Init(ec_spend, {funding2.vout[0]}, /*force=*/true);
++    ScriptExecutionData execdata;
++    execdata.m_annex_init = true;
++    execdata.m_annex_present = false;
++    execdata.m_tapleaf_hash = csig_hash;
++    execdata.m_tapleaf_hash_init = true;
++    execdata.m_codeseparator_pos = 0xFFFFFFFF;
++    execdata.m_codeseparator_pos_init = true;
++    uint256 sighash;
++    BOOST_REQUIRE(SignatureHashSchnorr(sighash, execdata, ec_spend, 0, SIGHASH_DEFAULT, SigVersion::TAPSCRIPT, txdata, MissingDataBehavior::FAIL));
++    std::vector<unsigned char> sig(64);
++    BOOST_REQUIRE(coinbaseKey.SignSchnorr(sighash, sig, /*merkle_root=*/nullptr, /*aux=*/uint256{}));
++    ec_spend.vin[0].scriptWitness.stack = {sig, std::vector<unsigned char>(csig_leaf.begin(), csig_leaf.end()), control_for(s1_hash)};
++
++    const CBlock pq_block{CreateBlock({pq_spend}, CScript{} << OP_TRUE, chainman.ActiveChainstate())};
++    const CBlock ec_block{CreateBlock({ec_spend}, CScript{} << OP_TRUE, chainman.ActiveChainstate())};
++
++    LOCK(cs_main);
++    Chainstate& chainstate{chainman.ActiveChainstate()};
++    CBlockIndex* tip{chainstate.m_chain.Tip()};
++    BOOST_REQUIRE_EQUAL(tip->nHeight, 102);
++    const auto connect{[&](const CBlock& block, CCoinsViewCache& view, BlockValidationState& state) {
++        // As TestBlockValidity checks a block: on a dummy index, with a cache on top of the coins.
++        const uint256 hash{block.GetHash()};
++        CBlockIndex index{block};
++        index.pprev = tip;
++        index.nHeight = tip->nHeight + 1;
++        index.phashBlock = &hash;
++        return chainstate.ConnectBlock(block, state, &index, view, /*fJustCheck=*/true);
++    }};
++
++    // In a view where the lattice tripwire output is present, created below the height and unspent,
++    // the ML-DSA-44 check runs and finds the signature invalid; the Schnorr spend is valid.
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        view.AddCoin(tripwire, Coin{CTxOut{1000, CScript{} << OP_TRUE}, 1, false}, /*possible_overwrite=*/false);
++        BOOST_REQUIRE(!P2MRMLDSADisabledAfter(tip, view, chainman));
++        BlockValidationState state;
++        BOOST_CHECK(!connect(pq_block, view, state));
++        BOOST_CHECK_EQUAL(state.GetRejectReason(), "block-script-verify-flag-failed (Invalid ML-DSA-44 signature)");
++    }
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        view.AddCoin(tripwire, Coin{CTxOut{1000, CScript{} << OP_TRUE}, 1, false}, /*possible_overwrite=*/false);
++        BlockValidationState state;
++        BOOST_CHECK_MESSAGE(connect(ec_block, view, state), state.ToString());
++    }
++    // In the active chain's, where it is missing, the same ML-DSA-44 spend fails as disabled, before
++    // the signature is looked at; the Schnorr spend in leaf version 0xe2 is still valid.
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        BOOST_REQUIRE(P2MRMLDSADisabledAfter(tip, view, chainman));
++        BlockValidationState state;
++        BOOST_CHECK(!connect(pq_block, view, state));
++        BOOST_CHECK_EQUAL(state.GetRejectReason(), "block-script-verify-flag-failed (ML-DSA-44 signature checks are disabled in this leaf)");
++    }
++    {
++        CCoinsViewCache view{&chainstate.CoinsTip()};
++        BlockValidationState state;
++        BOOST_CHECK_MESSAGE(connect(ec_block, view, state), state.ToString());
++    }
++}
++
++// Relay policy (doc/p2mr-lattice-tripwire.md): IsWitnessStandard treats leaf version 0xe2 as 0xc0 and
++// 0xe0, at every height and at depth zero too, with the 80-byte limit and the exceptions of templates
++// S1 and SLH1; S2 is not a template there. The rescue template R1 is of leaf version 0xe0 only.
++BOOST_AUTO_TEST_CASE(witness_standard)
++{
++    using valtype = std::vector<unsigned char>;
++    // A transaction spending one P2MR output whose tree holds `leaf` at depth one next to OP_RETURN,
++    // or alone at depth zero.
++    const auto standard{[](const CScript& leaf, uint8_t leaf_version, std::vector<valtype> stack, bool depth_one = true,
++                           std::optional<valtype> annex = std::nullopt) {
++        const uint256 leaf_hash{ComputeTapleafHash(leaf_version, leaf)};
++        const uint256 fail_hash{ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << OP_RETURN)};
++        valtype control{static_cast<unsigned char>(leaf_version | 1)};
++        if (depth_one) control.insert(control.end(), fail_hash.begin(), fail_hash.end());
++        const uint256 root{depth_one ? ComputeTapbranchHash(leaf_hash, fail_hash) : leaf_hash};
++        const CTxOut spent{10000, CScript{} << OP_2 << ToByteVector(root)};
++        CMutableTransaction tx;
++        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
++        tx.vout.emplace_back(9000, CScript{} << OP_TRUE);
++        stack.emplace_back(leaf.begin(), leaf.end());
++        stack.push_back(control);
++        if (annex) stack.push_back(*annex);
++        tx.vin[0].scriptWitness.stack = stack;
++        CCoinsView empty;
++        CCoinsViewCache view{&empty};
++        view.AddCoin(tx.vin[0].prevout, Coin{spent, 1, false}, false);
++        return IsWitnessStandard(CTransaction{tx}, view);
++    }};
++    const valtype pq_key(MLDSA44_PUBKEY_SIZE, 0x42);
++    const valtype xonly(32, 0x07);
++    const valtype slh_key(SLHDSA128S_PUBKEY_SIZE, 0x09);
++    std::vector<valtype> pq_chunks;
++    for (const size_t size : MLDSA44_SIG_CHUNK_SIZES) pq_chunks.emplace_back(size, 0x01);
++    std::vector<valtype> slh_chunks;
++    for (const size_t size : SLHDSA128S_SIG_CHUNK_SIZES) slh_chunks.emplace_back(size, 0x01);
++    const CScript s1{S1(pq_key)};
++    const CScript s2{CScript{s1} << OP_VERIFY << xonly << OP_CHECKSIG};
++    const CScript slh1{CScript{} << slh_key << OP_CHECKSLHDSA128S};
++    std::vector<valtype> s2_stack{valtype(64, 0x03)};
++    s2_stack.insert(s2_stack.end(), pq_chunks.begin(), pq_chunks.end());
++
++    for (const uint8_t leaf_version : {TAPROOT_LEAF_TAPSCRIPT, P2MR_LEAF_TRIPWIRED, P2MR_LEAF_LATTICE_TRIPWIRED}) {
++        BOOST_TEST_CONTEXT("leaf version " << int{leaf_version}) {
++            BOOST_CHECK(standard(s1, leaf_version, pq_chunks));
++            BOOST_CHECK(standard(slh1, leaf_version, slh_chunks));
++            // S2 is a template in 0xc0 and 0xe0, not in 0xe2, whatever its elements.
++            BOOST_CHECK_EQUAL(standard(s2, leaf_version, s2_stack), leaf_version != P2MR_LEAF_LATTICE_TRIPWIRED);
++            BOOST_CHECK_EQUAL(standard(s2, leaf_version, {valtype{}, valtype{}, valtype{}, valtype{}, valtype{}, valtype{}}),
++                              leaf_version != P2MR_LEAF_LATTICE_TRIPWIRED);
++            // The 80-byte limit, at depth one and at depth zero. At depth zero it holds for 0xe2 at every
++            // height, before the rules activate too, as for 0xe0 (rule 4T-4): a policy change from a node
++            // without this series, which relays such a spend.
++            const CScript drop{CScript{} << OP_DROP << OP_1};
++            BOOST_CHECK(standard(drop, leaf_version, {valtype(80, 0x01)}));
++            BOOST_CHECK(!standard(drop, leaf_version, {valtype(81, 0x01)}));
++            BOOST_CHECK(standard(drop, leaf_version, {valtype(80, 0x01)}, /*depth_one=*/false));
++            BOOST_CHECK(!standard(drop, leaf_version, {valtype(81, 0x01)}, /*depth_one=*/false));
++            // A leaf with OP_CHECKMLDSA44 that is no template.
++            BOOST_CHECK(!standard(CScript{s1} << OP_VERIFY << OP_1, leaf_version, pq_chunks));
++            // An annex.
++            BOOST_CHECK(!standard(drop, leaf_version, {valtype(1, 0x01)}, true, valtype{ANNEX_TAG}));
++        }
++    }
++    // A leaf version that is not executed has no limit at all.
++    BOOST_CHECK(standard(CScript{} << OP_DROP << OP_1, 0xe4, {valtype(81, 0x01)}));
++
++    // Template R1, the rescue template: token, <key> OP_CHECKSIG, a control block, a rescue record. A
++    // rescue spend from a leaf of version 0xe2 is valid in a block, but not standard: its annex is not.
++    const std::string k{"ark0-wallet v1 schnorr"};
++    valtype token{P2MR_RESCUE_KEY_VERSION, P2MR_RESCUE_STATEMENT_HMAC, static_cast<unsigned char>(k.size())};
++    token.insert(token.end(), k.begin(), k.end());
++    token.push_back(0x00);
++    token.insert(token.end(), 32, 0x11);
++    BOOST_REQUIRE(IsP2MRRescueToken(token));
++    valtype record{ANNEX_TAG, 0x01};
++    record.resize(2 + *P2MRRescueProofSize(P2MR_RESCUE_STATEMENT_HMAC), 0x00);
++    BOOST_REQUIRE(IsP2MRRescueAnnex(record, P2MR_RESCUE_STATEMENT_HMAC));
++    const CScript csig{CScript{} << xonly << OP_CHECKSIG};
++    BOOST_CHECK(standard(csig, P2MR_LEAF_TRIPWIRED, {token}, true, record));
++    BOOST_CHECK(!standard(csig, P2MR_LEAF_LATTICE_TRIPWIRED, {token}, true, record));
++}
++
++// The two flags take bits 27 and 28, after M4-S's 25 and M4-R's 26 (doc/p2mr-lattice-tripwire.md).
++BOOST_AUTO_TEST_CASE(flag_bits)
++{
++    static_assert(static_cast<int>(script_verify_flag_name::SCRIPT_VERIFY_P2MR_SLHDSA128S) == 25);
++    static_assert(static_cast<int>(script_verify_flag_name::SCRIPT_VERIFY_P2MR_NO_RESCUE) == 26);
++    static_assert(static_cast<int>(script_verify_flag_name::SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE) == 27);
++    static_assert(static_cast<int>(script_verify_flag_name::SCRIPT_VERIFY_P2MR_MLDSA_DISABLED) == 28);
++    static_assert(MAX_SCRIPT_VERIFY_FLAGS_BITS == 29);
++    BOOST_CHECK_EQUAL(script_verify_flags{SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE}.as_int(), uint64_t{1} << 27);
++    BOOST_CHECK_EQUAL(script_verify_flags{SCRIPT_VERIFY_P2MR_MLDSA_DISABLED}.as_int(), uint64_t{1} << 28);
++}
++
++// Once ML-DSA-44 is disabled, a check with a non-empty signature in leaf version 0xe2 fails before the
++// verifier is called; elsewhere, and with the checks enabled, the verifier runs once.
++BOOST_AUTO_TEST_CASE(no_verification_once_disabled)
++{
++    using valtype = std::vector<unsigned char>;
++    const valtype pq_key(MLDSA44_PUBKEY_SIZE, 0x42);
++    const CScript s1{S1(pq_key)};
++    const auto run{[&](uint8_t leaf_version, script_verify_flags extra, const valtype& first_chunk) {
++        const uint256 leaf_hash{ComputeTapleafHash(leaf_version, s1)};
++        const uint256 fail_hash{ComputeTapleafHash(TAPROOT_LEAF_TAPSCRIPT, CScript{} << OP_RETURN)};
++        valtype control{static_cast<unsigned char>(leaf_version | 1)};
++        control.insert(control.end(), fail_hash.begin(), fail_hash.end());
++        const CScript spk{CScript{} << OP_2 << ToByteVector(ComputeTapbranchHash(leaf_hash, fail_hash))};
++        CScriptWitness witness;
++        for (size_t i = 0; i < MLDSA44_SIG_CHUNK_SIZES.size(); ++i) witness.stack.emplace_back(MLDSA44_SIG_CHUNK_SIZES[i], 0x01);
++        witness.stack[0] = first_chunk;
++        witness.stack.emplace_back(s1.begin(), s1.end());
++        witness.stack.push_back(control);
++        const CountingMLDSA44Checker checker;
++        ScriptError err;
++        VerifyScript(CScript{}, spk, &witness, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 |
++                                                   SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE | extra,
++                     checker, &err);
++        return std::pair{checker.calls, err};
++    }};
++    const valtype chunk(MLDSA44_SIG_CHUNK_SIZES[0], 0x01);
++    BOOST_CHECK(run(P2MR_LEAF_LATTICE_TRIPWIRED, SCRIPT_VERIFY_NONE, chunk) == std::pair(1, SCRIPT_ERR_OK));
++    BOOST_CHECK(run(P2MR_LEAF_LATTICE_TRIPWIRED, SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, chunk) == std::pair(0, SCRIPT_ERR_P2MR_MLDSA_DISABLED));
++    // A chunk of the wrong size too: the size is not looked at either.
++    BOOST_CHECK(run(P2MR_LEAF_LATTICE_TRIPWIRED, SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, valtype(7, 0x01)) == std::pair(0, SCRIPT_ERR_P2MR_MLDSA_DISABLED));
++    BOOST_CHECK(run(P2MR_LEAF_LATTICE_TRIPWIRED, SCRIPT_VERIFY_P2MR_EC_DISABLED, chunk) == std::pair(1, SCRIPT_ERR_OK));
++    for (const uint8_t leaf_version : {TAPROOT_LEAF_TAPSCRIPT, P2MR_LEAF_TRIPWIRED}) {
++        BOOST_CHECK(run(leaf_version, SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, chunk) == std::pair(1, SCRIPT_ERR_OK));
++    }
++}
++
++// The log of lattice tripwire spends skips the coinbase, whose input names the null outpoint.
++// -signetlatticetripwire refuses that outpoint, so the parameters are made directly.
++BOOST_FIXTURE_TEST_CASE(coinbase_not_logged, TestChain100Setup)
++{
++    CChainParams::RegTestOptions options;
++    options.lattice_tripwire = CChainParams::TripwireOptions{.height = 1, .outpoints = {COutPoint{}}};
++    const auto params{CChainParams::RegTest(options)};
++    BOOST_REQUIRE(params->GetConsensus().p2mr_lattice_tripwires.at(0).outpoint.IsNull());
++    m_node.validation_signals->SyncWithValidationInterfaceQueue();
++    m_node.chainman.reset();
++    {
++        const ChainstateManager::Options chainman_opts{
++            .chainparams = *params,
++            .datadir = m_args.GetDataDirNet(),
++            .notifications = *m_node.notifications,
++            .signals = m_node.validation_signals.get(),
++        };
++        const node::BlockManager::Options blockman_opts{
++            .chainparams = *params,
++            .blocks_dir = m_args.GetBlocksDirPath(),
++            .notifications = *m_node.notifications,
++            .block_tree_db_params = DBParams{
++                .path = m_args.GetDataDirNet() / "blocks" / "index2",
++                .cache_bytes = 1 << 20,
++                .memory_only = true,
++            },
++        };
++        m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
++    }
++    LoadVerifyActivateChainstate();
++    int spent_lines{0};
++    {
++        DebugLogHelper spent{"P2MR lattice tripwire ", [&](const std::string* line) {
++            if (line && line->find(" spent by ") != std::string::npos) ++spent_lines;
++            return false;
++        }};
++        for (int i = 0; i < 3; ++i) CreateAndProcessBlock({}, CScript{} << OP_TRUE);
++    }
++    BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight()), 3);
++    BOOST_CHECK_EQUAL(spent_lines, 0);
++    m_node.validation_signals->SyncWithValidationInterfaceQueue();
++    m_node.chainman.reset();
++}
++
++BOOST_AUTO_TEST_SUITE_END()
+-- 
+2.43.0
+

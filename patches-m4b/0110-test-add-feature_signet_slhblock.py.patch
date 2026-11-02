@@ -1,0 +1,726 @@
+From 59b8a67aa15c168008960f8e6a20498ae884ebdc Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:13:16 +0000
+Subject: [PATCH 110/112] test: add feature_signet_slhblock.py
+
+Two custom signets, each with nodes that have -signetslhblock and one that has
+only -signetpqblock (with M4R_BITCOIND=<bitcoind>, a build without this series):
+
+- an OP_TRUE challenge: the options (with negative, empty, zero and
+  overflowing heights) and the startup log; below the height, the per-block
+  verdicts; at the height, the negative list of the design through
+  submitblock (the SLH output missing, after the commitment, at c - 2, c = 0;
+  header PQB1 and PQH2, versions 0 and 2, OP_PUSHDATA4 and OP_PUSHDATA1,
+  signatures of 7855 and 7857 bytes, a byte after it, amount 1, the prefix in
+  other outputs, non-push and unparsable bytes; a flipped bit, another key,
+  two wrong contexts, the wrong tag, an uncut message), each refused with
+  bad-signet-slhblk and taken by the old node; a block made in the wrong order
+  (ML-DSA-44 first, SLH second), refused by both with bad-signet-pqblk; more
+  commitment-prefixed and OP_RETURN outputs, taken by both; a full template
+  with -blockreservedweight=48000, which fits, and with 16000, which no longer
+  does; -reindex-chainstate and -reindex; compact block relay of an SLH block
+  between two nodes with the rule; a late upgrade;
+- a 1-of-1 bare multisig challenge like Ark-0's: blocks made the way the
+  Ark-0 producer makes them, with signet-slh-sign and the wallet's signet
+  solution through contrib/signet/miner, and the wrong order again;
+
+a node with Ark-0's challenge, which has no SLH-DSA block signature; the
+p2mr-ts vectors of slh_msg; and, through submitblock on a node of its own,
+the BIP34 heights of the design (127, 128, 255, 256, 32767, 32768,
+8388607, 8388608 and INT_MAX - 1): the rule runs on the height the
+coinbase commits to, before that height is compared with the block's, so
+a block at height 1 committing to h - 1 passes the rule at h (and fails
+as bad-cb-height), one committing to h without the signature fails it,
+and one with it passes; a non-minimal push of height 1 counts as reached;
+and the genesis block, which submitblock passes through CheckBlock before
+it answers "duplicate": with the rule from height 1 the answer is
+"duplicate", where without the exemption it would be bad-signet-slhblk.
+---
+ test/functional/feature_signet_slhblock.py | 662 +++++++++++++++++++++
+ test/functional/test_runner.py             |   1 +
+ 2 files changed, 663 insertions(+)
+ create mode 100755 test/functional/feature_signet_slhblock.py
+
+diff --git a/test/functional/feature_signet_slhblock.py b/test/functional/feature_signet_slhblock.py
+new file mode 100755
+index 0000000..09b95ad
+--- /dev/null
++++ b/test/functional/feature_signet_slhblock.py
+@@ -0,0 +1,662 @@
++#!/usr/bin/env python3
++# Copyright (c) 2026 duncan0k
++# Distributed under the MIT software license, see the accompanying
++# file COPYING or http://www.opensource.org/licenses/mit-license.php.
++"""Test the SLH-DSA-SHA2-128s block signature a signet requires with -signetslhblock (doc/signet-slhblock.md).
++
++Two signets, each with nodes that have the rule and one node that has only -signetpqblock (an
++M2-to-M4-R node as far as blocks go; with M4R_BITCOIND=<bitcoind> that node runs that binary, a
++build without this series):
++
++- an OP_TRUE challenge, where blocks carry no signet solution: the options, activation, the
++  negative list of the design (every malformed form, every wrong signature, a block made in the
++  wrong order) through submitblock, the old node accepting every block with valid classical and
++  ML-DSA-44 signatures and refusing the wrong order, -reindex-chainstate, a late upgrade, and a
++  full block, with -blockreservedweight=48000 and with the old 16000;
++- a 1-of-1 bare multisig challenge like Ark-0's, with blocks made the way the Ark-0 producer
++  makes them: getblocktemplate, the four steps of add_signet_slh_and_pq_signatures with the
++  signer program signet-slh-sign, then the wallet's signet solution and finish_block of
++  contrib/signet/miner; and a block made in the wrong order (ML-DSA-44 first, SLH second), which
++  both the new and the old node refuse;
++
++and a node with Ark-0's challenge, where the rule is not active; and a node on its own (node 6)
++for the multi-byte BIP34 heights of the design, through submitblock (see test_bip34_heights).
++"""
++
++import copy
++import hashlib
++import importlib.machinery
++import importlib.util
++import json
++import logging
++import os
++import shlex
++import subprocess
++
++from test_framework.blocktools import SIGNET_HEADER, add_witness_commitment, create_block, create_coinbase
++from test_framework.descriptors import descsum_create
++from test_framework.key import ECKey, TaggedHash
++from test_framework.messages import CBlock, CBlockHeader, CTransaction, CTxOut, from_hex, ser_uint256, uint256_from_str
++from test_framework.p2mr_slhdsa128s import slhdsa128s_keygen, slhdsa128s_sign
++from test_framework.script import CScript, OP_0, OP_1, OP_CHECKMULTISIG, OP_RETURN, OP_TRUE
++from test_framework.signet_pq import (
++    WITNESS_COMMITMENT_SIZE,
++    add_signet_pq_signature,
++    signet_pq_keygen,
++    witness_commitment_index,
++)
++from test_framework.signet_slh import (
++    SIGNET_SLH_SIGN_NOT_BUILT,
++    signet_slh_sign_program,
++    SIGNET_SLH_PLACEHOLDER,
++    SIGNET_SLH_SCRIPT_PREFIX,
++    add_signet_slh_and_pq_signatures,
++    program_slh_pubkey,
++    program_slh_signer,
++    signet_slh_index,
++    signet_slh_merkle_root,
++    signet_slh_message,
++    signet_slh_script,
++    signet_slh_signature,
++    verify_signet_slh_signature,
++)
++from test_framework.test_framework import BitcoinTestFramework, SkipTest
++from test_framework.test_node import ErrorMatch
++from test_framework.util import assert_equal, assert_greater_than
++from test_framework.wallet import MiniWallet, MiniWalletMode
++from test_framework.wallet_util import bytes_to_wif
++
++# Test keys only: derived from public strings.
++PQ_PUBKEY, PQ_SECKEY = signet_pq_keygen(bytes.fromhex("11" * 32))
++SLH_SEED = hashlib.sha256(b"feature_signet_slhblock key").digest() + bytes(16)
++OTHER_SLH_SEED = hashlib.sha256(b"feature_signet_slhblock other key").digest() + bytes(16)
++CLASSICAL_KEY = (42).to_bytes(32, "big")
++
++TRUE_CHALLENGE = CScript([OP_TRUE])
++PQ_HEIGHT = 2           # -signetpqblock height on both signets
++SLH_HEIGHT = 130        # -signetslhblock height on the OP_TRUE signet: coinbases below it mature first
++MULTI_SLH_HEIGHT = 4    # and on the bare multisig signet
++ARK0_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
++MAX_BLOCK_WEIGHT = 4_000_000
++BAD_PQ = "bad-signet-pqblk"
++BAD_SLH = "bad-signet-slhblk"
++
++
++def load_signet_miner(srcdir):
++    """contrib/signet/miner as a module, the way the Ark-0 producer loads it, without the log
++    handler it installs (the test runner fails a test that writes to stderr)."""
++    path = os.path.join(srcdir, "contrib", "signet", "miner")
++    loader = importlib.machinery.SourceFileLoader("signetminer", path)
++    spec = importlib.util.spec_from_loader("signetminer", loader)
++    module = importlib.util.module_from_spec(spec)
++    root = logging.getLogger()
++    handlers = list(root.handlers)
++    loader.exec_module(module)
++    for handler in list(root.handlers):
++        if handler not in handlers:
++            root.removeHandler(handler)
++    return module
++
++
++class SignetSLHBlockTest(BitcoinTestFramework):
++    def set_test_params(self):
++        self.chain = "signet"
++        self.setup_clean_chain = True
++        self.num_nodes = 7
++        self.rpc_timeout = 240
++        key = ECKey()
++        key.set(CLASSICAL_KEY, True)
++        self.multi_challenge = CScript([OP_1, key.get_pubkey().get_bytes(), OP_1, OP_CHECKMULTISIG])
++        self.slh_pubkey, _ = slhdsa128s_keygen(SLH_SEED)
++        self.other_slh_pubkey, _ = slhdsa128s_keygen(OTHER_SLH_SEED)
++        noban = "-whitelist=noban@127.0.0.1"
++        pq_rule = f"-signetpqblock={PQ_PUBKEY.hex()}@{PQ_HEIGHT}"
++        self.true_rules = ["-signetchallenge=51", pq_rule, f"-signetslhblock={self.slh_pubkey.hex()}@{SLH_HEIGHT}"]
++        multi = f"-signetchallenge={self.multi_challenge.hex()}"
++        self.extra_args = [
++            # the OP_TRUE signet: nodes 0 and 1 with the rule, node 2 with -signetpqblock only
++            self.true_rules + [noban, "-debug=validation", "-blockreservedweight=48000", "-acceptnonstdtxn=1"],
++            # without -debug, so that below the height it takes the path of a node that logs nothing
++            self.true_rules + [noban, "-debug=0"],
++            ["-signetchallenge=51", pq_rule, noban],
++            # the bare multisig signet: node 3 with the rule and the classical key, node 4 without the rule
++            [multi, pq_rule, f"-signetslhblock={self.slh_pubkey.hex()}@{MULTI_SLH_HEIGHT}", noban, "-blockreservedweight=48000"],
++            [multi, pq_rule, noban],
++            # Ark-0's challenge, alone: M4-B is not active there
++            [f"-signetchallenge={ARK0_CHALLENGE}", "-debug=validation"],
++            # On its own, restarted with the rule at each height test_bip34_heights tries
++            ["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@1"],
++        ]
++
++    def skip_test_if_missing_module(self):
++        self.skip_if_no_wallet()
++        self.skip_if_no_bitcoin_util()
++        if signet_slh_sign_program(self.config) is None:
++            raise SkipTest(SIGNET_SLH_SIGN_NOT_BUILT)
++
++    def setup_network(self):
++        self.add_nodes(self.num_nodes, self.extra_args)
++        self.old_binary = os.environ.get("M4R_BITCOIND")
++        self.default_argv = [list(node.args) for node in self.nodes]
++        for i in (2, 4):
++            self.use_binary(i, self.old_binary)
++        self.start_nodes()
++        # Two signets and Ark-0: connect only the nodes of each one.
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++        self.connect_nodes(3, 4)
++
++    def use_binary(self, i, binary):
++        """Run node i with another bitcoind (None: this build's)."""
++        node = self.nodes[i]
++        n = len(node.binaries.node_argv())
++        node.args = ([binary] if binary else self.default_argv[i][:n]) + node.args[n:]
++
++    # Blocks
++
++    def grind(self, block):
++        util_argv = self.nodes[0].binaries.util_argv() + ["grind"]
++        header = CBlockHeader.serialize(block).hex()
++        out = subprocess.run(util_argv + [header], stdout=subprocess.PIPE, check=True).stdout.strip()
++        block.nNonce = from_hex(CBlockHeader(), out.decode()).nNonce
++        return block
++
++    def template_block(self, node, *, time=None):
++        """A block from the node's template, with the witness commitment last and no pushes after it."""
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        return self.miner.new_block(tmpl, bytes(CScript([OP_TRUE])), blocktime=time)
++
++    def true_block(self, node, *, slh=True, signer=None, time=None):
++        """A ground block for the OP_TRUE signet, signed as the producer signs, with ML-DSA-44 only if
++        slh is False."""
++        block = self.template_block(node, time=time)
++        if slh:
++            add_signet_slh_and_pq_signatures(block, bytes(TRUE_CHALLENGE), signer or self.sign, PQ_SECKEY)
++        else:
++            add_signet_pq_signature(block, PQ_SECKEY, bytes(TRUE_CHALLENGE))
++        return self.grind(block)
++
++    def variant(self, base, mutate):
++        """A copy of a block before its ML-DSA-44 signature, changed by mutate(coinbase outputs), then
++        signed with ML-DSA-44 and ground: the classical and ML-DSA-44 signatures stay valid for it."""
++        block = copy.deepcopy(base)
++        commitment = block.vtx[0].vout[witness_commitment_index(block)]
++        commitment.scriptPubKey = bytes(commitment.scriptPubKey)[:WITNESS_COMMITMENT_SIZE]
++        mutate(block.vtx[0].vout)
++        block.hashMerkleRoot = block.calc_merkle_root()
++        add_signet_pq_signature(block, PQ_SECKEY, bytes(TRUE_CHALLENGE))
++        return self.grind(block)
++
++    def wrong_order_block(self, block, challenge, signer):
++        """The template block signed in the wrong order: ML-DSA-44 first, then the SLH output inserted
++        and signed (its own signature is valid), so the ML-DSA-44 signature misses the SLH output."""
++        add_signet_pq_signature(block, PQ_SECKEY, challenge)
++        c = witness_commitment_index(block)
++        block.vtx[0].vout.insert(c, CTxOut(0, SIGNET_SLH_PLACEHOLDER))
++        signature = signer(signet_slh_message(block, challenge))
++        block.vtx[0].vout[c] = CTxOut(0, signet_slh_script(signature))
++        block.hashMerkleRoot = block.calc_merkle_root()
++        assert verify_signet_slh_signature(block, self.slh_pubkey, challenge)
++        return block
++
++    def submit(self, node, block, expected=None):
++        assert_equal(node.submitblock(block.serialize().hex()), expected)
++
++    def multi_block(self, node, *, slh=True, wrong_order=False):
++        """A block for the bare multisig signet, made the way the Ark-0 producer makes one
++        (contrib/k3s/ark0/producer/ark0.py: mine_block)."""
++        tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++        block = self.miner.new_block(tmpl, bytes(CScript([OP_TRUE])))
++        challenge = bytes.fromhex(tmpl["signet_challenge"])
++        if wrong_order:
++            block = self.wrong_order_block(block, challenge, self.sign)
++        elif slh:
++            add_signet_slh_and_pq_signatures(block, challenge, self.sign, PQ_SECKEY, pq_rnd=os.urandom(32))
++        else:
++            add_signet_pq_signature(block, PQ_SECKEY, challenge, rnd=os.urandom(32))
++        psbt = self.miner.generate_psbt(block, tmpl["signet_challenge"])
++        processed = node.walletprocesspsbt(psbt=psbt, sign=True, sighashtype="ALL")
++        assert processed["complete"]
++        decoded = self.miner.decode_challenge_psbt(processed["psbt"])
++        block = self.miner.get_block_from_psbt(decoded)
++        solution = self.miner.get_solution_from_psbt(decoded)
++        util_argv = self.nodes[0].binaries.util_argv() + ["grind"]
++        return self.miner.finish_block(block, solution, shlex.join(util_argv))
++
++    # Tests
++
++    def run_test(self):
++        self.miner = load_signet_miner(self.config["environment"]["SRCDIR"])
++        self.program = signet_slh_sign_program(self.config)
++        self.keyfile = os.path.join(self.options.tmpdir, "slh.key")
++        self.other_keyfile = os.path.join(self.options.tmpdir, "other-slh.key")
++        for path, seed in ((self.keyfile, SLH_SEED), (self.other_keyfile, OTHER_SLH_SEED)):
++            with open(path, "wb") as f:
++                f.write(seed)
++        assert_equal(program_slh_pubkey(self.program, self.keyfile), self.slh_pubkey)
++        self.sign = program_slh_signer(self.program, self.keyfile)
++        self.sign_other = program_slh_signer(self.program, self.other_keyfile)
++
++        self.test_options()
++        self.test_ark0_inactive()
++        self.test_below_height()
++        self.test_negative_list()
++        self.test_at_height()
++        self.test_full_block()
++        self.test_reindex()
++        self.test_compact_block_relay()
++        self.test_late_upgrade()
++        self.test_multisig_producer()
++        self.test_other_implementation()
++        self.test_bip34_heights()
++
++    def test_options(self):
++        self.log.info("Startup log of the rule")
++        sha = hashlib.sha256(self.slh_pubkey).hexdigest()
++        with self.nodes[1].assert_debug_log([f"Signet SLH-DSA block signature required from height {SLH_HEIGHT}, public key SHA256 {sha}"]):
++            self.restart_node(1, extra_args=self.extra_args[1])
++        self.connect_nodes(0, 1)
++
++        self.log.info("-signetslhblock is refused without its dependencies, on Ark-0 and with a bad value")
++        node = self.nodes[1]
++        self.stop_node(1)
++        key = self.slh_pubkey.hex()
++        pq = f"-signetpqblock={PQ_PUBKEY.hex()}@{PQ_HEIGHT}"
++        rule = f"-signetslhblock={key}@{SLH_HEIGHT}"
++        node.assert_start_raises_init_error([rule], "Error: -signetslhblock requires -signetchallenge.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", rule], "Error: -signetslhblock requires -signetpqblock.")
++        node.assert_start_raises_init_error([f"-signetchallenge={ARK0_CHALLENGE}", rule],
++                                            "Error: -signetslhblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", pq, f"-signetslhblock={key[:-2]}@5"],
++                                            "Error: -signetslhblock needs a 32-byte SLH-DSA-SHA2-128s public key, not 31 bytes.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@1", f"-signetslhblock={key}@0"],
++                                            "Error: -signetslhblock height must be at least 1, not 0.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", pq, f"-signetslhblock={key}@{PQ_HEIGHT - 1}"],
++                                            f"Error: -signetslhblock height must be at or above the -signetpqblock height {PQ_HEIGHT}, not {PQ_HEIGHT - 1}.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", pq, f"-signetslhblock={key}"],
++                                            f"Error: -signetslhblock must be <pubkey>@<height>, not '{key}'.")
++        node.assert_start_raises_init_error(["-signetchallenge=51", pq, rule, rule.replace(f"@{SLH_HEIGHT}", f"@{SLH_HEIGHT + 1}")],
++                                            "Error: -signetslhblock cannot be multiple values.")
++        for height, message in (("-1", "height must be at least 1, not -1."), ("0", "height must be at least 1, not 0."),
++                                ("", f"must be <pubkey>@<height>, not '{key}@'."),
++                                ("2147483648", f"must be <pubkey>@<height>, not '{key}@2147483648'.")):
++            node.assert_start_raises_init_error(["-signetchallenge=51", f"-signetpqblock={PQ_PUBKEY.hex()}@1", f"-signetslhblock={key}@{height}"],
++                                                f"Error: -signetslhblock {message}")
++        self.start_node(1, extra_args=self.extra_args[1])
++        self.connect_nodes(0, 1)
++
++    def test_ark0_inactive(self):
++        self.log.info("Ark-0: M4-B is not active (no height and no key yet); M2 is")
++        node = self.nodes[5]
++        with node.assert_debug_log(["Signet blocks need an ML-DSA-44 block signature from height 20000"],
++                                   unexpected_msgs=["SLH-DSA block signature required"]):
++            self.restart_node(5, extra_args=self.extra_args[5])
++        self.stop_node(5)
++
++    def test_below_height(self):
++        self.log.info("Below the height blocks need no SLH-DSA signature; a present one is only logged")
++        node = self.nodes[0]
++        for _ in range(3):
++            self.submit(node, self.true_block(node, slh=False))
++        with node.assert_debug_log([f"below height {SLH_HEIGHT}, SLH-DSA block signature absent or not in the required form"]):
++            self.submit(node, self.true_block(node, slh=False))
++        block = self.true_block(node)
++        assert verify_signet_slh_signature(block, self.slh_pubkey, bytes(TRUE_CHALLENGE))
++        with node.assert_debug_log([f"below height {SLH_HEIGHT}, SLH-DSA block signature valid"]):
++            self.submit(node, block)
++        with node.assert_debug_log([f"below height {SLH_HEIGHT}, SLH-DSA block signature invalid"]):
++            self.submit(node, self.true_block(node, signer=self.sign_other))
++        while node.getblockcount() < SLH_HEIGHT - 2:
++            self.submit(node, self.true_block(node, slh=False))
++        self.sync_blocks(self.nodes[0:3])
++        self.log.info("H - 1: a block without the SLH output is accepted")
++        self.submit(node, self.true_block(node, slh=False))
++        assert_equal(node.getblockcount(), SLH_HEIGHT - 1)
++        self.sync_blocks(self.nodes[0:3])
++
++    def test_negative_list(self):
++        self.log.info("At the height, the negative list: each block is refused by the rule and taken by the old node")
++        node, old = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        challenge = bytes(TRUE_CHALLENGE)
++        base = self.true_block(node)
++        index = signet_slh_index(base)
++        slh_out = base.vtx[0].vout[index]
++        signature = signet_slh_signature(base)
++        prefix = SIGNET_SLH_SCRIPT_PREFIX
++
++        def script(new):
++            def mutate(outs):
++                outs[index] = CTxOut(0, bytes(new))
++            return mutate
++
++        def flipped(pos):
++            s = bytearray(slh_out.scriptPubKey)
++            s[pos] ^= 1
++            return bytes(s)
++
++        def signed_over(message, *, context=None, signer=None):
++            sig = slhdsa128s_sign(self.slh_seckey(), message, context=context, addrnd=os.urandom(16)) if context is not None else (signer or self.sign)(message)
++            return script(prefix + sig)
++
++        def swap(outs):
++            outs[index], outs[index + 1] = outs[index + 1], outs[index]
++
++        # The untruncated message: the producer forgot the cut PQ push of step 1, so it signed over
++        # the coinbase with the placeholder and a bare 38-byte commitment output.
++        uncut = copy.deepcopy(base)
++        uncut.vtx[0].vout[index] = CTxOut(0, SIGNET_SLH_PLACEHOLDER)
++        commitment = uncut.vtx[0].vout[index + 1]
++        commitment.scriptPubKey = bytes(commitment.scriptPubKey)[:WITNESS_COMMITMENT_SIZE]
++        uncut_message = TaggedHash("SignetSLHBlock", hashlib.sha256(challenge).digest()
++                                   + base.nVersion.to_bytes(4, "little", signed=True) + ser_uint256(base.hashPrevBlock)
++                                   + ser_uint256(uncut.calc_merkle_root()) + base.nTime.to_bytes(4, "little"))
++        message = signet_slh_message(base, challenge)
++        pq_tagged = TaggedHash("SignetPQBlock", hashlib.sha256(challenge).digest()
++                               + base.nVersion.to_bytes(4, "little", signed=True) + ser_uint256(base.hashPrevBlock)
++                               + ser_uint256(signet_slh_merkle_root(base)) + base.nTime.to_bytes(4, "little"))
++
++        cases = {
++            # position
++            "missing": lambda outs: outs.pop(index),
++            "after the commitment": swap,
++            "at c - 2": lambda outs: outs.insert(index + 1, CTxOut(0, CScript([OP_RETURN]))),
++            "c = 0": lambda outs: outs.__setitem__(slice(None), [outs[index + 1], outs[index]]),
++            # encoding
++            "header PQB1": script(prefix[:4] + b"PQB1" + prefix[8:] + signature),
++            "header PQH2": script(prefix[:4] + b"PQH2" + prefix[8:] + signature),
++            "version 0": script(prefix[:8] + b"\x00" + signature),
++            "version 2": script(prefix[:8] + b"\x02" + signature),
++            "OP_PUSHDATA4": script(b"\x6a\x4e" + (7861).to_bytes(4, "little") + prefix[4:] + signature),
++            "OP_PUSHDATA1 that cannot hold it": script(b"\x6a\x4c\xff" + prefix[4:] + signature),
++            "signature of 7855 bytes": script(b"\x6a\x4d" + (7860).to_bytes(2, "little") + prefix[4:] + signature[:-1]),
++            "signature of 7857 bytes": script(b"\x6a\x4d" + (7862).to_bytes(2, "little") + prefix[4:] + signature + b"\x00"),
++            "a byte after it": script(prefix + signature + b"\x00"),
++            # (the payout one satoshi lower, so that the coinbase claims no more than before)
++            "amount 1": lambda outs: (outs.__setitem__(index, CTxOut(1, slh_out.scriptPubKey)),
++                                      outs.__setitem__(0, CTxOut(outs[0].nValue - 1, outs[0].scriptPubKey))),
++            "another output with the prefix": lambda outs: outs.insert(0, CTxOut(0, prefix[:8])),
++            "a second SLH output": lambda outs: outs.insert(0, CTxOut(0, slh_out.scriptPubKey)),
++            "the prefix after the commitment": lambda outs: outs.append(CTxOut(0, prefix + b"\x00")),
++            "a non-push opcode for the push": script(b"\x6a\xb1" + prefix[2:] + signature),
++            "OP_RETURN OP_PUSHDATA4 with a huge length": script(b"\x6a\x4e\xff\xff\xff\xff" + prefix[6:] + signature),
++            "the placeholder": script(SIGNET_SLH_PLACEHOLDER),
++            # signature
++            "a flipped bit": script(flipped(9 + 100)),
++            "a flipped last bit": script(flipped(len(slh_out.scriptPubKey) - 1)),
++            "another key": signed_over(message, signer=self.sign_other),
++            "OP_CHECKSLHDSA128S's context": signed_over(message, context=b"P2MR/SLHDSA128S/EXP0"),
++            "M2's context": signed_over(message, context=b"SIGNET/PQBLOCK/EXP0"),
++            "M2's tag": signed_over(pq_tagged),
++            "the message not cut": signed_over(uncut_message),
++        }
++        for name, mutate in cases.items():
++            self.log.debug(f"  {name}")
++            block = self.variant(base, mutate)
++            self.submit(node, block, BAD_SLH)
++            # The old node checks the classical and ML-DSA-44 signatures only, and takes it.
++            self.submit(old, block)
++            old.invalidateblock(block.hash_hex)
++
++        self.log.info("The wrong order (ML-DSA-44 first, SLH second): refused by both, for the ML-DSA-44 signature")
++        block = self.grind(self.wrong_order_block(self.template_block(node), challenge, self.sign))
++        self.submit(node, block, BAD_PQ)
++        self.submit(old, block, BAD_PQ)
++        # The original block is valid: the variants failed for their changes alone.
++        self.submit(node, base)
++        self.submit(old, base)
++        assert_equal(node.getblockcount(), SLH_HEIGHT)
++        assert_equal(old.getbestblockhash(), base.hash_hex)
++        self.connect_nodes(0, 2)
++
++    def slh_seckey(self):
++        _, seckey = slhdsa128s_keygen(SLH_SEED)
++        return seckey
++
++    def test_at_height(self):
++        self.log.info("A node without the rule accepts what the rule rejects, and follows the longer valid chain")
++        node, other = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        unsigned = self.true_block(other, slh=False)
++        self.submit(node, unsigned, BAD_SLH)
++        self.submit(other, unsigned)
++        assert_equal(other.getbestblockhash(), unsigned.hash_hex)
++
++        self.log.info("Signed blocks are accepted, and getblocktemplate keeps working above the height")
++        for _ in range(2):
++            tmpl = node.getblocktemplate({"rules": ["signet", "segwit"]})
++            assert "default_witness_commitment" in tmpl
++            self.submit(node, self.true_block(node))
++
++        self.log.info("More outputs with the commitment prefix (c is the last one) and more OP_RETURN outputs: both take it")
++        block = self.template_block(node)
++        extra = CTxOut(0, bytes(block.vtx[0].vout[-1].scriptPubKey)[:6] + bytes(range(32)))
++        block.vtx[0].vout.insert(0, extra)
++        block.vtx[0].vout.insert(1, CTxOut(0, CScript([OP_RETURN, b"another OP_RETURN"])))
++        block.hashMerkleRoot = block.calc_merkle_root()
++        add_signet_slh_and_pq_signatures(block, bytes(TRUE_CHALLENGE), self.sign, PQ_SECKEY)
++        assert_equal(witness_commitment_index(block), len(block.vtx[0].vout) - 1)
++        self.submit(node, self.grind(block))
++        assert_equal(node.getblockcount(), SLH_HEIGHT + 3)
++        self.connect_nodes(0, 2)
++        self.sync_blocks(self.nodes[0:3])
++        assert_equal(other.getbestblockhash(), node.getbestblockhash())
++
++    def fill_mempool(self, wallet, small):
++        """More than a block's worth of transactions of 2,500 vB (10,000 WU) each, each spending one
++        of the confirmed outputs in small, so that each is a cluster of its own and the template
++        fills to within 10,000 WU of its limit."""
++        node = self.nodes[0]
++        for _ in range(MAX_BLOCK_WEIGHT // 10_000 + 2):
++            wallet.send_self_transfer(from_node=node, target_vsize=2_500, utxo_to_spend=small.pop())
++
++    def test_full_block(self):
++        self.log.info("A full template with -blockreservedweight=48000: the SLH output fits")
++        node = self.nodes[0]
++        wallet = MiniWallet(node, mode=MiniWalletMode.RAW_OP_TRUE)
++        wallet.rescan_utxos()
++        small = []
++        for _ in range(9):
++            small += wallet.send_self_transfer_multi(from_node=node, num_outputs=100)["new_utxos"]
++        self.submit(node, self.true_block(node))
++        assert_equal(node.getrawmempool(), [])
++        self.fill_mempool(wallet, small)
++        tmpl_block = self.template_block(node)
++        template_weight = tmpl_block.get_weight()
++        assert_greater_than(MAX_BLOCK_WEIGHT - 48_000 + 2_000, template_weight)
++        assert_greater_than(template_weight, MAX_BLOCK_WEIGHT - 48_000 - 10_000)
++        block = self.true_block(node)
++        weight = block.get_weight()
++        self.log.info(f"  template {template_weight} WU, signed block {weight} WU")
++        assert_greater_than(MAX_BLOCK_WEIGHT + 1, weight)
++        self.submit(node, block)
++
++        self.log.info("With the old -blockreservedweight=16000 a full template overflows once the SLH output is in")
++        self.fill_mempool(wallet, small)
++        self.restart_node(0, extra_args=self.extra_args[0][:-2] + ["-blockreservedweight=16000", "-acceptnonstdtxn=1"])
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++        block = self.true_block(node)
++        self.log.info(f"  signed block {block.get_weight()} WU")
++        assert_greater_than(block.get_weight(), MAX_BLOCK_WEIGHT)
++        # The design names bad-blk-weight; with transactions of non-witness data only, as here,
++        # CheckBlock's size check (stripped size times four) refuses it first.
++        assert node.submitblock(block.serialize().hex()) in ("bad-blk-length", "bad-blk-weight")
++        self.restart_node(0, extra_args=self.extra_args[0])
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++        for _ in range(4):
++            if node.getrawmempool():
++                self.submit(node, self.true_block(node))
++        assert_equal(node.getrawmempool(), [])
++        self.sync_blocks(self.nodes[0:3])
++
++    def test_reindex(self):
++        node = self.nodes[0]
++        tip = node.getbestblockhash()
++        for option in ("-reindex-chainstate", "-reindex"):
++            self.log.info(f"{option} checks every block again and ends at the same tip")
++            self.restart_node(0, extra_args=self.extra_args[0] + [option])
++            assert_equal(node.getbestblockhash(), tip)
++        self.connect_nodes(0, 1)
++        self.connect_nodes(0, 2)
++
++    def test_compact_block_relay(self):
++        self.log.info("A block with an SLH output travels as a compact block between two nodes with the rule")
++        node, peer = self.nodes[0], self.nodes[1]
++        self.sync_blocks(self.nodes[0:3])
++        self.restart_node(1, extra_args=[a for a in self.extra_args[1] if a != "-debug=0"] + ["-debug=cmpctblock", "-debug=validation"])
++        self.connect_nodes(0, 1)
++        block = self.true_block(node)
++        assert signet_slh_signature(block) is not None
++        with peer.assert_debug_log([f"Successfully reconstructed block {block.hash_hex}"]):
++            self.submit(node, block)
++            self.sync_blocks([node, peer])
++        assert_equal(peer.getbestblockhash(), block.hash_hex)
++        self.restart_node(1, extra_args=self.extra_args[1])
++        self.connect_nodes(0, 1)
++        self.sync_blocks(self.nodes[0:3])
++
++    def test_late_upgrade(self):
++        self.log.info("A node that took a block without the SLH signature before it upgraded")
++        node, other = self.nodes[0], self.nodes[2]
++        self.disconnect_nodes(0, 2)
++        good_tip = node.getbestblockhash()
++        unsigned = self.true_block(other, slh=False)
++        self.submit(other, unsigned)
++        assert_equal(other.getbestblockhash(), unsigned.hash_hex)
++
++        # Upgraded (this build, with the rule), the block check at startup finds the block among the last ones.
++        self.stop_node(2)
++        self.use_binary(2, None)
++        upgraded = self.true_rules + ["-whitelist=noban@127.0.0.1"]
++        other.assert_start_raises_init_error(upgraded, "Corrupted block database detected", match=ErrorMatch.PARTIAL_REGEX)
++        # -reindex-chainstate connects every block again and leaves that one out.
++        self.start_node(2, extra_args=upgraded + ["-reindex-chainstate"])
++        assert_equal(other.getbestblockhash(), good_tip)
++        self.connect_nodes(0, 2)
++        self.submit(node, self.true_block(node))
++        self.sync_blocks([node, other])
++        self.stop_node(2)
++        self.use_binary(2, self.old_binary)
++        self.start_node(2, extra_args=self.extra_args[2])
++        self.connect_nodes(0, 2)
++        self.sync_blocks(self.nodes[0:3])
++
++    def test_multisig_producer(self):
++        self.log.info("Bare multisig challenge: the producer's four steps, then the wallet's signet solution")
++        node, old = self.nodes[3], self.nodes[4]
++        wif = bytes_to_wif(CLASSICAL_KEY)
++        node.createwallet(wallet_name="ark0", blank=True)
++        res = node.importdescriptors([{"desc": descsum_create(f"multi(1,{wif})"), "timestamp": "now"}])
++        assert all(r["success"] for r in res)
++        challenge = bytes(self.multi_challenge)
++        for height in range(1, MULTI_SLH_HEIGHT + 3):
++            block = self.multi_block(node, slh=(height >= MULTI_SLH_HEIGHT - 1))
++            coinbase = block.vtx[0]
++            c = witness_commitment_index(block)
++            assert_equal(c, len(coinbase.vout) - 1)
++            assert SIGNET_HEADER in bytes(coinbase.vout[c].scriptPubKey)
++            if height >= MULTI_SLH_HEIGHT - 1:
++                assert verify_signet_slh_signature(block, self.slh_pubkey, challenge)
++                assert_equal(bytes(coinbase.vout[c - 1].scriptPubKey)[:9], SIGNET_SLH_SCRIPT_PREFIX)
++            self.submit(node, block)
++        self.sync_blocks(self.nodes[3:5])
++        assert_equal(old.getblockcount(), MULTI_SLH_HEIGHT + 2)
++
++        self.log.info("At the height a block with only the classical and ML-DSA-44 signatures is refused")
++        self.submit(node, self.multi_block(node, slh=False), BAD_SLH)
++
++        self.log.info("A block made in the wrong order is refused by the new and the old node")
++        block = self.multi_block(node, wrong_order=True)
++        self.submit(node, block, BAD_PQ)
++        self.submit(old, block, BAD_PQ)
++        assert_equal(node.getbestblockhash(), old.getbestblockhash())
++
++    def test_other_implementation(self):
++        self.log.info("slh_msg agrees with p2mr-ts on its vectors")
++        path = os.path.join(self.config["environment"]["SRCDIR"], "src", "test", "data", "signet_slhblock_p2mr_ts.json")
++        with open(path, encoding="utf-8") as f:
++            cases = json.load(f)[1]["cases"]
++        for case in cases:
++            given = case["given"]
++            block = CBlock()
++            block.nVersion = given["version"]
++            block.hashPrevBlock = uint256_from_str(bytes.fromhex(given["prevBlockHash"]))
++            block.nTime = given["time"]
++            block.vtx = [from_hex(CTransaction(), given["coinbase"])] + [TxidOnly(t) for t in given["otherTxids"]]
++            assert_equal(signet_slh_message(block, bytes.fromhex(given["challenge"])).hex(), case["expected"]["slhMsg"])
++            assert_equal(ser_uint256(signet_slh_merkle_root(block)).hex(), case["intermediary"]["slhMerkleRoot"])
++
++    def test_bip34_heights(self):
++        self.log.info("BIP34 heights through submitblock: the rule reads the height the coinbase commits to")
++        # A test chain reaches none of these heights. But the rule runs in CheckBlock, on the height the
++        # coinbase commits to, before ContextualCheckBlock compares that height with the block's own
++        # (bad-cb-height). So a block at height 1 that commits to h shows which side of the rule's
++        # height h is on: bad-signet-slhblk if the rule applies there, bad-cb-height if it passed.
++        node = self.nodes[6]
++        pq_rule = f"-signetpqblock={PQ_PUBKEY.hex()}@1"
++        genesis = node.getblockheader(node.getblockhash(0))
++
++        def block_at_1(script_sig, *, slh, nudge=0):
++            coinbase = create_coinbase(1)
++            coinbase.vin[0].scriptSig = bytes(script_sig)
++            coinbase.nLockTime = 0  # create_coinbase(h) locks to h - 1, which would fail first as non-final
++            block = create_block(int(genesis["hash"], 16), coinbase, genesis["time"] + 1 + nudge)
++            block.nBits = int(genesis["bits"], 16)
++            add_witness_commitment(block)
++            if slh:
++                add_signet_slh_and_pq_signatures(block, bytes(TRUE_CHALLENGE), self.sign, PQ_SECKEY)
++            else:
++                add_signet_pq_signature(block, PQ_SECKEY, bytes(TRUE_CHALLENGE))
++            return self.grind(block)
++
++        def at_height(height, args=()):
++            self.restart_node(6, extra_args=["-signetchallenge=51", pq_rule,
++                                             f"-signetslhblock={self.slh_pubkey.hex()}@{height}"] + list(args))
++            assert_equal(node.getblockcount(), 0)
++
++        # The heights of the design (section 10, 4B-5): each multi-byte boundary of the BIP34 push,
++        # and INT_MAX - 1, the highest the option takes that a BIP34 push can reach below INT_MAX.
++        for height in (127, 128, 255, 256, 32767, 32768, 8388607, 8388608, 2**31 - 2):
++            at_height(height)
++            self.submit(node, block_at_1(CScript([height - 1, OP_0]), slh=False), "bad-cb-height")
++            self.submit(node, block_at_1(CScript([height, OP_0]), slh=False), BAD_SLH)
++            self.submit(node, block_at_1(CScript([height, OP_0]), slh=True), "bad-cb-height")
++            self.log.debug(f"rule at {height}: {height - 1} passes, {height} needs the signature, and takes a valid one")
++
++        self.log.info("A non-minimal height push counts as reached (fail closed); the minimal one does not")
++        # The rule from INT_MAX - 1: height 1, pushed minimally, is far below it.
++        self.submit(node, block_at_1(CScript([1, OP_0]), slh=False))
++        assert_equal(node.getblockcount(), 1)
++        # Height 1 as a two-byte push, then OP_0: unreadable, so the rule applies; with the signature it
++        # passes, and fails only BIP34's own check.
++        non_minimal = bytes([0x02, 0x01, 0x00, 0x00])
++        self.submit(node, block_at_1(non_minimal, slh=False), BAD_SLH)
++        self.submit(node, block_at_1(non_minimal, slh=True), "bad-cb-height")
++        # Off the active chain again, so that the start-up checks of the next run do not read it under a rule it predates.
++        node.invalidateblock(node.getbestblockhash())
++
++        self.log.info("The genesis block is exempt by its hash: with the rule from height 1, submitblock of it answers duplicate")
++        # submitblock goes through ProcessNewBlock, which runs CheckBlock, the SLH-DSA rule included,
++        # before it finds the block known and answers "duplicate". The genesis block has no SLH output,
++        # so without its exemption the answer would be bad-signet-slhblk. A node started on an empty
++        # data directory passes the genesis block through CheckBlock too (LoadGenesisBlock), so without
++        # the exemption no node with the rule would start. The unit test signet_slhblock_tests/height
++        # checks the exemption too, and that it holds for that hash only.
++        self.restart_node(6, extra_args=["-signetchallenge=51", pq_rule, f"-signetslhblock={self.slh_pubkey.hex()}@1"])
++        assert_equal(node.submitblock(node.getblock(node.getblockhash(0), 0)), "duplicate")
++        self.submit(node, block_at_1(CScript([1, OP_0]), slh=False, nudge=1), BAD_SLH)
++        self.submit(node, block_at_1(CScript([1, OP_0]), slh=True, nudge=1))
++        assert_equal(node.getblockcount(), 1)
++        self.stop_node(6)
++
++
++class TxidOnly:
++    """A transaction known only by its txid (internal byte order), for the vectors."""
++    def __init__(self, txid_hex):
++        self.txid_int = uint256_from_str(bytes.fromhex(txid_hex))
++
++
++if __name__ == '__main__':
++    SignetSLHBlockTest(__file__).main()
+diff --git a/test/functional/test_runner.py b/test/functional/test_runner.py
+index b219ce7..0e5076c 100755
+--- a/test/functional/test_runner.py
++++ b/test/functional/test_runner.py
+@@ -109,6 +109,7 @@ BASE_SCRIPTS = [
+     'p2p_opportunistic_1p1c.py',
+     'p2p_node_network_limited.py --v1transport',
+     'p2p_node_network_limited.py --v2transport',
++    'feature_signet_slhblock.py',
+     # vv Tests less than 2m vv
+     'feature_signet_pqblock_edges.py',
+     'mining_getblocktemplate_longpoll.py',
+-- 
+2.43.0
+

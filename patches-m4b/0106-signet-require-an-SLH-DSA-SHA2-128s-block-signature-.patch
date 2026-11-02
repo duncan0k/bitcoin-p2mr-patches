@@ -1,0 +1,522 @@
+From 10d4f6f4442e2cfdee0689bf876a5bf4f4747e26 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:12:51 +0000
+Subject: [PATCH 106/112] signet: require an SLH-DSA-SHA2-128s block signature
+ from a height on (-signetslhblock)
+
+A custom signet given -signetslhblock=<pubkey>@<height> requires, from that
+height on, an SLH-DSA-SHA2-128s signature by <pubkey> next to the ML-DSA-44
+block signature of -signetpqblock (doc/signet-slhblock.md, M4-B of the M4
+design, rules 4B-1 to 4B-7). It sits in the coinbase output right before the
+witness commitment output, vout[c - 1]: amount 0, a script of exactly 7865
+bytes starting 6a 4d b51e "PQH1" 01, then the signature; no other output may
+start with the first eight of those bytes. These are compared as bytes at
+fixed offsets: the scripts are never parsed, so no GetOp or CheckMinimalPush
+runs on them.
+
+The signature signs TaggedHash("SignetSLHBlock", SHA256(challenge) ||
+nVersion || hashPrevBlock || slh_merkle || nTime), slh_merkle being the
+merkle root with the coinbase the ML-DSA-44 signature covers, its SLH output
+cut back to 6a 05 "PQH1" 01, under the context string SIGNET/SLHBLOCK/EXP0.
+So the SLH signature is made first and the ML-DSA-44 signature covers it.
+
+It is checked at the end of CheckBlock, after the ML-DSA-44 block signature
+and before fChecked, on the same condition (signet_blocks && fCheckPOW), with
+the same height (BIP34, an unreadable height counts as reached), the same
+genesis exemption and the same per-block verdict below the height with
+-debug=validation; the reason is bad-signet-slhblk. Templates are left alone
+and Core's template code is not changed: the producer inserts the output.
+
+The option needs -signetchallenge and -signetpqblock at or below its height,
+takes one value, and is refused on the Ark-0 signet, on the default signet
+and on other chains. A node logs the height and the key's SHA256 at startup.
+
+Nodes without the rule accept these blocks: the rule is a soft fork of the
+signet it is given to. On Ark-0 neither the height nor the key is decided:
+ARK0_SLH_BLOCK_HEIGHT stays at std::numeric_limits<int>::max() and the key
+unset, so the rule is not active there.
+---
+ src/chainparams.cpp        |  44 ++++++++++++-
+ src/chainparamsbase.cpp    |   1 +
+ src/consensus/params.h     |  18 +++++
+ src/kernel/chainparams.cpp |  33 ++++++++++
+ src/kernel/chainparams.h   |  26 ++++++++
+ src/signet.cpp             | 131 +++++++++++++++++++++++++++++++++++++
+ src/signet.h               |  55 ++++++++++++++++
+ src/validation.cpp         |   8 +++
+ 8 files changed, 315 insertions(+), 1 deletion(-)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 5c7524d..cc360e1 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -9,6 +9,7 @@
+ #include <common/args.h>
+ #include <consensus/params.h>
+ #include <crypto/mldsa44.h>
++#include <crypto/slhdsa128s.h>
+ #include <deploymentinfo.h>
+ #include <logging.h>
+ #include <tinyformat.h>
+@@ -103,7 +104,7 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+     // genesis block and message start): none of the options that change the rules of a custom signet
+     // may change its rules.
+     if (options.challenge && IsDefaultSignetChallenge(*options.challenge)) {
+-        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue", "-signetlatticetripwire"}) {
++        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetslhblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue", "-signetlatticetripwire"}) {
+             if (!args.GetArgs(arg).empty()) {
+                 throw std::runtime_error(strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", arg));
+             }
+@@ -166,6 +167,44 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.pq_block.emplace(Consensus::SignetPQBlock{.height = *height, .pubkey = *pubkey});
+     }
++    // The SLH-DSA-SHA2-128s block signature (doc/signet-slhblock.md) sits in an output that the
++    // ML-DSA-44 block signature covers, and is signed before it: it needs that rule, from a height
++    // at or below its own.
++    if (!args.GetArgs("-signetslhblock").empty()) {
++        const auto values = args.GetArgs("-signetslhblock");
++        if (values.size() != 1) {
++            throw std::runtime_error("-signetslhblock cannot be multiple values.");
++        }
++        if (!options.challenge) {
++            throw std::runtime_error("-signetslhblock requires -signetchallenge.");
++        }
++        if (IsArk0SignetChallenge(*options.challenge)) {
++            throw std::runtime_error("-signetslhblock cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++        }
++        if (!options.pq_block) {
++            throw std::runtime_error("-signetslhblock requires -signetpqblock.");
++        }
++        const auto& value{values[0]};
++        const auto at{value.find('@')};
++        if (at == std::string::npos) {
++            throw std::runtime_error(strprintf("-signetslhblock must be <pubkey>@<height>, not '%s'.", value));
++        }
++        const auto pubkey{TryParseHex<uint8_t>(value.substr(0, at))};
++        const auto height{ToIntegral<int32_t>(value.substr(at + 1))};
++        if (!pubkey || !height) {
++            throw std::runtime_error(strprintf("-signetslhblock must be <pubkey>@<height>, not '%s'.", value));
++        }
++        if (pubkey->size() != SLHDSA128S_PUBKEY_SIZE) {
++            throw std::runtime_error(strprintf("-signetslhblock needs a %d-byte SLH-DSA-SHA2-128s public key, not %d bytes.", SLHDSA128S_PUBKEY_SIZE, pubkey->size()));
++        }
++        if (*height < 1) {
++            throw std::runtime_error(strprintf("-signetslhblock height must be at least 1, not %d.", *height));
++        }
++        if (*height < options.pq_block->height) {
++            throw std::runtime_error(strprintf("-signetslhblock height must be at or above the -signetpqblock height %d, not %d.", options.pq_block->height, *height));
++        }
++        options.slh_block.emplace(Consensus::SignetSLHBlock{.height = *height, .pubkey = *pubkey});
++    }
+     if (!args.GetArgs("-signetmldsa44").empty()) {
+         const auto values = args.GetArgs("-signetmldsa44");
+         if (values.size() != 1) {
+@@ -418,6 +457,9 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+     if (chain != ChainType::SIGNET && args.IsArgSet("-signetslhdsa128s")) {
+         throw std::runtime_error("-signetslhdsa128s can only be used with signet.");
+     }
++    if (chain != ChainType::SIGNET && args.IsArgSet("-signetslhblock")) {
++        throw std::runtime_error("-signetslhblock can only be used with signet.");
++    }
+     if (chain != ChainType::SIGNET && args.IsArgSet("-signetrescue")) {
+         throw std::runtime_error("-signetrescue can only be used with signet.");
+     }
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index ef6cd67..a095664 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -27,6 +27,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetpqblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1) to also carry an ML-DSA-44 signature by <pubkey> (1312 bytes, hex) in its witness commitment output; see doc/signet-pqblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetmldsa44=<height>", "Execute OP_CHECKMLDSA44 in P2MR leaves from <height> (at least 1) on; see doc/p2mr-mldsa44.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signettripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe0 from <height> (at least 1) on, and from there fail their elliptic curve signature checks in every block whose parent leaves one of these tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge and -signetmldsa44 below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_tripwire, which must be above that of p2mr_mldsa44 (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetslhblock=<pubkey>@<height>", "Require every block at or above <height> (at least 1, and at or above the -signetpqblock height) to also carry an SLH-DSA-SHA2-128s signature by <pubkey> (32 bytes, hex) in the coinbase output right before its witness commitment output; see doc/signet-slhblock.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge and -signetpqblock, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetrescue=<height>", "Open the P2MR rescue lane from <height> (at least 1, and at or above the -signettripwire height) on: in executed P2MR leaves of leaf version 0xe0, an elliptic curve signature check whose signature is a rescue token is checked with the rescue proof in the input's annex; see doc/p2mr-rescue.md. This relaxes the rules (a hard fork): every node must use the same value before the chain reaches <height>. Requires -signetchallenge and -signettripwire, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetlatticetripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe2 from <height> (at least 1) on, their elliptic curve signature checks following the tripwire of leaf version 0xe0, and from there fail their OP_CHECKMLDSA44 checks with a non-empty signature in every block whose parent leaves one of these lattice tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-lattice-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge, -signetmldsa44, -signettripwire and -signetslhdsa128s at or below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_lattice_tripwire, which must be at or above those of p2mr_mldsa44, p2mr_tripwire and p2mr_slhdsa128s (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetslhdsa128s=<height>", "Execute OP_CHECKSLHDSA128S in P2MR leaves from <height> (at least 1) on; see doc/p2mr-slhdsa128s.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index e6af36c..0b4071c 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -106,6 +106,16 @@ struct SignetPQBlock {
+     std::vector<unsigned char> pubkey; //!< ML-DSA-44 public key, 1312 bytes
+ };
+ 
++/**
++ * An SLH-DSA-SHA2-128s block signature a signet requires, next to its challenge and its ML-DSA-44
++ * block signature, in every block at or above `height` (doc/signet-slhblock.md); see
++ * Params::signet_slh_block. The same shape as SignetPQBlock.
++ */
++struct SignetSLHBlock {
++    int height;
++    std::vector<unsigned char> pubkey; //!< SLH-DSA-SHA2-128s public key, PK.seed || PK.root, 32 bytes
++};
++
+ /**
+  * A tripwire output of the P2MR tripwire rules (doc/p2mr-tripwire.md); see
+  * Params::p2mr_tripwires.
+@@ -224,6 +234,14 @@ struct Params {
+      * which requires -signetchallenge.
+      */
+     std::optional<SignetPQBlock> signet_pq_block{};
++    /**
++     * Signet only: from `height` on, every block must also carry an SLH-DSA-SHA2-128s signature
++     * by `pubkey` in the coinbase output right before the witness commitment output
++     * (doc/signet-slhblock.md). Only set on a signet given -signetslhblock, which requires
++     * -signetchallenge and -signetpqblock at or below its height. Not set on the Ark-0 signet
++     * until its height and key are decided (ARK0_SLH_BLOCK_HEIGHT).
++     */
++    std::optional<SignetSLHBlock> signet_slh_block{};
+     /**
+      * The tripwire outputs of the P2MR tripwire rules (doc/p2mr-tripwire.md). One
+      * is present while it is an unspent output created below P2MRTripwireHeight;
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index 94ba421..f2d208e 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -11,6 +11,7 @@
+ #include <consensus/params.h>
+ #include <crypto/hex_base.h>
+ #include <crypto/mldsa44.h>
++#include <crypto/slhdsa128s.h>
+ #include <crypto/sha256.h>
+ #include <hash.h>
+ #include <kernel/messagestartchars.h>
+@@ -34,6 +35,7 @@
+ #include <iterator>
+ #include <limits>
+ #include <map>
++#include <optional>
+ #include <span>
+ #include <string>
+ #include <utility>
+@@ -95,6 +97,13 @@ static constexpr auto ARK0_PQ_BLOCK_PUBKEY{
+     "fc8974a6e31d3270043e779b5e3bdabd40f01cfc0f7438937d505a2897cdf0dc"_hex_u8};
+ static_assert(ARK0_PQ_BLOCK_PUBKEY.size() == MLDSA44_PUBKEY_SIZE);
+ 
++//! The SLH-DSA-SHA2-128s public key of the Ark-0 block signature of doc/signet-slhblock.md, from
++//! ARK0_SLH_BLOCK_HEIGHT on. Not decided yet: unset, and M4-B is inactive on Ark-0. It is set in the
++//! same commit as the height, with its SHA256 in the comment as for ARK0_PQ_BLOCK_PUBKEY.
++static constexpr std::optional<std::array<unsigned char, SLHDSA128S_PUBKEY_SIZE>> ARK0_SLH_BLOCK_PUBKEY{};
++// The key and the height are decided together: both set, or neither.
++static_assert(ARK0_SLH_BLOCK_PUBKEY.has_value() == (ARK0_SLH_BLOCK_HEIGHT != std::numeric_limits<int>::max()));
++
+ //! The x-only key of the leaf of the Ark-0 drill tripwire output, which the operator holds.
+ static constexpr auto ARK0_TRIPWIRE_DRILL_KEY{"2f605bb3d127c17ff8e88e214587876b0c7623dbad79f8a1115fa172bda0315f"_hex_u8};
+ 
+@@ -763,6 +772,30 @@ public:
+             LogInfo("Signet blocks need an ML-DSA-44 block signature from height %d, by the key whose SHA256 is %s",
+                     rule.height, HexStr(key_hash));
+         }
++        // An SLH-DSA-SHA2-128s block signature next to it (doc/signet-slhblock.md): on another
++        // custom signet as -signetslhblock says, which ReadSigNetArgs accepts only with
++        // -signetpqblock at or below its height and refuses on Ark-0. On Ark-0 by the key and from
++        // the height this code fixes, once they are decided; until then not at all.
++        if (options.slh_block) {
++            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
++            assert(options.pq_block && options.pq_block->height <= options.slh_block->height);
++            consensus.signet_slh_block = *options.slh_block;
++        } else if (IsArk0SignetChallenge(bin) && ARK0_SLH_BLOCK_PUBKEY) {
++            consensus.signet_slh_block = Consensus::SignetSLHBlock{
++                .height = ARK0_SLH_BLOCK_HEIGHT,
++                .pubkey = {ARK0_SLH_BLOCK_PUBKEY->begin(), ARK0_SLH_BLOCK_PUBKEY->end()},
++            };
++        }
++        if (consensus.signet_slh_block) {
++            const auto& rule{*consensus.signet_slh_block};
++            assert(rule.pubkey.size() == SLHDSA128S_PUBKEY_SIZE && rule.height >= 1);
++            assert(consensus.signet_pq_block && consensus.signet_pq_block->height <= rule.height);
++            // Every node of the network needs the same value: log what an operator can compare.
++            std::array<unsigned char, CSHA256::OUTPUT_SIZE> key_hash;
++            CSHA256().Write(rule.pubkey.data(), rule.pubkey.size()).Finalize(key_hash.data());
++            LogInfo("Signet SLH-DSA block signature required from height %d, public key SHA256 %s",
++                    rule.height, HexStr(key_hash));
++        }
+         consensus.fPowAllowMinDifficultyBlocks = false;
+         consensus.enforce_BIP94 = false;
+         consensus.fPowNoRetargeting = false;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 17b086d..99b314d 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -177,6 +177,25 @@ consteval bool Ark0LatticeTripwiresConsistent()
+ }
+ static_assert(Ark0LatticeTripwiresConsistent());
+ 
++/**
++ * Height from which the Ark-0 signet requires the SLH-DSA-SHA2-128s block signature of
++ * doc/signet-slhblock.md (M4-B, H4T in the M4 design), by the key kernel/chainparams.cpp would fix
++ * as ARK0_SLH_BLOCK_PUBKEY.
++ *
++ * Neither the height nor the key is decided yet, so M4-B stays inactive on Ark-0: the height is
++ * std::numeric_limits<int>::max(), ARK0_SLH_BLOCK_PUBKEY is unset, and the Ark-0 signet's
++ * consensus parameters have no signet_slh_block (signet_slhblock_tests/ark0_inactive checks it).
++ * -signetslhblock is refused there, as every option that would change that network's rules. Both
++ * are set together, in one commit, with the height announced ahead (H4T in the M4 design: the
++ * height at release + 6,720, rounded up to a thousand); they never change once a build carrying
++ * them has left the network's own nodes.
++ */
++inline constexpr int ARK0_SLH_BLOCK_HEIGHT{std::numeric_limits<int>::max()};
++// The SLH-DSA block signature comes with or after OP_CHECKSLHDSA128S (32000 <= H4T, M4 design
++// section 4.1), and after the ML-DSA-44 block signature, which the SLH output relies on.
++static_assert(ARK0_SLH_BLOCK_HEIGHT >= ARK0_SLHDSA128S_HEIGHT);
++static_assert(ARK0_SLH_BLOCK_HEIGHT > ARK0_PQ_BLOCK_HEIGHT);
++
+ /** The bytes regtest's rescue network id is the SHA256 of (doc/p2mr-rescue.md). */
+ inline constexpr std::string_view P2MR_RESCUE_REGTEST_ID{"regtest"};
+ 
+@@ -331,6 +350,13 @@ public:
+          * its own that is not the Ark-0 signet's.
+          */
+         std::optional<Consensus::SignetPQBlock> pq_block{};
++        /**
++         * SLH-DSA-SHA2-128s block signature required from a height on
++         * (doc/signet-slhblock.md). Only accepted together with a challenge of
++         * its own that is neither the Ark-0 signet's nor the default signet's,
++         * and with pq_block at or below its height.
++         */
++        std::optional<Consensus::SignetSLHBlock> slh_block{};
+         /**
+          * Height from which OP_CHECKMLDSA44 executes (-signetmldsa44). Only
+          * accepted together with a challenge of its own that is not the Ark-0
+diff --git a/src/signet.cpp b/src/signet.cpp
+index 70b30b3..c445a58 100644
+--- a/src/signet.cpp
++++ b/src/signet.cpp
+@@ -8,6 +8,7 @@
+ #include <consensus/params.h>
+ #include <consensus/validation.h>
+ #include <crypto/mldsa44.h>
++#include <crypto/slhdsa128s.h>
+ #include <crypto/sha256.h>
+ #include <hash.h>
+ #include <logging.h>
+@@ -289,3 +290,133 @@ bool CheckSignetPQBlock(const CBlock& block, const Consensus::Params& consensusP
+     }
+     return true;
+ }
++
++// SLH-DSA-SHA2-128s block signature (doc/signet-slhblock.md)
++
++//! Context string of the SLH-DSA block signature: kept apart from OP_CHECKSLHDSA128S's and from the
++//! ML-DSA-44 block signature's.
++static constexpr std::string_view SIGNET_SLH_CONTEXT{"SIGNET/SLHBLOCK/EXP0"};
++static_assert(SIGNET_SLH_SCRIPT_SIZE == SIGNET_SLH_SCRIPT_PREFIX.size() + SLHDSA128S_SIGNATURE_SIZE);
++static_assert(SIGNET_SLH_SCRIPT_SIZE == 7865);
++// The push length in the prefix: header, version and signature.
++static_assert(SIGNET_SLH_SCRIPT_PREFIX[2] + 256 * SIGNET_SLH_SCRIPT_PREFIX[3] == SIGNET_SLH_HEADER.size() + 1 + SLHDSA128S_SIGNATURE_SIZE);
++
++static const HashWriter HASHER_SIGNET_SLH_BLOCK{TaggedHash("SignetSLHBlock")};
++
++std::optional<SignetSLHBlockDigest> ComputeSignetSLHBlockMessage(const CBlockHeader& header, const CTransaction& coinbase,
++                                                                std::span<const uint256> other_txids, std::span<const uint8_t> challenge)
++{
++    int cidx{NO_WITNESS_COMMITMENT};
++    {
++        CBlock block;
++        block.vtx.push_back(MakeTransactionRef(coinbase));
++        cidx = GetWitnessCommitmentIndex(block);
++    }
++    if (cidx == NO_WITNESS_COMMITMENT || cidx < 1) return std::nullopt;
++
++    // pq_coinbase, as SignetPQBlockMessage makes it: the witness commitment output cut back to
++    // OP_RETURN, the commitment and a push of the PQ header and version. Then the SLH output at
++    // vout[c - 1] cut back to OP_RETURN and a push of its own header and version.
++    SignetSLHBlockDigest digest{.coinbase = CMutableTransaction{coinbase}, .merkle_root = {}, .message = {}};
++    CScript& commitment{digest.coinbase.vout.at(cidx).scriptPubKey};
++    std::vector<uint8_t> pq_cut{SIGNET_PQ_HEADER.begin(), SIGNET_PQ_HEADER.end()};
++    pq_cut.push_back(SIGNET_PQ_VERSION);
++    commitment = CScript(commitment.begin(), commitment.begin() + MINIMUM_WITNESS_COMMITMENT) << pq_cut;
++    std::vector<uint8_t> slh_cut{SIGNET_SLH_HEADER.begin(), SIGNET_SLH_HEADER.end()};
++    slh_cut.push_back(SIGNET_SLH_VERSION);
++    digest.coinbase.vout.at(cidx - 1).scriptPubKey = CScript() << OP_RETURN << slh_cut;
++
++    std::vector<uint256> leaves;
++    leaves.reserve((other_txids.size() + 2) & ~size_t{1}); // capacity rounded up to even
++    leaves.push_back(digest.coinbase.GetHash().ToUint256());
++    leaves.insert(leaves.end(), other_txids.begin(), other_txids.end());
++    digest.merkle_root = ComputeMerkleRoot(std::move(leaves));
++
++    // SHA256 of the raw challenge, as for the ML-DSA-44 block signature.
++    uint256 challenge_hash;
++    CSHA256().Write(challenge.data(), challenge.size()).Finalize(challenge_hash.begin());
++
++    HashWriter hasher{HASHER_SIGNET_SLH_BLOCK};
++    hasher << challenge_hash << header.nVersion << header.hashPrevBlock << digest.merkle_root << header.nTime;
++    digest.message = hasher.GetSHA256();
++    return digest;
++}
++
++std::optional<SignetSLHBlockDigest> ComputeSignetSLHBlockMessage(const CBlock& block, std::span<const uint8_t> challenge)
++{
++    if (block.vtx.empty()) return std::nullopt;
++    std::vector<uint256> other_txids;
++    other_txids.reserve(block.vtx.size() - 1);
++    for (size_t i{1}; i < block.vtx.size(); ++i) other_txids.push_back(block.vtx[i]->GetHash().ToUint256());
++    return ComputeSignetSLHBlockMessage(block, *block.vtx[0], other_txids, challenge);
++}
++
++std::optional<uint256> SignetSLHBlockMessage(const CBlock& block, std::span<const uint8_t> challenge)
++{
++    const auto digest{ComputeSignetSLHBlockMessage(block, challenge)};
++    if (!digest) return std::nullopt;
++    return digest->message;
++}
++
++std::optional<std::span<const unsigned char>> SignetSLHBlockSignature(const CBlock& block)
++{
++    // Rules 4B-1 and 4B-2, by bytes at fixed offsets only. Nothing here parses a script (no GetOp,
++    // no CheckMinimalPush), so no form of these bytes can reach an assertion.
++    if (block.vtx.empty()) return std::nullopt;
++    const int cidx{GetWitnessCommitmentIndex(block)};
++    if (cidx == NO_WITNESS_COMMITMENT || cidx < 1) return std::nullopt;
++    const std::vector<CTxOut>& outs{block.vtx[0]->vout};
++    const size_t slh_index{static_cast<size_t>(cidx - 1)};
++    const CTxOut& slh{outs[slh_index]};
++    if (slh.nValue != 0 || slh.scriptPubKey.size() != SIGNET_SLH_SCRIPT_SIZE) return std::nullopt;
++    if (!std::equal(SIGNET_SLH_SCRIPT_PREFIX.begin(), SIGNET_SLH_SCRIPT_PREFIX.end(), slh.scriptPubKey.begin())) return std::nullopt;
++    // No other coinbase output may start like an SLH output, whatever version byte follows.
++    for (size_t i{0}; i < outs.size(); ++i) {
++        if (i == slh_index) continue;
++        const CScript& script{outs[i].scriptPubKey};
++        if (script.size() >= SIGNET_SLH_UNIQUE_PREFIX_SIZE &&
++            std::equal(SIGNET_SLH_SCRIPT_PREFIX.begin(), SIGNET_SLH_SCRIPT_PREFIX.begin() + SIGNET_SLH_UNIQUE_PREFIX_SIZE, script.begin())) {
++            return std::nullopt;
++        }
++    }
++    return std::span<const unsigned char>{slh.scriptPubKey.data() + SIGNET_SLH_SCRIPT_PREFIX.size(), SLHDSA128S_SIGNATURE_SIZE};
++}
++
++bool CheckSignetSLHBlock(const CBlock& block, const Consensus::Params& consensusParams)
++{
++    const auto& rule{consensusParams.signet_slh_block};
++    if (!rule || block.GetHash() == consensusParams.hashGenesisBlock) return true;
++
++    // As for the ML-DSA-44 block signature: the height the coinbase commits to (BIP34), and a
++    // height that cannot be read counts as reached.
++    const std::optional<int> height{CoinbaseHeight(block)};
++    const bool enforced{!height || *height >= rule->height};
++    // Below the height nothing is rejected, and the block is only looked at to log whether it
++    // would pass, so that the signatures can be checked before they are enforced.
++    if (!enforced && !LogAcceptCategory(BCLog::VALIDATION, BCLog::Level::Debug)) return true;
++
++    // The form first, then slh_merkle, then the signature.
++    const std::optional<std::span<const unsigned char>> signature{SignetSLHBlockSignature(block)};
++    bool valid{false};
++    if (signature) {
++        const std::optional<uint256> message{SignetSLHBlockMessage(block, consensusParams.signet_challenge)};
++        valid = message && SLHDSA128SVerify(std::span<const unsigned char>{rule->pubkey},
++                                            std::span<const unsigned char>{message->data(), message->size()},
++                                            MakeUCharSpan(SIGNET_SLH_CONTEXT),
++                                            *signature);
++    }
++    if (!enforced) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetSLHBlock: block %s below height %d, SLH-DSA block signature %s\n",
++                 block.GetHash().ToString(), rule->height, !signature ? "absent or not in the required form" : valid ? "valid" : "invalid");
++        return true;
++    }
++    if (!signature) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetSLHBlock: Errors in block (no SLH-DSA block signature in the required form)\n");
++        return false;
++    }
++    if (!valid) {
++        LogDebug(BCLog::VALIDATION, "CheckSignetSLHBlock: Errors in block (SLH-DSA block signature invalid)\n");
++        return false;
++    }
++    return true;
++}
+diff --git a/src/signet.h b/src/signet.h
+index c23cc46..042d294 100644
+--- a/src/signet.h
++++ b/src/signet.h
+@@ -10,6 +10,7 @@
+ #include <uint256.h>
+ 
+ #include <array>
++#include <cstddef>
+ #include <cstdint>
+ #include <optional>
+ #include <span>
+@@ -46,6 +47,60 @@ std::optional<uint256> SignetPQBlockMessage(const CBlock& block, std::span<const
+  */
+ bool CheckSignetPQBlock(const CBlock& block, const Consensus::Params& consensusParams);
+ 
++/** Header of the output that carries a signet's SLH-DSA-SHA2-128s block signature
++ *  (doc/signet-slhblock.md): "PQH1". */
++inline constexpr std::array<uint8_t, 4> SIGNET_SLH_HEADER{0x50, 0x51, 0x48, 0x31};
++/** Format version that follows the header in that output. */
++inline constexpr uint8_t SIGNET_SLH_VERSION{0x01};
++/** The first bytes of the SLH output's script: OP_RETURN, OP_PUSHDATA2 with the little-endian
++ *  length 0x1eb5 = 7861 (header, version and the 7856-byte signature), the header and the version. */
++inline constexpr std::array<uint8_t, 9> SIGNET_SLH_SCRIPT_PREFIX{0x6a, 0x4d, 0xb5, 0x1e, 0x50, 0x51, 0x48, 0x31, SIGNET_SLH_VERSION};
++/** How many of those bytes no other coinbase output may start with: all but the version. */
++inline constexpr size_t SIGNET_SLH_UNIQUE_PREFIX_SIZE{8};
++/** Size of the SLH output's script: the prefix and the 7856-byte signature, 7865 bytes. */
++inline constexpr size_t SIGNET_SLH_SCRIPT_SIZE{SIGNET_SLH_SCRIPT_PREFIX.size() + 7856};
++
++/** What the SLH-DSA block signature covers: slh_coinbase, slh_merkle and slh_msg (doc/signet-slhblock.md). */
++struct SignetSLHBlockDigest {
++    //! The coinbase the ML-DSA-44 block signature covers, with the SLH output cut back to
++    //! OP_RETURN <SIGNET_SLH_HEADER || SIGNET_SLH_VERSION>.
++    CMutableTransaction coinbase;
++    //! The merkle root over that coinbase and the block's other transactions.
++    uint256 merkle_root;
++    //! TaggedHash("SignetSLHBlock", SHA256(challenge) || nVersion || hashPrevBlock || merkle_root || nTime).
++    uint256 message;
++};
++
++/**
++ * slh_coinbase, slh_merkle and slh_msg of a block given by its header, its coinbase and the txids
++ * of its other transactions. The SLH output is the one right before the witness commitment output
++ * (the last one Core takes as the commitment). nullopt when the coinbase has no witness commitment
++ * or the commitment is its first output. Whatever the SLH output holds, it is cut back.
++ */
++std::optional<SignetSLHBlockDigest> ComputeSignetSLHBlockMessage(const CBlockHeader& header, const CTransaction& coinbase,
++                                                                std::span<const uint256> other_txids, std::span<const uint8_t> challenge);
++/** The same for a whole block; nullopt also when it has no transactions. */
++std::optional<SignetSLHBlockDigest> ComputeSignetSLHBlockMessage(const CBlock& block, std::span<const uint8_t> challenge);
++/** slh_msg alone: the 32-byte message a signet's SLH-DSA block signature signs. */
++std::optional<uint256> SignetSLHBlockMessage(const CBlock& block, std::span<const uint8_t> challenge);
++
++/**
++ * The SLH-DSA signature of a block whose coinbase has its SLH output in exactly the required form
++ * (rules 4B-1 and 4B-2 of doc/signet-slhblock.md): at index c - 1, where c >= 1 is the witness
++ * commitment's index, with amount 0 and a script of SIGNET_SLH_SCRIPT_SIZE bytes that starts with
++ * SIGNET_SLH_SCRIPT_PREFIX, and no other output starting with the first
++ * SIGNET_SLH_UNIQUE_PREFIX_SIZE bytes of it. Only bytes at fixed offsets are compared: the scripts
++ * are never parsed. The span points into the block. nullopt when the form is not that one.
++ */
++std::optional<std::span<const unsigned char>> SignetSLHBlockSignature(const CBlock& block);
++
++/**
++ * Check the SLH-DSA-SHA2-128s block signature of a signet that requires one from a height on
++ * (Consensus::Params::signet_slh_block, doc/signet-slhblock.md). True when the network requires
++ * none and for blocks below that height, whose signature, if any, is only logged.
++ */
++bool CheckSignetSLHBlock(const CBlock& block, const Consensus::Params& consensusParams);
++
+ /**
+  * Generate the signet tx corresponding to the given block
+  *
+diff --git a/src/validation.cpp b/src/validation.cpp
+index 86fd1fc..559f343 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -4507,6 +4507,14 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
+         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-signet-pqblk", "signet ML-DSA-44 block signature validation failure");
+     }
+ 
++    // Signet only: the SLH-DSA-SHA2-128s block signature some signets require from a height on, next
++    // to the ML-DSA-44 one (doc/signet-slhblock.md). On the same condition and for the same reasons
++    // as the check above, after it, so that a block that fails both is reported for the older rule.
++    // It does not depend on the UTXO set, so it stays in CheckBlock.
++    if (consensusParams.signet_blocks && fCheckPOW && !CheckSignetSLHBlock(block, consensusParams)) {
++        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-signet-slhblk", "signet SLH-DSA block signature validation failure");
++    }
++
+     if (fCheckPOW && fCheckMerkleRoot)
+         block.fChecked = true;
+ 
+-- 
+2.43.0
+

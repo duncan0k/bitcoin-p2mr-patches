@@ -1,0 +1,775 @@
+From 33cef66db1e510b214a17c5a616480720e706538 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 08:43:43 +0000
+Subject: [PATCH 097/105] consensus: deploy P2MR leaf version 0xe2 with lattice
+ tripwire outputs, inactive on Ark-0
+
+A buried deployment, p2mr_lattice_tripwire, the last of the buried
+deployments, sets SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE on blocks at or above
+its height where P2MR is active too, so that P2MR leaves of leaf version
+0xe2 execute there. Next to its height, P2MRLatticeTripwireHeight, the
+consensus parameters gain the lattice tripwire outputs,
+p2mr_lattice_tripwires: from that height on, validation is to fail
+OP_CHECKMLDSA44 checks in those leaves in every block whose parent leaves
+one of them missing, which a later commit in this series implements. An
+output is present while it is unspent and was created below that height.
+
+- On the Ark-0 signet the height and the three outputs are rules of that
+  network, ARK0_LATTICE_TRIPWIRE_HEIGHT and ARK0_LATTICE_TRIPWIRE_OUTPOINTS,
+  each output with the SHA256 of the ML-DSA-44 key its leaf checks and a
+  label. Neither is decided yet: the height is
+  std::numeric_limits<int>::max() and the list is empty, so this build does
+  not activate the rules on Ark-0, and leaf version 0xe2 stays an unknown
+  leaf version there, as 0xe0 did before its height was set; a node there
+  says so at startup. A commit of its own will set both, with the creation
+  height of the outputs, once they are confirmed below the height. Static
+  asserts keep the height above those of OP_CHECKMLDSA44 and of the
+  tripwire rules of leaf version 0xe0, and at or above that of
+  OP_CHECKSLHDSA128S. They also tie the height to the outputs as M3's
+  constants do: while it is never, there is no creation height and no
+  output; once it is finite, a creation height below it and exactly
+  three distinct outputs with non-null txids, labelled "NUMS ML-DSA-44",
+  "destroyed key" and "drill", the first with the NUMS key. The outputs
+  are a constant array, ARK0_LATTICE_TRIPWIRES, so that all of it is
+  checked at compile time.
+- The NUMS key of the first output is fixed by its construction: the domain
+  separation tag "MLDSA44-NUMS/v1", the label "lattice-tripwire/0", and the
+  SHA256 of the key, 591dae31...92805, which a unit test computes again.
+- Another custom signet gets the rules only from
+  -signetlatticetripwire=<height>@<txid:vout>[,<txid:vout>...], which needs
+  -signetchallenge, -signetmldsa44, -signettripwire and -signetslhdsa128s,
+  with the heights of the tripwire rules and of OP_CHECKSLHDSA128S at or
+  below its own (and that of OP_CHECKMLDSA44 below the tripwire's, as
+  -signettripwire already requires). The Ark-0 and the default signet
+  refuse it. An outpoint with a null txid is refused: no output has it,
+  and every coinbase input names it. -signettripwire keeps its syntax.
+- Regtest activates leaf version 0xe2 where OP_CHECKMLDSA44, leaf version
+  0xe0 and OP_CHECKSLHDSA128S are all active, without lattice tripwire outputs,
+  unless -testactivationheight=p2mr_lattice_tripwire@N moves it.
+  -signetlatticetripwire works there too and then sets the height, which
+  must not also be given by -testactivationheight. Whatever sets it, a
+  node refuses to start when the final height is below the final height
+  of p2mr_mldsa44, p2mr_tripwire or p2mr_slhdsa128s: the mempool's removals
+  below the heights of the two opcodes look at leaf versions 0xc0 and 0xe0
+  only, and a spend of leaf version 0xe2 accepted above them would
+  otherwise stay in the mempool after a reorganization below them.
+- Mainnet, testnet3, testnet4 and the default signet never activate it. A
+  node refuses to start with -signetlatticetripwire on a chain it is not
+  for, whatever its value.
+
+ValidDeployment now names DEPLOYMENT_P2MR_LATTICE_TRIPWIRE as the last
+buried deployment. getdeploymentinfo reports the deployment, and a signet or
+regtest node with lattice tripwire rules logs the height and the outputs at
+startup: the outpoints, and for those the code fixes their label and the
+SHA256 of their key. The startup line of OP_CHECKSLHDSA128S names leaf
+version 0xe2 among the leaf versions it executes in where the deployment
+is enabled. feature_p2mr_slhdsa128s.py, whose regtest node now executes
+leaf version 0xe2 from the height of OP_CHECKSLHDSA128S, expects that line.
+---
+ src/chainparams.cpp                        |  98 +++++++++++++++++--
+ src/chainparamsbase.cpp                    |   3 +-
+ src/consensus/params.h                     |  33 ++++++-
+ src/deploymentinfo.cpp                     |   4 +
+ src/init.cpp                               |  16 +++-
+ src/kernel/chainparams.cpp                 |  82 ++++++++++++++++
+ src/kernel/chainparams.h                   | 106 ++++++++++++++++++++-
+ src/rpc/blockchain.cpp                     |   1 +
+ src/validation.cpp                         |   7 ++
+ test/functional/feature_p2mr_slhdsa128s.py |   3 +-
+ test/functional/rpc_blockchain.py          |   3 +-
+ 11 files changed, 341 insertions(+), 15 deletions(-)
+
+diff --git a/src/chainparams.cpp b/src/chainparams.cpp
+index 071bbaf..5c7524d 100644
+--- a/src/chainparams.cpp
++++ b/src/chainparams.cpp
+@@ -23,29 +23,32 @@
+ #include <optional>
+ #include <stdexcept>
+ #include <string>
++#include <utility>
+ #include <vector>
+ 
+ using util::SplitString;
+ 
+ /**
+  * -signettripwire=<height>@<txid:vout>[,<txid:vout>...] (doc/p2mr-tripwire.md): the height from
+- * which P2MR leaves of leaf version 0xe0 execute, and the tripwire outputs. nullopt without it.
++ * which P2MR leaves of leaf version 0xe0 execute, and the tripwire outputs; or, with
++ * name -signetlatticetripwire and the same syntax (doc/p2mr-lattice-tripwire.md), the height from
++ * which those of leaf version 0xe2 execute, and the lattice tripwire outputs. nullopt without it.
+  */
+-static std::optional<CChainParams::TripwireOptions> ReadTripwireArg(const ArgsManager& args)
++static std::optional<CChainParams::TripwireOptions> ReadTripwireArg(const ArgsManager& args, const std::string& name = "-signettripwire")
+ {
+-    const auto values{args.GetArgs("-signettripwire")};
++    const auto values{args.GetArgs(name)};
+     if (values.empty()) return std::nullopt;
+     if (values.size() != 1) {
+-        throw std::runtime_error("-signettripwire cannot be multiple values.");
++        throw std::runtime_error(strprintf("%s cannot be multiple values.", name));
+     }
+     const auto& value{values[0]};
+-    const std::string malformed{strprintf("-signettripwire must be <height>@<txid:vout>[,<txid:vout>...], not '%s'.", value)};
++    const std::string malformed{strprintf("%s must be <height>@<txid:vout>[,<txid:vout>...], not '%s'.", name, value)};
+     const auto at{value.find('@')};
+     if (at == std::string::npos) throw std::runtime_error(malformed);
+     const auto height{ToIntegral<int32_t>(value.substr(0, at))};
+     if (!height) throw std::runtime_error(malformed);
+     if (*height < 1 || *height == std::numeric_limits<int>::max()) {
+-        throw std::runtime_error(strprintf("-signettripwire height must be at least 1 and below %d, not %d.", std::numeric_limits<int>::max(), *height));
++        throw std::runtime_error(strprintf("%s height must be at least 1 and below %d, not %d.", name, std::numeric_limits<int>::max(), *height));
+     }
+     CChainParams::TripwireOptions tripwire{.height = *height, .outpoints = {}};
+     for (const std::string& item : SplitString(value.substr(at + 1), ',')) {
+@@ -56,13 +59,30 @@ static std::optional<CChainParams::TripwireOptions> ReadTripwireArg(const ArgsMa
+         if (!txid || !vout) throw std::runtime_error(malformed);
+         const COutPoint outpoint{*txid, *vout};
+         if (std::ranges::find(tripwire.outpoints, outpoint) != tripwire.outpoints.end()) {
+-            throw std::runtime_error(strprintf("-signettripwire names %s more than once.", item));
++            throw std::runtime_error(strprintf("%s names %s more than once.", name, item));
+         }
+         tripwire.outpoints.push_back(outpoint);
+     }
+     return tripwire;
+ }
+ 
++/**
++ * -signetlatticetripwire, in the syntax of -signettripwire (doc/p2mr-lattice-tripwire.md). An outpoint
++ * with a null txid is refused: no output has it, and it is the prevout of every coinbase input.
++ */
++static std::optional<CChainParams::TripwireOptions> ReadLatticeTripwireArg(const ArgsManager& args)
++{
++    auto lattice{ReadTripwireArg(args, "-signetlatticetripwire")};
++    if (!lattice) return std::nullopt;
++    for (const COutPoint& outpoint : lattice->outpoints) {
++        if (outpoint.hash.IsNull()) {
++            throw std::runtime_error(strprintf("-signetlatticetripwire names %s:%u, whose txid is null: no output has it.",
++                                               outpoint.hash.ToString(), outpoint.n));
++        }
++    }
++    return lattice;
++}
++
+ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
+ {
+     if (!args.GetArgs("-signetseednode").empty()) {
+@@ -83,7 +103,7 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+     // genesis block and message start): none of the options that change the rules of a custom signet
+     // may change its rules.
+     if (options.challenge && IsDefaultSignetChallenge(*options.challenge)) {
+-        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue"}) {
++        for (const char* arg : {"-signetpowtargetspacing", "-signetpqblock", "-signetmldsa44", "-signetslhdsa128s", "-signettripwire", "-signetrescue", "-signetlatticetripwire"}) {
+             if (!args.GetArgs(arg).empty()) {
+                 throw std::runtime_error(strprintf("%s cannot be used on the default signet, whose rules are fixed in the code.", arg));
+             }
+@@ -231,6 +251,33 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
+         }
+         options.rescue_height = *height;
+     }
++    // Leaf version 0xe2 (doc/p2mr-lattice-tripwire.md) runs OP_CHECKMLDSA44, which its lattice tripwire
++    // disables, follows the tripwire of leaf version 0xe0 for its elliptic curve checks, and leaves
++    // OP_CHECKSLHDSA128S as the way to spend once ML-DSA-44 is disabled: all three come at or before it.
++    if (auto lattice{ReadLatticeTripwireArg(args)}) {
++        if (!options.challenge) {
++            throw std::runtime_error("-signetlatticetripwire requires -signetchallenge.");
++        }
++        if (IsArk0SignetChallenge(*options.challenge)) {
++            throw std::runtime_error("-signetlatticetripwire cannot be used on the Ark-0 signet, whose rules are fixed in the code.");
++        }
++        if (!options.mldsa44_height) {
++            throw std::runtime_error("-signetlatticetripwire requires -signetmldsa44.");
++        }
++        if (!options.tripwire) {
++            throw std::runtime_error("-signetlatticetripwire requires -signettripwire.");
++        }
++        if (!options.slhdsa128s_height) {
++            throw std::runtime_error("-signetlatticetripwire requires -signetslhdsa128s.");
++        }
++        if (lattice->height < options.tripwire->height) {
++            throw std::runtime_error(strprintf("-signetlatticetripwire height must be at or above the -signettripwire height %d, not %d.", options.tripwire->height, lattice->height));
++        }
++        if (lattice->height < *options.slhdsa128s_height) {
++            throw std::runtime_error(strprintf("-signetlatticetripwire height must be at or above the -signetslhdsa128s height %d, not %d.", *options.slhdsa128s_height, lattice->height));
++        }
++        options.lattice_tripwire = std::move(*lattice);
++    }
+ }
+ 
+ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& options)
+@@ -271,6 +318,38 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
+         }
+         options.tripwire = std::move(*tripwire);
+     }
++    // -signetlatticetripwire (doc/p2mr-lattice-tripwire.md) sets the height of p2mr_lattice_tripwire.
++    // Leaf version 0xe2 runs OP_CHECKMLDSA44, follows the tripwire of leaf version 0xe0 and falls back on
++    // OP_CHECKSLHDSA128S, and the mempool's removals below the heights of the two opcodes leave its
++    // spends to the removal below its own height: its final height, given by either option or by
++    // default the highest of the three (kernel/chainparams.cpp), must be at or above the final heights
++    // of p2mr_mldsa44, p2mr_tripwire and p2mr_slhdsa128s.
++    if (auto lattice{ReadLatticeTripwireArg(args)}) {
++        if (options.activation_heights.contains(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++            throw std::runtime_error("-signetlatticetripwire sets the height of p2mr_lattice_tripwire, which -testactivationheight cannot set too.");
++        }
++        options.lattice_tripwire = std::move(*lattice);
++    }
++    {
++        const auto height_of{[&](Consensus::BuriedDeployment dep) {
++            const auto it{options.activation_heights.find(dep)};
++            return it == options.activation_heights.end() ? 0 : it->second;
++        }};
++        const int mldsa44_height{height_of(Consensus::DEPLOYMENT_P2MR_MLDSA44)};
++        const int tripwire_height{options.tripwire ? options.tripwire->height : height_of(Consensus::DEPLOYMENT_P2MR_TRIPWIRE)};
++        const int slhdsa128s_height{height_of(Consensus::DEPLOYMENT_P2MR_SLHDSA128S)};
++        const auto explicit_lattice{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)};
++        const int lattice_height{options.lattice_tripwire ? options.lattice_tripwire->height :
++                                 explicit_lattice != options.activation_heights.end() ? explicit_lattice->second :
++                                                                                        std::max({mldsa44_height, tripwire_height, slhdsa128s_height})};
++        for (const auto& [name, height] : {std::pair{"p2mr_mldsa44", mldsa44_height},
++                                           std::pair{"p2mr_tripwire", tripwire_height},
++                                           std::pair{"p2mr_slhdsa128s", slhdsa128s_height}}) {
++            if (lattice_height < height) {
++                throw std::runtime_error(strprintf("The p2mr_lattice_tripwire height must be at or above the %s height %d, not %d.", name, height, lattice_height));
++            }
++        }
++    }
+     // The P2MR rescue lane (doc/p2mr-rescue.md) follows the final height of p2mr_tripwire, once both
+     // -testactivationheight and -signettripwire are read; an explicit height must not be below it.
+     if (const auto rescue{options.activation_heights.find(Consensus::DEPLOYMENT_P2MR_RESCUE)}; rescue != options.activation_heights.end()) {
+@@ -345,6 +424,9 @@ std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, c
+     if (chain != ChainType::SIGNET && chain != ChainType::REGTEST && args.IsArgSet("-signettripwire")) {
+         throw std::runtime_error("-signettripwire can only be used with signet or regtest.");
+     }
++    if (chain != ChainType::SIGNET && chain != ChainType::REGTEST && args.IsArgSet("-signetlatticetripwire")) {
++        throw std::runtime_error("-signetlatticetripwire can only be used with signet or regtest.");
++    }
+     switch (chain) {
+     case ChainType::MAIN:
+         return CChainParams::Main();
+diff --git a/src/chainparamsbase.cpp b/src/chainparamsbase.cpp
+index b08d603..ef6cd67 100644
+--- a/src/chainparamsbase.cpp
++++ b/src/chainparamsbase.cpp
+@@ -16,7 +16,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
+                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s, p2mr_rescue). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
++    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (segwit, bip34, dersig, cltv, csv, p2mr, p2mr_mldsa44, p2mr_tripwire, p2mr_slhdsa128s, p2mr_rescue, p2mr_lattice_tripwire). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+     argsman.AddArg("-testnet", "Use the testnet3 chain. Equivalent to -chain=test. Support for testnet3 is deprecated and will be removed in an upcoming release. Consider moving to testnet4 now by using -testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-testnet4", "Use the testnet4 chain. Equivalent to -chain=testnet4.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-vbparams=deployment:start:end[:min_activation_height]", "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+@@ -28,6 +28,7 @@ void SetupChainParamsBaseOptions(ArgsManager& argsman)
+     argsman.AddArg("-signetmldsa44=<height>", "Execute OP_CHECKMLDSA44 in P2MR leaves from <height> (at least 1) on; see doc/p2mr-mldsa44.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signettripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe0 from <height> (at least 1) on, and from there fail their elliptic curve signature checks in every block whose parent leaves one of these tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge and -signetmldsa44 below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_tripwire, which must be above that of p2mr_mldsa44 (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetrescue=<height>", "Open the P2MR rescue lane from <height> (at least 1, and at or above the -signettripwire height) on: in executed P2MR leaves of leaf version 0xe0, an elliptic curve signature check whose signature is a rescue token is checked with the rescue proof in the input's annex; see doc/p2mr-rescue.md. This relaxes the rules (a hard fork): every node must use the same value before the chain reaches <height>. Requires -signetchallenge and -signettripwire, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
++    argsman.AddArg("-signetlatticetripwire=<height>@<txid:vout>[,<txid:vout>...]", "Execute P2MR leaves of leaf version 0xe2 from <height> (at least 1) on, their elliptic curve signature checks following the tripwire of leaf version 0xe0, and from there fail their OP_CHECKMLDSA44 checks with a non-empty signature in every block whose parent leaves one of these lattice tripwire outputs missing: spent, never created, or created at or above <height>; see doc/p2mr-lattice-tripwire.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. On a signet it requires -signetchallenge, -signetmldsa44, -signettripwire and -signetslhdsa128s at or below <height>, and is refused on the Ark-0 signet, whose rules are fixed in the code; on regtest it sets the height of p2mr_lattice_tripwire, which must be at or above those of p2mr_mldsa44, p2mr_tripwire and p2mr_slhdsa128s (only for signet and regtest networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+     argsman.AddArg("-signetslhdsa128s=<height>", "Execute OP_CHECKSLHDSA128S in P2MR leaves from <height> (at least 1) on; see doc/p2mr-slhdsa128s.md. This is a consensus rule of the network: every node must use the same value before the chain reaches <height>. Requires -signetchallenge, and is refused on the Ark-0 signet, whose rules are fixed in the code (only for signet networks)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
+ }
+ 
+diff --git a/src/consensus/params.h b/src/consensus/params.h
+index de9c408..e6af36c 100644
+--- a/src/consensus/params.h
++++ b/src/consensus/params.h
+@@ -36,8 +36,9 @@ enum BuriedDeployment : int16_t {
+     DEPLOYMENT_P2MR_TRIPWIRE,
+     DEPLOYMENT_P2MR_SLHDSA128S,
+     DEPLOYMENT_P2MR_RESCUE,
++    DEPLOYMENT_P2MR_LATTICE_TRIPWIRE,
+ };
+-constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_RESCUE; }
++constexpr bool ValidDeployment(BuriedDeployment dep) { return dep <= DEPLOYMENT_P2MR_LATTICE_TRIPWIRE; }
+ 
+ enum DeploymentPos : uint16_t {
+     DEPLOYMENT_TESTDUMMY,
+@@ -117,6 +118,19 @@ struct P2MRTripwire {
+     std::string label{};
+ };
+ 
++/**
++ * A lattice tripwire output of the P2MR lattice tripwire rules
++ * (doc/p2mr-lattice-tripwire.md); see Params::p2mr_lattice_tripwires.
++ */
++struct P2MRLatticeTripwire {
++    COutPoint outpoint;
++    //! Only for the outputs this code fixes for the Ark-0 signet: the SHA256 of the
++    //! ML-DSA-44 public key the output's leaf checks, and a label. Unset for those an
++    //! option names.
++    std::optional<uint256> key_sha256{};
++    std::string label{};
++};
++
+ /**
+  * Parameters that influence chain consensus.
+  */
+@@ -165,6 +179,13 @@ struct Params {
+      * but the Ark-0 signet (from ARK0_RESCUE_HEIGHT, 51000), a custom signet given -signetrescue,
+      * and regtest. Never below P2MRTripwireHeight. */
+     int P2MRRescueHeight;
++    /** Block height at which P2MR leaves of leaf version 0xe2 execute, and from which their
++     * OP_CHECKMLDSA44 checks fail in every block whose parent leaves a lattice tripwire output
++     * missing (doc/p2mr-lattice-tripwire.md). std::numeric_limits<int>::max() on every chain
++     * but a custom signet given -signetlatticetripwire and regtest; on the Ark-0 signet it
++     * stays there until ARK0_LATTICE_TRIPWIRE_HEIGHT and the outputs are decided. Never below
++     * P2MRTripwireHeight or P2MRSLHDSA128SHeight. */
++    int P2MRLatticeTripwireHeight;
+     /** The network id rescue proofs are bound to: SHA256 of the signet challenge on a signet,
+      * SHA256("regtest") on regtest, unset elsewhere (doc/p2mr-rescue.md). */
+     std::optional<uint256> p2mr_rescue_network_id;
+@@ -210,6 +231,14 @@ struct Params {
+      * elliptic curve signature checks in P2MR leaves of leaf version 0xe0.
+      */
+     std::vector<P2MRTripwire> p2mr_tripwires{};
++    /**
++     * The lattice tripwire outputs of the P2MR lattice tripwire rules
++     * (doc/p2mr-lattice-tripwire.md). One is present while it is an unspent output
++     * created below P2MRLatticeTripwireHeight; from that height on, a block whose
++     * parent leaves any of them missing fails OP_CHECKMLDSA44 checks with a
++     * non-empty signature in P2MR leaves of leaf version 0xe2.
++     */
++    std::vector<P2MRLatticeTripwire> p2mr_lattice_tripwires{};
+     /** The timespan the retarget for the block at `height` measures against. */
+     int64_t PowTargetTimespan(int64_t height) const
+     {
+@@ -253,6 +282,8 @@ struct Params {
+             return P2MRSLHDSA128SHeight;
+         case DEPLOYMENT_P2MR_RESCUE:
+             return P2MRRescueHeight;
++        case DEPLOYMENT_P2MR_LATTICE_TRIPWIRE:
++            return P2MRLatticeTripwireHeight;
+         } // no default case, so the compiler can warn about missing cases
+         return std::numeric_limits<int>::max();
+     }
+diff --git a/src/deploymentinfo.cpp b/src/deploymentinfo.cpp
+index 50b7c3b..14ce398 100644
+--- a/src/deploymentinfo.cpp
++++ b/src/deploymentinfo.cpp
+@@ -43,6 +43,8 @@ std::string DeploymentName(Consensus::BuriedDeployment dep)
+         return "p2mr_slhdsa128s";
+     case Consensus::DEPLOYMENT_P2MR_RESCUE:
+         return "p2mr_rescue";
++    case Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE:
++        return "p2mr_lattice_tripwire";
+     } // no default case, so the compiler can warn about missing cases
+     return "";
+ }
+@@ -69,6 +71,8 @@ std::optional<Consensus::BuriedDeployment> GetBuriedDeployment(const std::string
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_SLHDSA128S;
+     } else if (name == "p2mr_rescue") {
+         return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE;
++    } else if (name == "p2mr_lattice_tripwire") {
++        return Consensus::BuriedDeployment::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE;
+     }
+     return std::nullopt;
+ }
+diff --git a/src/init.cpp b/src/init.cpp
+index fb8fb52..fb3f4c6 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -69,6 +69,7 @@
+ #include <rpc/server.h>
+ #include <rpc/util.h>
+ #include <scheduler.h>
++#include <script/interpreter.h>
+ #include <script/sigcache.h>
+ #include <sync.h>
+ #include <torcontrol.h>
+@@ -965,9 +966,20 @@ bool AppInitParameterInteraction(const ArgsManager& args)
+     }
+     // OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) is only enabled on a signet given
+     // -signetslhdsa128s, on regtest, and on the Ark-0 signet from ARK0_SLHDSA128S_HEIGHT. It executes
+-    // in the leaf versions that execute as tapscript: 0xc0, and 0xe0 from the P2MR tripwire height.
++    // in the leaf versions that execute as tapscript: 0xc0, 0xe0 from the P2MR tripwire height, and 0xe2
++    // from the P2MR lattice tripwire height where that has one.
+     if (DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_SLHDSA128S)) {
+-        LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0)", chainparams.GetConsensus().P2MRSLHDSA128SHeight);
++        LogInfo("P2MR SLH-DSA-SHA2-128s rules active from height %d (leaf versions 0xc0, 0xe0%s)", chainparams.GetConsensus().P2MRSLHDSA128SHeight,
++                DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE) ? ", 0xe2" : "");
++    }
++    // Leaf version 0xe2 and its lattice tripwire outputs (doc/p2mr-lattice-tripwire.md) are only
++    // enabled on a signet given -signetlatticetripwire and on regtest, which log them as the chain
++    // parameters are made. On the Ark-0 signet they are not decided yet: say so, so that an operator
++    // does not take leaf version 0xe2 for one that executes there.
++    if (chainparams.GetChainType() == ChainType::SIGNET && IsArk0SignetChallenge(chainparams.GetConsensus().signet_challenge) &&
++        !DeploymentEnabled(chainparams.GetConsensus(), Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        LogInfo("P2MR lattice tripwire rules (leaf version 0x%02x) are not active on the Ark-0 signet: their height and outputs are not decided yet",
++                P2MR_LEAF_LATTICE_TRIPWIRED);
+     }
+     // The P2MR rescue lane (doc/p2mr-rescue.md) is only open on a signet given -signetrescue, on
+     // regtest, and on the Ark-0 signet from ARK0_RESCUE_HEIGHT, where a node logs "Signet P2MR rescue
+diff --git a/src/kernel/chainparams.cpp b/src/kernel/chainparams.cpp
+index bebaf4c..94ba421 100644
+--- a/src/kernel/chainparams.cpp
++++ b/src/kernel/chainparams.cpp
+@@ -21,6 +21,7 @@
+ #include <script/script.h>
+ #include <uint256.h>
+ #include <util/chaintype.h>
++#include <util/check.h>
+ #include <util/log.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
+@@ -115,6 +116,25 @@ static const std::vector<Consensus::P2MRTripwire> ARK0_TRIPWIRE_OUTPOINTS{
+     },
+ };
+ 
++//! The lattice tripwire outputs of the Ark-0 signet, ARK0_LATTICE_TRIPWIRES in kernel/chainparams.h,
++//! as consensus parameters: none while they are not decided.
++static std::vector<Consensus::P2MRLatticeTripwire> Ark0LatticeTripwireOutpoints()
++{
++    std::vector<Consensus::P2MRLatticeTripwire> tripwires;
++    for (const Ark0LatticeTripwire& t : ARK0_LATTICE_TRIPWIRES) {
++        // SHA256 in the byte order it is printed in, as HexStr gives it back.
++        const std::vector<unsigned char> key_hash{ParseHex(t.key_sha256)};
++        uint256 key_sha256;
++        std::copy(key_hash.begin(), key_hash.end(), key_sha256.begin());
++        tripwires.push_back(Consensus::P2MRLatticeTripwire{
++            .outpoint = COutPoint{*Assert(Txid::FromHex(t.txid)), t.vout},
++            .key_sha256 = key_sha256,
++            .label = std::string{t.label},
++        });
++    }
++    return tripwires;
++}
++
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge)
+ {
+     return std::ranges::equal(challenge, ARK0_SIGNET_CHALLENGE);
+@@ -153,6 +173,20 @@ static std::string DescribeTripwireRules(const Consensus::Params& consensus)
+                      outputs.empty() ? "no tripwire outputs" : "tripwire outputs " + util::Join(outputs, " and "));
+ }
+ 
++std::string DescribeLatticeTripwireRules(const Consensus::Params& consensus)
++{
++    std::vector<std::string> outputs;
++    for (const auto& tripwire : consensus.p2mr_lattice_tripwires) {
++        std::string output{strprintf("%s:%u", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n)};
++        if (!tripwire.label.empty() && tripwire.key_sha256) {
++            output += strprintf(" (%s, pk SHA256 %s)", tripwire.label, HexStr(*tripwire.key_sha256));
++        }
++        outputs.push_back(std::move(output));
++    }
++    return strprintf("P2MR lattice tripwire rules from height %d in leaf version 0x%02x; %s", consensus.P2MRLatticeTripwireHeight,
++                     P2MR_LEAF_LATTICE_TRIPWIRED, outputs.empty() ? "no lattice tripwire outputs" : "tripwire outputs " + util::Join(outputs, ", "));
++}
++
+ static CBlock CreateGenesisBlock(const char* pszTimestamp, const CScript& genesisOutputScript, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion, const CAmount& genesisReward)
+ {
+     CMutableTransaction txNew;
+@@ -217,6 +251,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRLatticeTripwireHeight = std::numeric_limits<int>::max(); // nor do lattice tripwired leaves
+         consensus.MinBIP9WarningHeight = 483840; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -353,6 +388,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRLatticeTripwireHeight = std::numeric_limits<int>::max(); // nor do lattice tripwired leaves
+         consensus.MinBIP9WarningHeight = 836640; // segwit activation height + miner confirmation window
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -465,6 +501,7 @@ public:
+         consensus.P2MRTripwireHeight = std::numeric_limits<int>::max(); // nor do tripwired leaves
+         consensus.P2MRSLHDSA128SHeight = std::numeric_limits<int>::max(); // nor does OP_CHECKSLHDSA128S
+         consensus.P2MRRescueHeight = std::numeric_limits<int>::max(); // nor does the P2MR rescue lane
++        consensus.P2MRLatticeTripwireHeight = std::numeric_limits<int>::max(); // nor do lattice tripwired leaves
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+@@ -671,6 +708,30 @@ public:
+             consensus.P2MRRescueHeight = IsArk0SignetChallenge(bin) ? ARK0_RESCUE_HEIGHT : std::numeric_limits<int>::max();
+         }
+         consensus.p2mr_rescue_network_id = P2MRRescueNetworkId(bin);
++        // Leaf version 0xe2 and its lattice tripwire outputs (doc/p2mr-lattice-tripwire.md): on a custom
++        // signet only as -signetlatticetripwire gives them, which ReadSigNetArgs refuses on Ark-0 and on
++        // the default signet, and accepts only with OP_CHECKMLDSA44, the tripwire rules of leaf version
++        // 0xe0 and OP_CHECKSLHDSA128S active at or before its height. On Ark-0 from
++        // ARK0_LATTICE_TRIPWIRE_HEIGHT with ARK0_LATTICE_TRIPWIRE_OUTPOINTS, neither of which is decided
++        // yet: the rules stay inactive there, and leaf version 0xe2 an unknown one.
++        consensus.P2MRLatticeTripwireHeight = std::numeric_limits<int>::max();
++        if (options.lattice_tripwire) {
++            assert(options.challenge && !IsArk0SignetChallenge(*options.challenge) && !IsDefaultSignetChallenge(*options.challenge));
++            assert(options.mldsa44_height && options.tripwire && options.slhdsa128s_height);
++            assert(*options.mldsa44_height < options.tripwire->height && options.tripwire->height <= options.lattice_tripwire->height);
++            assert(*options.slhdsa128s_height <= options.lattice_tripwire->height);
++            consensus.P2MRLatticeTripwireHeight = options.lattice_tripwire->height;
++            for (const COutPoint& outpoint : options.lattice_tripwire->outpoints) {
++                consensus.p2mr_lattice_tripwires.push_back(Consensus::P2MRLatticeTripwire{.outpoint = outpoint});
++            }
++        } else if (IsArk0SignetChallenge(bin)) {
++            consensus.P2MRLatticeTripwireHeight = ARK0_LATTICE_TRIPWIRE_HEIGHT;
++            consensus.p2mr_lattice_tripwires = Ark0LatticeTripwireOutpoints();
++        }
++        if (consensus.P2MRLatticeTripwireHeight != std::numeric_limits<int>::max()) {
++            // Every node of the network needs the same values: log what an operator can compare.
++            LogInfo("Signet %s", DescribeLatticeTripwireRules(consensus));
++        }
+         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+         consensus.nPowTargetSpacing = 10 * 60;
+         // A different target spacing for the retargets from a height on.
+@@ -794,6 +855,7 @@ public:
+         consensus.P2MRTripwireHeight = 0; // Always active unless overridden, without tripwire outputs
+         consensus.P2MRSLHDSA128SHeight = 0; // Always active unless overridden
+         consensus.P2MRRescueHeight = 0; // Follows the final p2mr_tripwire height unless overridden, see below
++        consensus.P2MRLatticeTripwireHeight = 0; // Follows the final p2mr_tripwire and p2mr_slhdsa128s heights unless overridden, see below
+         consensus.MinBIP9WarningHeight = 0;
+         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+         consensus.nPowTargetTimespan = 24 * 60 * 60; // one day
+@@ -860,6 +922,9 @@ public:
+             case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_RESCUE:
+                 consensus.P2MRRescueHeight = int{height};
+                 break;
++            case Consensus::BuriedDeployment::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE:
++                consensus.P2MRLatticeTripwireHeight = int{height};
++                break;
+             }
+         }
+         // -signettripwire (doc/p2mr-tripwire.md), which ReadRegTestArgs accepts only without a
+@@ -880,6 +945,23 @@ public:
+             consensus.P2MRRescueHeight = consensus.P2MRTripwireHeight;
+         }
+         consensus.p2mr_rescue_network_id = P2MRRescueNetworkId(MakeUCharSpan(P2MR_RESCUE_REGTEST_ID));
++        // Leaf version 0xe2 (doc/p2mr-lattice-tripwire.md) executes where OP_CHECKMLDSA44, leaf version
++        // 0xe0 and OP_CHECKSLHDSA128S all do, without lattice tripwire outputs, unless
++        // -testactivationheight or -signetlatticetripwire sets its height; ReadRegTestArgs refuses a
++        // final height below any of theirs.
++        if (opts.lattice_tripwire) {
++            assert(!opts.activation_heights.contains(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE));
++            consensus.P2MRLatticeTripwireHeight = opts.lattice_tripwire->height;
++            for (const COutPoint& outpoint : opts.lattice_tripwire->outpoints) {
++                consensus.p2mr_lattice_tripwires.push_back(Consensus::P2MRLatticeTripwire{.outpoint = outpoint});
++            }
++        } else if (!opts.activation_heights.contains(Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++            consensus.P2MRLatticeTripwireHeight = std::max({consensus.P2MRMLDSA44Height, consensus.P2MRTripwireHeight, consensus.P2MRSLHDSA128SHeight});
++        }
++        assert(consensus.P2MRLatticeTripwireHeight >= consensus.P2MRMLDSA44Height &&
++               consensus.P2MRLatticeTripwireHeight >= consensus.P2MRTripwireHeight &&
++               consensus.P2MRLatticeTripwireHeight >= consensus.P2MRSLHDSA128SHeight);
++        if (opts.lattice_tripwire) LogInfo("%s", DescribeLatticeTripwireRules(consensus));
+ 
+         for (const auto& [deployment_pos, version_bits_params] : opts.version_bits_parameters) {
+             consensus.vDeployments[deployment_pos].nStartTime = version_bits_params.start_time;
+diff --git a/src/kernel/chainparams.h b/src/kernel/chainparams.h
+index 584c32d..17b086d 100644
+--- a/src/kernel/chainparams.h
++++ b/src/kernel/chainparams.h
+@@ -14,6 +14,7 @@
+ #include <util/hash_type.h>
+ #include <util/vector.h>
+ 
++#include <array>
+ #include <cstddef>
+ #include <cstdint>
+ #include <limits>
+@@ -89,6 +90,93 @@ inline constexpr int ARK0_RESCUE_HEIGHT{51000};
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
+ static_assert(ARK0_RESCUE_HEIGHT > ARK0_SLHDSA128S_HEIGHT);
+ 
++/**
++ * Height from which the Ark-0 signet executes P2MR leaves of leaf version 0xe2, and fails their
++ * OP_CHECKMLDSA44 checks in every block whose parent leaves one of its lattice tripwire outputs,
++ * ARK0_LATTICE_TRIPWIRE_OUTPOINTS in kernel/chainparams.cpp, missing
++ * (doc/p2mr-lattice-tripwire.md), H4T. NOT DECIDED YET: until it is, it is
++ * std::numeric_limits<int>::max(), the list of outputs is empty, and leaf version 0xe2 stays an
++ * unknown leaf version on Ark-0, as leaf version 0xe0 did before ARK0_TRIPWIRE_HEIGHT was set.
++ *
++ * It is set in one commit with the three outputs, once they are confirmed below it, at the height
++ * at the release plus seven days of blocks (6720), rounded up to the thousand. Once set, it does
++ * not change after a build carrying it has left the network's own nodes.
++ */
++inline constexpr int ARK0_LATTICE_TRIPWIRE_HEIGHT{std::numeric_limits<int>::max()};
++// Leaf version 0xe2 runs OP_CHECKMLDSA44, which its lattice tripwire disables, follows the tripwire of
++// leaf version 0xe0 for its elliptic curve checks, and runs OP_CHECKSLHDSA128S, its fallback once
++// ML-DSA-44 is disabled there: all three have to be active when the leaves start to execute. The
++// reorganization rules of the mempool rely on it too: below the heights of OP_CHECKMLDSA44 and
++// OP_CHECKSLHDSA128S, SpendsP2MRMLDSA44Leaf and SpendsP2MRSLHDSA128SLeaf remove spends of leaf versions
++// 0xc0 and 0xe0 only, and leave those of 0xe2 to the filter of this height. Regtest and other signets
++// refuse to start with a lattice height below any of the three (chainparams.cpp).
++static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT > ARK0_MLDSA44_HEIGHT);
++static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_HEIGHT);
++static_assert(ARK0_LATTICE_TRIPWIRE_HEIGHT >= ARK0_SLHDSA128S_HEIGHT);
++/** Whether the lattice tripwire rules of the Ark-0 signet are decided: their height is finite. */
++inline constexpr bool ARK0_LATTICE_TRIPWIRE_DECIDED{ARK0_LATTICE_TRIPWIRE_HEIGHT != std::numeric_limits<int>::max()};
++/** Height of the block that created the lattice tripwire outputs of the Ark-0 signet. Not decided
++ *  yet either: they do not exist. The commit that sets ARK0_LATTICE_TRIPWIRE_HEIGHT sets it. */
++inline constexpr std::optional<int> ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT{std::nullopt};
++
++/** A lattice tripwire output of the Ark-0 signet as this code fixes it: the outpoint, the SHA256 of
++ *  the ML-DSA-44 key its leaf checks (both in hex, as RPCs print them) and a label. */
++struct Ark0LatticeTripwire {
++    std::string_view txid;
++    uint32_t vout;
++    std::string_view key_sha256;
++    std::string_view label;
++};
++/** The lattice tripwire outputs of the Ark-0 signet (doc/p2mr-lattice-tripwire.md): NOT DECIDED YET,
++ *  like ARK0_LATTICE_TRIPWIRE_HEIGHT, so none, and the rules stay inactive there. They will be three
++ *  P2MR outputs of two leaves of version 0xc0 at depth one, the ML-DSA-44 template S1 of a key and
++ *  OP_RETURN, in this order: the NUMS key of P2MR_LATTICE_NUMS_DST and P2MR_LATTICE_NUMS_LABEL,
++ *  labelled "NUMS ML-DSA-44"; a key whose secret was destroyed, labelled "destroyed key"; and the drill
++ *  key the operator holds, labelled "drill". A constant array rather than a vector, so that the
++ *  asserts below hold the count and the contents at compile time. */
++inline constexpr std::array<Ark0LatticeTripwire, 0> ARK0_LATTICE_TRIPWIRES{};
++
++/** The NUMS ML-DSA-44 public key of the first lattice tripwire output (doc/p2mr-lattice-tripwire.md):
++ *  SHAKE256 of this domain separation tag, a zero byte and the label, read as in FIPS 204 KeyGen
++ *  without a secret, which nobody can compute a signing key for. */
++inline constexpr std::string_view P2MR_LATTICE_NUMS_DST{"MLDSA44-NUMS/v1"};
++inline constexpr std::string_view P2MR_LATTICE_NUMS_LABEL{"lattice-tripwire/0"};
++/** SHA256 of that public key, which a unit test computes again with mldsa-native's SHAKE256. */
++inline constexpr std::string_view P2MR_LATTICE_NUMS_KEY_SHA256{"591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805"};
++
++/** Whether a string is 64 lower-case hex digits, not all zero. */
++consteval bool IsNonNullHex256(std::string_view hex)
++{
++    if (hex.size() != 64) return false;
++    bool nonzero{false};
++    for (const char c : hex) {
++        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
++        nonzero |= c != '0';
++    }
++    return nonzero;
++}
++/** The ties between the height, the creation height and the outputs, which M3's constants have for
++ *  leaf version 0xe0: while the height is "never", there is neither a creation height nor an output;
++ *  once it is finite, the outputs were created below it, and there are exactly three, distinct,
++ *  each with a txid that is not null and the SHA256 of its key, labelled as above, the first with the
++ *  NUMS key. */
++consteval bool Ark0LatticeTripwiresConsistent()
++{
++    if (!ARK0_LATTICE_TRIPWIRE_DECIDED) return !ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT && ARK0_LATTICE_TRIPWIRES.empty();
++    if (!ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT || *ARK0_LATTICE_TRIPWIRE_CREATION_HEIGHT >= ARK0_LATTICE_TRIPWIRE_HEIGHT) return false;
++    if (ARK0_LATTICE_TRIPWIRES.size() != 3) return false;
++    constexpr std::array<std::string_view, 3> labels{"NUMS ML-DSA-44", "destroyed key", "drill"};
++    for (size_t i = 0; i < ARK0_LATTICE_TRIPWIRES.size(); ++i) {
++        const Ark0LatticeTripwire& t{ARK0_LATTICE_TRIPWIRES[i]};
++        if (!IsNonNullHex256(t.txid) || !IsNonNullHex256(t.key_sha256) || t.label != labels[i]) return false;
++        for (size_t j = 0; j < i; ++j) {
++            if (ARK0_LATTICE_TRIPWIRES[j].txid == t.txid && ARK0_LATTICE_TRIPWIRES[j].vout == t.vout) return false;
++        }
++    }
++    return ARK0_LATTICE_TRIPWIRES[0].key_sha256 == P2MR_LATTICE_NUMS_KEY_SHA256;
++}
++static_assert(Ark0LatticeTripwiresConsistent());
++
+ /** The bytes regtest's rescue network id is the SHA256 of (doc/p2mr-rescue.md). */
+ inline constexpr std::string_view P2MR_RESCUE_REGTEST_ID{"regtest"};
+ 
+@@ -97,6 +185,11 @@ inline constexpr int ARK0_TRIPWIRE_CREATION_HEIGHT{15748};
+ // An output counts as present only when it was created below the height of the rules.
+ static_assert(ARK0_TRIPWIRE_HEIGHT > ARK0_TRIPWIRE_CREATION_HEIGHT);
+ 
++/** The P2MR lattice tripwire rules as a node logs them at startup, so that the nodes of one network can
++ *  compare them (doc/p2mr-lattice-tripwire.md): the height, and each lattice tripwire outpoint, with the
++ *  label and the SHA256 of the key of those the code fixes. */
++std::string DescribeLatticeTripwireRules(const Consensus::Params& consensus);
++
+ /** Whether a signet challenge is the Ark-0 signet's, whose rules this code fixes. */
+ bool IsArk0SignetChallenge(std::span<const uint8_t> challenge);
+ /** Whether a signet challenge is the default (public) signet's, whose rules this code fixes too. */
+@@ -212,7 +305,9 @@ public:
+ 
+     /**
+      * The P2MR tripwire rules as -signettripwire gives them (doc/p2mr-tripwire.md):
+-     * the height from which leaf version 0xe0 executes, and the tripwire outputs.
++     * the height from which leaf version 0xe0 executes, and the tripwire outputs; or
++     * the P2MR lattice tripwire rules as -signetlatticetripwire gives them
++     * (doc/p2mr-lattice-tripwire.md), for leaf version 0xe2.
+      */
+     struct TripwireOptions {
+         int height;
+@@ -261,6 +356,13 @@ public:
+          * with a tripwire at or below its height.
+          */
+         std::optional<int> rescue_height{};
++        /**
++         * Leaf version 0xe2 and its lattice tripwire outputs
++         * (-signetlatticetripwire, doc/p2mr-lattice-tripwire.md). Only accepted
++         * together with mldsa44_height, tripwire and slhdsa128s_height, at
++         * heights that come before its own.
++         */
++        std::optional<TripwireOptions> lattice_tripwire{};
+     };
+ 
+     /**
+@@ -280,6 +382,8 @@ public:
+         std::unordered_map<Consensus::BuriedDeployment, int> activation_heights{};
+         /** -signettripwire on regtest, which sets the height of p2mr_tripwire too. */
+         std::optional<TripwireOptions> tripwire{};
++        /** -signetlatticetripwire on regtest, which sets the height of p2mr_lattice_tripwire too. */
++        std::optional<TripwireOptions> lattice_tripwire{};
+         bool fastprune{false};
+         bool enforce_bip94{false};
+     };
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 605b271..9794778 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1486,6 +1486,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager&
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_TRIPWIRE);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_SLHDSA128S);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_RESCUE);
++    SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
+     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+     return softforks;
+diff --git a/src/validation.cpp b/src/validation.cpp
+index c136b9c..a6dade4 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2494,6 +2494,13 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+         flags |= SCRIPT_VERIFY_P2MR_SLHDSA128S;
+     }
+ 
++    // Execute P2MR leaves of leaf version 0xe2 (doc/p2mr-lattice-tripwire.md), which needs P2MR. Whether
++    // their OP_CHECKMLDSA44 checks fail depends on the UTXO set, which ConnectBlock looks at.
++    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR) &&
++        DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        flags |= SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE;
++    }
++
+     // Below the height of the P2MR rescue lane (doc/p2mr-rescue.md), a rescue token is a signature
+     // like any other: a restricting flag, lifted at that height, which relaxes the rules (a hard
+     // fork). It has nothing to act on where leaves of version 0xe0 do not execute.
+diff --git a/test/functional/feature_p2mr_slhdsa128s.py b/test/functional/feature_p2mr_slhdsa128s.py
+index c0f5008..38b854f 100644
+--- a/test/functional/feature_p2mr_slhdsa128s.py
++++ b/test/functional/feature_p2mr_slhdsa128s.py
+@@ -328,7 +328,8 @@ class P2MRSLHDSA128STest(BitcoinTestFramework):
+ 
+     def test_startup(self):
+         self.log.info("Startup log and getdeploymentinfo")
+-        with self.nodes[0].assert_debug_log([f"P2MR SLH-DSA-SHA2-128s rules active from height {ACTIVATION_HEIGHT} (leaf versions 0xc0, 0xe0)"]):
++        # Regtest executes leaf version 0xe2 (doc/p2mr-lattice-tripwire.md) from the same height by default.
++        with self.nodes[0].assert_debug_log([f"P2MR SLH-DSA-SHA2-128s rules active from height {ACTIVATION_HEIGHT} (leaf versions 0xc0, 0xe0, 0xe2)"]):
+             self.restart_node(0)
+         info = self.nodes[0].getdeploymentinfo()["deployments"]["p2mr_slhdsa128s"]
+         assert_equal(info, {"type": "buried", "active": False, "height": ACTIVATION_HEIGHT})
+diff --git a/test/functional/rpc_blockchain.py b/test/functional/rpc_blockchain.py
+index d010df2..161f07f 100755
+--- a/test/functional/rpc_blockchain.py
++++ b/test/functional/rpc_blockchain.py
+@@ -213,7 +213,7 @@ class BlockchainTest(BitcoinTestFramework):
+         assert_equal(gdi_result, {
+           "hash": blockhash,
+           "height": height,
+-          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2MR_MLDSA44","P2MR_SLHDSA128S","P2MR_TRIPWIRE","P2SH","TAPROOT","WITNESS"],
++          "script_flags": ["CHECKLOCKTIMEVERIFY","CHECKSEQUENCEVERIFY","DERSIG","NULLDUMMY","P2MR","P2MR_LATTICE_TRIPWIRE","P2MR_MLDSA44","P2MR_SLHDSA128S","P2MR_TRIPWIRE","P2SH","TAPROOT","WITNESS"],
+           "deployments": {
+             'bip34': {'type': 'buried', 'active': True, 'height': 2},
+             'bip66': {'type': 'buried', 'active': True, 'height': 3},
+@@ -225,6 +225,7 @@ class BlockchainTest(BitcoinTestFramework):
+             'p2mr_tripwire': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_slhdsa128s': {'type': 'buried', 'active': True, 'height': 0},
+             'p2mr_rescue': {'type': 'buried', 'active': True, 'height': 0},
++            'p2mr_lattice_tripwire': {'type': 'buried', 'active': True, 'height': 0},
+             'testdummy': {
+                 'type': 'bip9',
+                 'bip9': {
+-- 
+2.43.0
+

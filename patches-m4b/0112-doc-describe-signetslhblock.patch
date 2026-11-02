@@ -1,0 +1,287 @@
+From 7a5628ecf93730fa9b815cbe4f778a8c64760f0f Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:20:49 +0000
+Subject: [PATCH 112/112] doc: describe -signetslhblock
+
+doc/signet-slhblock.md: what the SLH-DSA block signature proves and what it
+does not, the option, the block and its message, the order a producer signs
+in, the signer program, where the node checks it, the reserved weight a
+producer needs, and nodes that upgrade late. It is not active on Ark-0.
+---
+ doc/signet-slhblock.md | 264 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 264 insertions(+)
+ create mode 100644 doc/signet-slhblock.md
+
+diff --git a/doc/signet-slhblock.md b/doc/signet-slhblock.md
+new file mode 100644
+index 0000000..101ad8d
+--- /dev/null
++++ b/doc/signet-slhblock.md
+@@ -0,0 +1,264 @@
++# Signet SLH-DSA-SHA2-128s block signatures (`-signetslhblock`)
++
++A custom signet that already requires an ML-DSA-44 block signature
++(`-signetpqblock`, [signet-pqblock.md](signet-pqblock.md)) can require, from a
++height on, a second one: an SLH-DSA-SHA2-128s (FIPS 205) signature by a fixed
++public key, in a coinbase output of its own. Nodes without the rule keep
++accepting those blocks: the rule only narrows what is valid.
++
++This is an experiment of the Ark-0 test network (M4-B of its M4 design). It is
++not part of BIP 325 or any other BIP. **It is not active on the Ark-0 signet**:
++its height and key there are not decided, `ARK0_SLH_BLOCK_HEIGHT` is
++`std::numeric_limits<int>::max()` and the key is unset, so an Ark-0 node has no
++such rule and refuses the option. Both are set in one later commit.
++
++## What it proves and what it does not
++
++From the height on, a node with the rule accepts a block only if three
++signatures hold together: the signet solution, the ML-DSA-44 block signature
++and the SLH-DSA block signature. The SLH-DSA signature covers what the ML-DSA-44
++one covers, less the SLH signature itself: the version, the previous block, the
++time, every transaction, and the whole coinbase except the ML-DSA-44 push, the
++signet solution push and the SLH signature. If lattice signatures fail, the
++ML-DSA-44 signature is still required but the authorization rests on SLH-DSA
++and the classical key; if hash-based signatures fail, the other way round.
++
++It does not make anything else post-quantum. Like the other two, it does not
++cover `nNonce` or `nBits`. Nodes without the rule do not check it. One party
++holds all three keys.
++
++## Configuration
++
++    -signetslhblock=<pubkey>@<height>
++
++- `<pubkey>`: the 32-byte SLH-DSA-SHA2-128s public key, `PK.seed || PK.root`,
++  in hex.
++- `<height>`: at least 1, and at or above the `-signetpqblock` height.
++- It needs `-signetchallenge` and `-signetpqblock`; it is refused on the Ark-0
++  signet, on the default signet and on every other chain; it takes one value.
++
++It is a consensus rule of that network: every node must use the same value
++before the chain reaches `<height>`. A node logs at startup
++
++    Signet SLH-DSA block signature required from height <height>, public key SHA256 <hex>
++
++which operators compare.
++
++## The block
++
++Let `c` be the index of the witness commitment output: the last coinbase
++output whose script starts with `6a 24 aa 21 a9 ed` and has at least 38 bytes.
++From the height on (rule 4B-1):
++
++- `c >= 1`;
++- `vout[c - 1]` has amount 0 and a script of exactly 7,865 bytes, whose first
++  9 bytes are `6a 4d b5 1e 50 51 48 31 01`: `OP_RETURN`, `OP_PUSHDATA2` of
++  7,861 = 0x1eb5 bytes (the shortest push of that length), the header `PQH1`,
++  the version `01`, then the 7,856-byte signature.
++
++And (4B-2) no other coinbase output starts with `6a 4d b5 1e 50 51 48 31`.
++The node compares these bytes at fixed offsets; it never parses the scripts.
++
++The output is `OP_RETURN`: it is not in the UTXO set and counts no sigops. It
++adds 7,876 bytes of non-witness data, 31,504 weight units, to every block.
++
++The SLH output sits **before** the witness commitment output, which stays
++last: `contrib/signet/miner`'s `finish_block` puts the signet solution on the
++last output, and Core's own template code (`GenerateCoinbaseCommitment`,
++`RegenerateCommitments`) keeps the commitment last. Core's template code is
++not changed: `getblocktemplate` still has exactly one required output, and the
++producer inserts the SLH output itself.
++
++## The message
++
++    slh_coinbase = pq_coinbase with vout[c - 1]'s script replaced by 6a 05 50514831 01
++    slh_merkle   = ComputeMerkleRoot([txid(slh_coinbase)] + the other txids)
++    slh_msg      = TaggedHash("SignetSLHBlock",
++                              SHA256(challenge) || nVersion || hashPrevBlock || slh_merkle || nTime)
++
++`pq_coinbase` is the coinbase as the ML-DSA-44 signature covers it: the witness
++commitment output cut back to `OP_RETURN`, the commitment and the push
++`50514231 01` (`signet-pqblock.md`). The preimage is 104 bytes, in the byte
++order of a block header. The signature is FIPS 205 `slh_sign`, pure SLH-DSA,
++with the context string `SIGNET/SLHBLOCK/EXP0`: neither `OP_CHECKSLHDSA128S`'s
++nor the ML-DSA-44 block signature's.
++
++`src/test/data/signet_slhblock_p2mr_ts.json` holds three messages that p2mr-ts,
++a separate TypeScript implementation, computed; `signet_slhblock_tests` checks
++`slh_coinbase`, `slh_merkle` and `slh_msg` against them.
++
++## The order of the signatures
++
++Nodes without this rule compute the ML-DSA-44 message over the SLH output as it
++is, so the SLH signature has to be final before the ML-DSA-44 signature is made.
++A producer goes through four steps:
++
++1. From a template (with `blockreservedweight` at least 48,000, see below),
++   insert the placeholder `6a 05 50514831 01` before the witness commitment
++   output, whose index goes up by one, and append the cut ML-DSA-44 push
++   `05 50514231 01` to the commitment output. The coinbase is now
++   `slh_coinbase`.
++2. Compute `slh_msg`.
++3. Sign it with hedged SLH-DSA (fresh `opt_rand`); verify the signature with the
++   public key, and make no block if it fails.
++4. Put the full SLH output in place of the placeholder, take the cut push off,
++   sign the ML-DSA-44 message (which covers the SLH signature), add the
++   ML-DSA-44 push and recompute the merkle root; then the signet solution as
++   before (`generate_psbt`, `walletprocesspsbt`, `finish_block`).
++
++There is no circular dependency: `slh_msg` covers neither block signature nor
++the signet push; the ML-DSA-44 message covers the SLH signature but not itself
++or the signet push; the signet solution covers both block signatures; the
++witness commitment covers only the other transactions' wtxids. Signed the other
++way round (ML-DSA-44 first, SLH output inserted after), a block fails the
++ML-DSA-44 check (`bad-signet-pqblk`) on new and old nodes alike.
++
++`test/functional/test_framework/signet_slh.py` has these steps
++(`add_signet_slh_and_pq_signatures`); the Ark-0 producer calls the same
++functions.
++
++## The signer
++
++`signet-slh-sign` (`src/signet-slh-sign.c`, built with
++`-DBUILD_SIGNET_SLH_SIGNER=ON`, the default when tests are built; **Linux only**,
++as it relies on `prctl(PR_SET_DUMPABLE)` and `getrandom`; linked fully static and
++not position-independent, which needs `libc.a`, from `libc6-dev`) signs with the
++vendored slhdsa-c of `src/crypto/slhdsa128s/`, the library the node verifies
++with; no node binary links it.
++
++    signet-slh-sign <keyfile>            < 64 hex characters (slh_msg)  > signature hex
++    signet-slh-sign -pubkey <keyfile>    > public key hex
++
++`<keyfile>` holds exactly the 48 bytes `SK.seed || SK.prf || PK.seed` (FIPS 205
++`slh_keygen_internal`), raw. The program reads and checks the message before it
++opens the key file, signs with a 16-byte `opt_rand` from `getrandom`, verifies
++the signature with the public key, and only then prints it. It never prints
++the key.
++
++**Exit status.** Exit 0: standard output holds the result. Any other exit
++(1 usage, 2 input, 3 randomness, 4 signing or verification, 5 output,
++6 the process could not be made non-dumpable): **ignore standard output**. It
++is empty, except when writing the result itself failed part way, which can
++leave part of it there. The test framework's `program_slh_signer` and the
++Ark-0 producer read standard output only after exit 0.
++
++**The secret.**
++
++- Before the key file is opened, the process sets `PR_SET_DUMPABLE` to 0 and
++  checks it with `PR_GET_DUMPABLE`; if either fails it exits (6) without
++  touching the key. A non-dumpable process gets no core dump at all:
++  `do_coredump()` in the kernel's `fs/coredump.c` returns before anything else
++  when the dumpable flag is 0, whether `core_pattern` names a file, a pipe or a
++  socket. It also keeps unprivileged processes of the same user from ptrace and
++  from `/proc/<pid>/mem`.
++- The key file is read with `open()` and `read()` into the program's own
++  buffer, so no stdio buffer holds it.
++- Every buffer of the program's own that held the key, the expanded secret key
++  or `opt_rand` is overwritten on every return path. The vendored library is not
++  changed (the node compiles it too); instead, after key generation, signing
++  and verification, a non-inlined function overwrites 64 KiB of the stack below
++  the caller through volatile writes (as libgcrypt's `burn_stack`): the library
++  uses less than 9 KiB for each of the three (measured).
++- What remains is out of reach of a C program: CPU registers, and the
++  process's pages until the kernel reclaims them at exit. With dumps off and a
++  process that lives under a second, nothing else can read them.
++- **The guarantee, and what it rests on.** The stack scrub covers the
++  library's state (its `slh_var_t` copy of the key among it). Three mechanisms
++  defeat it, by moving stack frames where the scrub does not reach:
++  AddressSanitizer's fake stack (HWAddressSanitizer is refused with it),
++  SafeStack's unsafe stack (`-fsanitize=safe-stack`, which moves address-taken
++  locals such as the key's buffers) and GCC's split stacks (`-fsplit-stack`,
++  frames on segments from `__morestack`). The source, the configure check and
++  release staging refuse all three.
++  - The source does not compile under the sanitizers a compiler announces
++    (address, hwaddress, memory, thread, safe-stack). Neither GCC 13 nor
++    Clang 18 announces `-fsplit-stack` (no macro), so the source cannot see it.
++  - CMake builds no production `signet-slh-sign` when `SANITIZERS` is set, or
++    `-fsanitize` or `-fsplit-stack` appears in the compiler arguments
++    (`CMAKE_<LANG>_COMPILER_ARG1`), the final C, C++ and executable linker flags
++    (per configuration too; `CFLAGS` and `CXXFLAGS` included, as the decision is
++    taken where the targets are made, after every language is enabled), Core's
++    `APPEND_*` flags, or the options of the SLH library and
++    `sanitize_interface`; the configure output says which. This covers the
++    sanitizers that move no frames too (UBSan among them): no shipped signer
++    carries any. Only the test option `-DSIGNET_SLH_SIGN_ALLOW_SANITIZERS=ON`
++    builds a separate target with `SANITIZERS`,
++    `signet-slh-sign-sanitizer-test`, marked and with no install rule.
++  - Release staging (`check-signer.sh` in the patch repository) sees what a
++    compiler launcher or wrapper script added, as each mechanism links its own
++    runtime. The production `signet-slh-sign` is a **fully static, non-PIE
++    executable**: it loads no library and no loader, so there are no
++    dependencies to follow. The check verifies that, an x86-64 ELF64
++    little-endian `ET_EXEC` whose program headers and `PT_LOAD` segments lie
++    within the file and which has neither `PT_INTERP` nor `PT_DYNAMIC`, and
++    searches its one file for the test build's mark
++    `SIGNET_SLH_SIGN_SANITIZER_BUILD`, the fault build's switch, the runtimes'
++    symbol prefixes (`__asan_`, `__hwasan_`, `__ubsan_`, `__tsan_`, `__msan_`,
++    `__lsan_`, `__sanitizer_`, `__safestack_`, `__morestack`) and, as stripping
++    removes symbols, the strings the runtimes carry as data
++    (`AddressSanitizer`, `HWAddressSanitizer`, `ThreadSanitizer`,
++    `MemorySanitizer`, `LeakSanitizer`, `UndefinedBehaviorSanitizer`, `ubsan: `,
++    `safestack CHECK failed`, and libgcc's `SPLIT_STACK_GUARD`). The lists cover
++    the runtimes known in Clang 18 and GCC 13; the static release signer, glibc
++    included, holds none of these strings. **Its scope:** it stops a signer
++    from a mistaken build or configuration from going into the image; it is not
++    a defence against someone who controls the build host, nor against a
++    runtime the lists do not know.
++  - **That is defence in depth, not the guarantee.** A shipped signer comes
++    only from the release pipeline (`contrib/k3s/build.sh` in the patch
++    repository), with its pinned toolchain and flags, and the producer image's
++    digest is recorded in the runbook.
++
++`tool_signet_slh_sign.py` tests all of this: the interface; that the running
++signer is not dumpable (root owns its `/proc/<pid>/status` while it waits on
++standard input, as the kernel does for a non-dumpable process, where a control
++process of the same user owns its own); that the message comes before the key
++file; the test-only build `signet-slh-sign-fault-test`
++(`SIGNET_SLH_SIGN_TEST_BUILD`, never installed), whose faults
++(`SIGNET_SLH_SIGN_TEST_FAULT=flip`, a bit of every signature flipped before
++verification; `=random`, a failing random source) must print nothing; and that
++the framework kills a signer that hangs, ignores the output of a non-zero exit,
++and checks the signature against the public key it checked.
++
++A key is 48 bytes from the operating system's CSPRNG. It never belongs in a
++persistent file: make it under `umask 077` on a RAM-backed path such as
++`/dev/shm`, move it into the encrypted backups and the producer's secret store,
++and remove it. SLH-DSA is stateless: restoring a backup or switching machines
++reuses no one-time key.
++
++## Where it is checked
++
++At the end of `CheckBlock`, after the ML-DSA-44 block signature and before
++`fChecked` is set, on the same condition (`signet_blocks && fCheckPOW`):
++
++- the height is the one the coinbase commits to (BIP34); a height that cannot
++  be read counts as reached;
++- the genesis block is exempt by its hash;
++- first the form, then `slh_merkle`, then the signature, about 1 ms;
++- the reason is `bad-signet-slhblk`.
++
++Below the height nothing is rejected; with `-debug=validation` each block gets
++one line, `CheckSignetSLHBlock: block <hash> below height <h>, SLH-DSA block
++signature valid | invalid | absent or not in the required form`.
++
++Templates (`getblocktemplate`, `TestBlockValidity`, which checks without
++`fCheckPOW`) skip it, as they skip the other two signatures; `getblocktemplate`
++keeps working from the height on. It does not depend on the UTXO set or on any
++tripwire.
++
++## Block weight
++
++The SLH output is 31,504 WU, on top of the ML-DSA-44 push (about 9,720 WU) and
++the signet solution push. A producer's node must run with
++`-blockreservedweight` of at least 48,000 **before** the first block with an
++SLH output: with the old 16,000 a full template no longer fits once the output
++is in (`feature_signet_slhblock.py` shows both).
++
++## Nodes that upgrade late
++
++A node accepts blocks once; it does not check them again when it gets the rule.
++At startup `-checkblocks` (6 by default) checks the last blocks, and one
++without a valid SLH signature at or above the height stops the node with
++`Corrupted block database detected`. That covers only the last few blocks. A
++node that upgrades after the height must run `-reindex-chainstate` (a pruned
++node `-reindex`); a node with a manual `-assumevalid` drops it first.
+-- 
+2.43.0
+

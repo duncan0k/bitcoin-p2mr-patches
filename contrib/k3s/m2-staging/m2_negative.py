@@ -15,6 +15,14 @@ rule) takes it, while both nodes with the rule refuse it; on network b the M1
 node takes anything. It prints the three answers of every case as JSON.
 Network a's cases only mean something at or above the rule's height, which is
 therefore given, and checked, on the command line.
+
+On a network that also runs M4-B (-signetslhblock, doc/signet-slhblock.md), when
+the producer has its ARK0_SLH_* variables and the template is at or above
+ARK0_SLH_BLOCK_FROM, every case first gets a valid SLH output, made the way
+ark0.py makes it (placeholder, slh_msg, signet-slh-sign, full output) and before
+anything ML-DSA-44 signs: each block then differs from a valid one only in its
+M2 part, as before. An SLH output made after the ML-DSA-44 signature would be
+a case of its own (the wrong order), which feature_signet_slhblock.py covers.
 """
 import copy
 import hashlib
@@ -68,6 +76,23 @@ def classical(block, tmpl):
                                    ark0.miner.get_solution_from_psbt(decoded), ark0.GRIND)
 
 
+def with_slh_output(block, tmpl):
+    """The SLH output of M4-B, when the producer makes one at this height: steps 1
+    to 3 of ark0.add_slh_and_pq_block_signatures and the first half of step 4,
+    leaving the commitment output at its 38 bytes for the cases below."""
+    if not ark0.slh_variables() or tmpl["height"] < int(ark0.SLH_BLOCK_FROM):
+        return block
+    from test_framework.signet_slh import (
+        insert_signet_slh_placeholder, program_slh_signer, set_signet_slh_signature, signet_slh_message,
+    )
+    challenge = bytes.fromhex(tmpl["signet_challenge"])
+    index = insert_signet_slh_placeholder(block)
+    message = signet_slh_message(block, challenge)
+    signature = program_slh_signer(ark0.SLH_SIGNER, ark0.SLH_BLOCK_KEY_FILE)(message)
+    set_signet_slh_signature(block, index, signature, challenge, message)
+    return block
+
+
 def set_tail(block, tail):
     """The witness commitment output cut back to the commitment, then tail."""
     index = witness_commitment_index(block)
@@ -83,7 +108,7 @@ def network_a(rule_height):
     # Below the rule's height the nodes with the rule would take these blocks too.
     assert tmpl["height"] >= rule_height, f"height {tmpl['height']} is below the rule's height {rule_height}"
     challenge = bytes.fromhex(tmpl["signet_challenge"])
-    base = ark0.miner.new_block(tmpl, ark0.reward_spk())
+    base = with_slh_output(ark0.miner.new_block(tmpl, ark0.reward_spk()), tmpl)
     signed = copy.deepcopy(base)
     add_signet_pq_signature(signed, seckey, challenge)
     push = signet_pq_push(signet_pq_signature(signed))

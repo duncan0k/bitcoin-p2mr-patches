@@ -59,9 +59,13 @@ data:
     addnode=node.ark0.si:38433
     addnode=node2.ark0.si:38433
     fallbackfee=0.0001
-    # Room in the coinbase for the ML-DSA-44 block signature of M2, about 9.7k
-    # weight units, when a template is full. The default reserves 8000.
-    blockreservedweight=16000
+    # Room in the coinbase for the block signatures when a template is full:
+    # the ML-DSA-44 push of M2, about 9.7k weight units, and the SLH output of
+    # M4-B, 31,504 (doc/signet-slhblock.md), with the signet solution push. It
+    # was 16000 for M2 alone; 48000 must be live on this node before the first
+    # block with an SLH output, or a full template no longer fits once the
+    # producer inserts it. The default reserves 8000.
+    blockreservedweight=48000
 
   nodeb.conf: |
     # Ark-0 experimental signet -- verifying node B

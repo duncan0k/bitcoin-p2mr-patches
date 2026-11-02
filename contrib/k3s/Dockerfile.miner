@@ -5,7 +5,10 @@
 # webhook, plus the four pieces the producer needs, which stage-miner.sh puts
 # into the build context:
 #
-#   bin/                      bitcoin-cli and bitcoin-util from the built tree
+#   bin/                      bitcoin-cli, bitcoin-util and signet-slh-sign
+#                             (the SLH-DSA block signer of M4-B, built from the
+#                             same vendored slhdsa-c as the nodes) from the
+#                             built tree
 #   bitcoin/contrib/signet/   the upstream signet miner module
 #   bitcoin/test/functional/  test_framework, which that module imports
 #   demo/                     ark0.py and miner_loop.sh, from ark0/producer/
@@ -25,7 +28,8 @@
 #
 # Neither ark0.py nor miner_loop.sh carries key material; stage-miner.sh checks
 # that before it copies them. The signing key stays in node A's wallet, and the
-# RPC password arrives at runtime from a Secret.
+# RPC password arrives at runtime from a Secret, as do the two block keys
+# (ark0-pq-signer, and ark0-slh-signer for M4-B, which only signet-slh-sign reads).
 
 ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 FROM ${BASE_IMAGE}
@@ -52,9 +56,12 @@ COPY bin/ /usr/local/bin/
 COPY bitcoin/ /opt/ark0/bitcoin/
 COPY demo/ /opt/ark0/demo/
 COPY miner-entrypoint.sh /opt/ark0/entrypoint.sh
+COPY check-signer.sh /opt/ark0/check-signer.sh
 
+# signet-slh-sign is static: it has no libraries to satisfy, so it is not in the
+# ldd loop below; check-signer.sh, further down, verifies that it loads nothing.
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/bitcoin* /opt/ark0/entrypoint.sh /opt/ark0/demo/*.sh; \
+    chmod 0755 /usr/local/bin/bitcoin* /usr/local/bin/signet-slh-sign /opt/ark0/entrypoint.sh /opt/ark0/demo/*.sh; \
     chmod 0644 /opt/ark0/demo/ark0.py; \
     for b in /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-util; do \
         if ldd "$b" | grep -q "not found"; then \
@@ -67,11 +74,46 @@ RUN set -eux; \
     python3 -c "import sys; print(sys.version.split()[0])"; \
     test -s /etc/ssl/certs/ca-certificates.crt
 
+# The signer, for real: a throwaway key, a fixed message signed, and the signature
+# verified in Python (the framework's verifier) under the key -pubkey prints; a
+# corrupted copy must fail, so that the check is not vacuous. The test build
+# signet-slh-sign-fault-test (never published) cannot pass: its signatures fail its
+# own check, so it exits non-zero, and its fault switch is refused by name. A signer
+# built with any sanitizer (only a test target allows it, marked
+# SIGNET_SLH_SIGN_SANITIZER_BUILD) is refused too, by the mark or by a sanitizer
+# runtime symbol: its stack scrub does not hold there. check-signer.sh, the same
+# file stage-miner.sh runs, decides: the release signer is static and non-PIE
+# (ET_EXEC, no PT_INTERP, no PT_DYNAMIC), so it loads nothing, and its one file
+# is searched. The key
+# lives in a private directory made and removed within this one RUN, so no layer
+# holds it; no set -x, so it is never echoed either, and python3 -B writes no
+# bytecode.
+RUN set -eu; \
+    umask 077; \
+    s=/usr/local/bin/signet-slh-sign; \
+    sh /opt/ark0/check-signer.sh "$s"; \
+    d="$(mktemp -d)"; \
+    head -c 48 /dev/urandom > "$d/key"; \
+    msg=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff; \
+    pub="$("$s" -pubkey "$d/key")"; \
+    sig="$(printf '%s\n' "$msg" | "$s" "$d/key")"; \
+    rm -f -- "$d/key"; rmdir -- "$d"; test ! -e "$d"; \
+    PYTHONPATH=/opt/ark0/bitcoin/test/functional python3 -B -c 'import sys; \
+from test_framework.signet_slh import SIGNET_SLH_CONTEXT; \
+from test_framework.p2mr_slhdsa128s import slhdsa128s_verify; \
+pub, msg, sig = (bytes.fromhex(a) for a in sys.argv[1:4]); \
+bad = bytearray(sig); bad[100] ^= 1; \
+assert len(pub) == 32 and len(sig) == 7856; \
+assert slhdsa128s_verify(pub, msg, sig, context=SIGNET_SLH_CONTEXT); \
+assert not slhdsa128s_verify(pub, msg, bytes(bad), context=SIGNET_SLH_CONTEXT); \
+print("signet-slh-sign: a signature that verifies under its -pubkey key")' "$pub" "$msg" "$sig"
+
 # Defaults for the pod layout. The entry point reads these, and ark0.py and
 # miner_loop.sh read them through the substitutions above. Everything a
 # deployment needs to change, it changes here.
 ENV ARK0_HOME=/var/lib/ark0 \
     ARK0_BIN=/usr/local/bin \
+    ARK0_SLH_SIGNER=/usr/local/bin/signet-slh-sign \
     ARK0_MINER_PATH=/opt/ark0/bitcoin/contrib/signet/miner \
     ARK0_PY=/opt/ark0/demo/ark0.py \
     ARK0_NODE_A=/var/lib/ark0/nodeA \

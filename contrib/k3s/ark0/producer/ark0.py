@@ -38,7 +38,28 @@ other candidate, which only its staging network ran:
                                derived from; blocks are then signed with it
                                alone, without the wallet
 
-Keys are derived from their seeds in memory and never printed.
+M4-B adds a second block signature, SLH-DSA-SHA2-128s, next to the ML-DSA-44
+one (doc/signet-slhblock.md, -signetslhblock). It needs the first mode and
+three more variables, all or none:
+
+  ARK0_SLH_BLOCK_KEY_FILE      a file holding the 48 bytes SK.seed || SK.prf ||
+                               PK.seed, normally the Secret ark0-slh-signer;
+                               only signet-slh-sign reads it
+  ARK0_SLH_BLOCK_FROM          the first height whose blocks carry the SLH
+                               output
+  ARK0_SLH_BLOCK_KEY_SHA256    SHA256 of the SLH-DSA public key the nodes
+                               expect, as they log it at startup
+  ARK0_SLH_SIGNER              the signer program, $ARK0_BIN/signet-slh-sign
+                               by default
+
+M4-B is not active on Ark-0 yet: its height and key are not decided, and the
+producer refuses to mine Ark-0 blocks with any ARK0_SLH_* variable set
+(ARK0_SLH_BLOCK_HEIGHT below). On another signet the node's
+-signetslhblock decides.
+
+Keys are derived from their seeds in memory and never printed. The SLH-DSA key
+never enters this process: the signer program reads the file, signs, checks
+its own signature and prints only the signature or the public key.
 """
 import argparse
 import hashlib
@@ -61,12 +82,30 @@ PQ_BLOCK_SEED_FILE = os.environ.get("ARK0_PQ_BLOCK_SEED_FILE")
 PQ_BLOCK_FROM = os.environ.get("ARK0_PQ_BLOCK_FROM")
 PQ_BLOCK_KEY_SHA256 = os.environ.get("ARK0_PQ_BLOCK_KEY_SHA256")
 PQ_CHALLENGE_SEED_FILE = os.environ.get("ARK0_PQ_CHALLENGE_SEED_FILE")
+SLH_BLOCK_KEY_FILE = os.environ.get("ARK0_SLH_BLOCK_KEY_FILE")
+SLH_BLOCK_FROM = os.environ.get("ARK0_SLH_BLOCK_FROM")
+SLH_BLOCK_KEY_SHA256 = os.environ.get("ARK0_SLH_BLOCK_KEY_SHA256")
+SLH_SIGNER = os.environ.get("ARK0_SLH_SIGNER") or f"{BIN}/signet-slh-sign"
 # The Ark-0 signet, which requires the ML-DSA-44 block signature from height
 # 20000 on, by the key with this SHA256 (ARK0_PQ_BLOCK_HEIGHT and
 # ARK0_PQ_BLOCK_PUBKEY in the Core series).
 ARK0_SIGNET_CHALLENGE = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
 ARK0_PQ_BLOCK_HEIGHT = 20000
 ARK0_PQ_KEY_SHA256 = "eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad"
+# M4-B on Ark-0 (H4T of the M4 design, ARK0_SLH_BLOCK_HEIGHT and
+# ARK0_SLH_BLOCK_PUBKEY in the Core series): neither the height nor the key is
+# decided, so both are None and M4-B is inactive. They are set together, with
+# the Core commit that fixes them.
+ARK0_SLH_BLOCK_HEIGHT = None
+ARK0_SLH_KEY_SHA256 = None
+# The SLH output has to be in the blocks at least this many blocks before the
+# height: 48 hours at the fastest rate of the producer, 960 blocks a day (M4
+# design section 4.5).
+ARK0_SLH_LEAD_BLOCKS = 1920
+# How long the signer may take before it is killed and the block given up: signing
+# (measured p99 about 0.8 s) and -pubkey. miner_loop.sh then tries the next block.
+SLH_SIGN_TIMEOUT = 30
+SLH_PUBKEY_TIMEOUT = 10
 HRP = "tb"
 EVIDENCE = os.path.join(ARK0, "evidence")
 STEPS = os.path.join(EVIDENCE, "steps.jsonl")
@@ -189,6 +228,108 @@ def add_pq_block_signature(block, tmpl):
     add_signet_pq_signature(block, seckey, bytes.fromhex(tmpl["signet_challenge"]), rnd=os.urandom(32))
 
 
+def slh_variables():
+    """The ARK0_SLH_* variables that are set: none, or all three."""
+    given = [name for name, value in (("ARK0_SLH_BLOCK_KEY_FILE", SLH_BLOCK_KEY_FILE),
+                                      ("ARK0_SLH_BLOCK_FROM", SLH_BLOCK_FROM),
+                                      ("ARK0_SLH_BLOCK_KEY_SHA256", SLH_BLOCK_KEY_SHA256)) if value]
+    require(len(given) in (0, 3),
+            "ARK0_SLH_BLOCK_KEY_FILE, ARK0_SLH_BLOCK_FROM and ARK0_SLH_BLOCK_KEY_SHA256 go together; "
+            f"only {', '.join(given)} set")
+    return bool(given)
+
+
+def check_block_keys(tmpl):
+    """The gates a block producer passes before it assembles a block (M2 release
+    review; M4 design section 4.5). Every check is require(), never assert."""
+    slh = slh_variables()
+    if slh:
+        # The SLH output sits in what the ML-DSA-44 signature covers, and is
+        # signed before it: it needs the first ML-DSA-44 mode, from a height at
+        # or below its own, as -signetslhblock needs -signetpqblock.
+        require(PQ_BLOCK_SEED_FILE and PQ_BLOCK_FROM and not PQ_CHALLENGE_SEED_FILE,
+                "the SLH-DSA block signature needs ARK0_PQ_BLOCK_SEED_FILE and ARK0_PQ_BLOCK_FROM, "
+                "and no ARK0_PQ_CHALLENGE_SEED_FILE")
+        require(int(SLH_BLOCK_FROM) >= int(PQ_BLOCK_FROM),
+                "ARK0_SLH_BLOCK_FROM must be at or above ARK0_PQ_BLOCK_FROM")
+    if tmpl["signet_challenge"] != ARK0_SIGNET_CHALLENGE:
+        return
+    # Without the block key, signing from above the rule's height, or in the
+    # other candidate's mode, which leaves the block signature out, the
+    # producer would mine blocks the nodes accept until 20000 and refuse
+    # from there on. Stop before the first one instead.
+    require(PQ_BLOCK_SEED_FILE and not PQ_CHALLENGE_SEED_FILE and PQ_BLOCK_FROM
+            and int(PQ_BLOCK_FROM) <= ARK0_PQ_BLOCK_HEIGHT
+            and (PQ_BLOCK_KEY_SHA256 or "").lower() == ARK0_PQ_KEY_SHA256,
+            "Ark-0 blocks need ARK0_PQ_BLOCK_SEED_FILE, ARK0_PQ_BLOCK_FROM at most "
+            f"{ARK0_PQ_BLOCK_HEIGHT}, ARK0_PQ_BLOCK_KEY_SHA256 {ARK0_PQ_KEY_SHA256} "
+            "and no ARK0_PQ_CHALLENGE_SEED_FILE")
+    if ARK0_SLH_BLOCK_HEIGHT is None:
+        # M4-B is not active on Ark-0: an SLH output under a key nobody has
+        # announced would only have to be dropped again.
+        require(not slh, "M4-B is not active on Ark-0 (its height and key are not decided): "
+                         "unset ARK0_SLH_BLOCK_KEY_FILE, ARK0_SLH_BLOCK_FROM and ARK0_SLH_BLOCK_KEY_SHA256")
+        return
+    # Once decided: the key variables, the key the nodes expect, and a start
+    # at least ARK0_SLH_LEAD_BLOCKS before the height, so that a wrong
+    # signature shows in the nodes' logs well before it would stop the chain.
+    require(slh, "Ark-0 blocks need ARK0_SLH_BLOCK_KEY_FILE, ARK0_SLH_BLOCK_FROM and ARK0_SLH_BLOCK_KEY_SHA256")
+    require(SLH_BLOCK_KEY_SHA256.lower() == ARK0_SLH_KEY_SHA256,
+            f"ARK0_SLH_BLOCK_KEY_SHA256 is not {ARK0_SLH_KEY_SHA256}, the key of the Ark-0 rule")
+    require(int(SLH_BLOCK_FROM) <= ARK0_SLH_BLOCK_HEIGHT - ARK0_SLH_LEAD_BLOCKS,
+            f"ARK0_SLH_BLOCK_FROM must be at most {ARK0_SLH_BLOCK_HEIGHT - ARK0_SLH_LEAD_BLOCKS}, "
+            f"{ARK0_SLH_LEAD_BLOCKS} blocks before the height {ARK0_SLH_BLOCK_HEIGHT}")
+
+
+def add_slh_and_pq_block_signatures(block, tmpl):
+    """-signetslhblock (doc/signet-slhblock.md): sign the block with SLH-DSA,
+    then with ML-DSA-44, before the signet solution is signed over both.
+
+    The order is fixed. Nodes without M4-B compute the ML-DSA-44 message over
+    the SLH output as it is, so the SLH signature has to be final first; signed
+    the other way round, new and old nodes refuse the block (bad-signet-pqblk).
+
+    1. Insert the placeholder SLH output 6a 05 "PQH1" 01 before the witness
+       commitment output, which stays last, and append the cut ML-DSA-44 push
+       05 "PQB1" 01 to the commitment output: the coinbase is slh_coinbase.
+    2. Compute slh_msg.
+    3. Call the signer program on it: it signs with a fresh opt_rand, verifies
+       the signature with the public key and prints nothing unless it holds.
+       Its output is read only after exit 0, and it is killed after
+       SLH_SIGN_TIMEOUT. Then the signature is verified here too, in Python
+       (a few milliseconds), under the public key whose hash was checked: the
+       key file could change between the -pubkey call and the signing call,
+       and the signer's own check would pass with the new key.
+    4. Replace the placeholder with the full SLH output and take the cut push
+       off; then the ML-DSA-44 signature as before (add_pq_block_signature),
+       which covers the SLH signature. mine_block then has the classical
+       signet solution signed over both, as before.
+
+    The public key is checked against ARK0_SLH_BLOCK_KEY_SHA256 at every block,
+    before ARK0_SLH_BLOCK_FROM too, for the same reason as the ML-DSA-44 key.
+    The functions are those of test_framework/signet_slh.py, which
+    feature_signet_slhblock.py and tool_signet_slh_sign.py run in the same order
+    (add_signet_slh_and_pq_signatures).
+    """
+    from test_framework.signet_slh import (
+        insert_signet_slh_placeholder, program_slh_pubkey, program_slh_signer,
+        set_signet_slh_signature, signet_slh_coinbase, signet_slh_message,
+    )
+    pubkey = program_slh_pubkey(SLH_SIGNER, SLH_BLOCK_KEY_FILE, timeout=SLH_PUBKEY_TIMEOUT)
+    require(hashlib.sha256(pubkey).hexdigest() == SLH_BLOCK_KEY_SHA256.lower(),
+            "the SLH-DSA block key is not the one ARK0_SLH_BLOCK_KEY_SHA256 names")
+    if tmpl["height"] >= int(SLH_BLOCK_FROM):
+        challenge = bytes.fromhex(tmpl["signet_challenge"])
+        index = insert_signet_slh_placeholder(block)                              # 1
+        message = signet_slh_message(block, challenge)                            # 2
+        require(block.vtx[0].txid_int == signet_slh_coinbase(block).txid_int,
+                "the placeholder coinbase is not slh_coinbase")
+        signature = program_slh_signer(SLH_SIGNER, SLH_BLOCK_KEY_FILE, pubkey=pubkey,
+                                       timeout=SLH_SIGN_TIMEOUT)(message)         # 3
+        set_signet_slh_signature(block, index, signature, challenge, message)     # 4
+    add_pq_block_signature(block, tmpl)
+
+
 def mine_block(extra_raw_txs=()):
     """Assemble, sign and submit one signet block.
 
@@ -198,17 +339,7 @@ def mine_block(extra_raw_txs=()):
     Returns (block_hex, blockhash_or_None, submitblock_result).
     """
     tmpl = cli_json("getblocktemplate", '{"rules":["signet","segwit"]}', wallet=False)
-    if tmpl["signet_challenge"] == ARK0_SIGNET_CHALLENGE:
-        # Without the block key, signing from above the rule's height, or in the
-        # other candidate's mode, which leaves the block signature out, the
-        # producer would mine blocks the nodes accept until 20000 and refuse
-        # from there on. Stop before the first one instead.
-        require(PQ_BLOCK_SEED_FILE and not PQ_CHALLENGE_SEED_FILE and PQ_BLOCK_FROM
-                and int(PQ_BLOCK_FROM) <= ARK0_PQ_BLOCK_HEIGHT
-                and (PQ_BLOCK_KEY_SHA256 or "").lower() == ARK0_PQ_KEY_SHA256,
-                "Ark-0 blocks need ARK0_PQ_BLOCK_SEED_FILE, ARK0_PQ_BLOCK_FROM at most "
-                f"{ARK0_PQ_BLOCK_HEIGHT}, ARK0_PQ_BLOCK_KEY_SHA256 {ARK0_PQ_KEY_SHA256} "
-                "and no ARK0_PQ_CHALLENGE_SEED_FILE")
+    check_block_keys(tmpl)
     for raw in extra_raw_txs:
         tmpl["transactions"].append({"data": raw})
     block = miner.new_block(tmpl, reward_spk())
@@ -219,7 +350,9 @@ def mine_block(extra_raw_txs=()):
         pubkey, seckey = pq_key(PQ_CHALLENGE_SEED_FILE)
         solution = signet_p2mr_solution(block, pubkey, seckey, rnd=os.urandom(32))
     else:
-        if PQ_BLOCK_SEED_FILE:
+        if slh_variables():
+            add_slh_and_pq_block_signatures(block, tmpl)
+        elif PQ_BLOCK_SEED_FILE:
             add_pq_block_signature(block, tmpl)
         psbt = miner.generate_psbt(block, tmpl["signet_challenge"])
         processed = json.loads(cli_stdin("walletprocesspsbt", psbt))

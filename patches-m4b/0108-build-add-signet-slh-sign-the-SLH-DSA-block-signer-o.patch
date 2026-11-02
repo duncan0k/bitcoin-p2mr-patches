@@ -1,0 +1,608 @@
+From 802b38d3a56d11d7cac2169d6b59ab763b99259b Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:13:03 +0000
+Subject: [PATCH 108/112] build: add signet-slh-sign, the SLH-DSA block signer
+ of a signet block producer
+
+A small C program, src/signet-slh-sign.c, over the vendored slhdsa-c the node
+verifies with: it links the objects of bitcoin_slhdsa128s, compiled with that
+library's options, and nothing else of Core; no node binary links it. Built
+with BUILD_SIGNET_SLH_SIGNER (the default when tests are built), on Linux only:
+it relies on prctl(PR_SET_DUMPABLE) and getrandom. It is linked fully static
+and not position-independent (-static -no-pie; libc.a from libc6-dev): it loads
+no loader and no library, so a release check has only its one file to read.
+
+  signet-slh-sign <keyfile>           the 32-byte message as 64 hexadecimal
+                                      characters on standard input (an optional
+                                      final newline); the signature in hex
+  signet-slh-sign -pubkey <keyfile>   the public key in hex
+
+<keyfile> holds exactly the 48 bytes SK.seed || SK.prf || PK.seed. The
+program reads and checks the message before it opens the key file, signs with
+FIPS 205 slh_sign, context SIGNET/SLHBLOCK/EXP0 and a fresh 16-byte opt_rand
+from getrandom, verifies the signature with the public key, and prints it
+only then. On a non-zero exit standard output must be ignored: it is empty
+unless writing the result itself failed part way.
+
+The secret: before the key file is opened the process makes itself
+non-dumpable (PR_SET_DUMPABLE 0, checked with PR_GET_DUMPABLE; exit 6
+otherwise), so no core dump is written (do_coredump in fs/coredump.c stops
+first for such a process, whatever core_pattern says). The key is read with
+open and read into the program's own buffer, no stdio. Every buffer of its own
+that held the key or a derived secret is overwritten on every return path,
+and after key generation, signing and verification 64 KiB of stack below the
+caller is overwritten through volatile writes (the library uses under 9 KiB;
+it is not changed, as the node compiles it too). Registers and the pages the
+kernel reclaims at exit remain, which a C program cannot clear.
+
+signet-slh-sign-fault-test, built only with the tests and never installed, is
+the same program with the faults SIGNET_SLH_SIGN_TEST_FAULT selects: a bit of
+every signature flipped between signing and verifying, or a failing random
+source.
+
+The stack scrub holds for an optimised build without sanitizers or split
+stacks, the only kind that ships: AddressSanitizer's fake stack, SafeStack's
+unsafe stack and GCC's split stacks move frames where it cannot reach. So
+CMake builds no signet-slh-sign when SANITIZERS is set, or when -fsanitize or
+-fsplit-stack appears in the compiler arguments (CMAKE_<LANG>_COMPILER_ARG1),
+the final C, C++ and executable linker flags (per configuration too), Core's
+APPEND_* flags or the options of the SLH library and sanitize_interface. The
+decision is taken in one place, where the targets are made, after every
+language is enabled (so CFLAGS and CXXFLAGS count), and test/config.ini is
+written after src/ from it; the configure output says why the signer was left
+out. Only the test option SIGNET_SLH_SIGN_ALLOW_SANITIZERS builds a separate
+target with SANITIZERS, signet-slh-sign-sanitizer-test, with no install rule
+and marked with the string SIGNET_SLH_SIGN_SANITIZER_BUILD for release staging
+to refuse; the source does not compile under the sanitizers a compiler
+announces (address, hwaddress, memory, thread, safe-stack) except as that
+target. No compiler announces -fsplit-stack.
+config.ini says which of the three programs exist.
+---
+ CMakeLists.txt        |  10 ++
+ src/CMakeLists.txt    | 110 +++++++++++++++
+ src/signet-slh-sign.c | 322 ++++++++++++++++++++++++++++++++++++++++++
+ test/CMakeLists.txt   |   9 +-
+ test/config.ini.in    |   3 +
+ 5 files changed, 451 insertions(+), 3 deletions(-)
+ create mode 100644 src/signet-slh-sign.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6109639..2ef43ae 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -107,6 +107,7 @@ option(BUILD_CLI "Build bitcoin-cli executable." ON)
+ option(BUILD_TESTS "Build test_bitcoin and other unit test executables." ON)
+ option(BUILD_TX "Build bitcoin-tx executable." ${BUILD_TESTS})
+ option(BUILD_UTIL "Build bitcoin-util executable." ${BUILD_TESTS})
++option(BUILD_SIGNET_SLH_SIGNER "Build signet-slh-sign, the SLH-DSA block signer of a signet block producer (see doc/signet-slhblock.md)." ${BUILD_TESTS})
+ 
+ option(BUILD_UTIL_CHAINSTATE "Build experimental bitcoin-chainstate executable." OFF)
+ option(BUILD_KERNEL_LIB "Build experimental bitcoinkernel library." ${BUILD_UTIL_CHAINSTATE})
+@@ -220,6 +221,7 @@ if(BUILD_FOR_FUZZING)
+   set(BUILD_CLI OFF)
+   set(BUILD_TX OFF)
+   set(BUILD_UTIL OFF)
++  set(BUILD_SIGNET_SLH_SIGNER OFF)
+   set(BUILD_UTIL_CHAINSTATE OFF)
+   set(BUILD_KERNEL_LIB OFF)
+   set(BUILD_KERNEL_TEST OFF)
+@@ -616,10 +618,17 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+   set(CMAKE_SKIP_TEST_ALL_DEPENDENCY FALSE)
+ endif()
+ 
++# signet-slh-sign (src/CMakeLists.txt): which of its targets exist is decided in src/, where they are
++# made, once every language is enabled and its flags are final; test/config.ini is written after
++# src/ from that decision. Tests only: a separate, marked, never-installed sanitizer build.
++option(SIGNET_SLH_SIGN_ALLOW_SANITIZERS "Tests only: build signet-slh-sign-sanitizer-test, the signer with SANITIZERS (marked, never installed)." OFF)
++
+ add_subdirectory(test)
+ add_subdirectory(doc)
+ 
+ add_subdirectory(src)
++# After src/: the signer's targets (WITH_SIGNET_SLH_SIGN*) are decided there.
++create_test_config()
+ 
+ include(Maintenance)
+ setup_split_debug_script()
+@@ -648,6 +657,7 @@ message("  bitcoin-gui (GUI, multiprocess) ..... ${bitcoin_gui_status}")
+ message("  bitcoin-cli ......................... ${BUILD_CLI}")
+ message("  bitcoin-tx .......................... ${BUILD_TX}")
+ message("  bitcoin-util ........................ ${BUILD_UTIL}")
++message("  signet-slh-sign ..................... ${WITH_SIGNET_SLH_SIGN}")
+ message("  bitcoin-wallet ...................... ${BUILD_WALLET_TOOL}")
+ message("  bitcoin-chainstate (experimental) ... ${BUILD_UTIL_CHAINSTATE}")
+ message("  libbitcoinkernel (experimental) ..... ${BUILD_KERNEL_LIB}")
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index faf1e8e..5c82552 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -394,6 +394,116 @@ if(BUILD_UTIL)
+   install_binary_component(bitcoin-util HAS_MANPAGE)
+ endif()
+ 
++# signet-slh-sign (doc/signet-slhblock.md): the SLH-DSA-SHA2-128s block signer of a signet block
++# producer, a C program of its own over the vendored slhdsa-c the node verifies with: it links the
++# objects of bitcoin_slhdsa128s, compiled with that library's options, and nothing else of Core. No
++# node binary links it. Its three targets:
++# - signet-slh-sign, the production program: Linux, and no sanitizer anywhere the build can see;
++#   fully static, non-PIE; the only one installed;
++# - signet-slh-sign-sanitizer-test: the same with SANITIZERS, only for the tests and only with
++#   SIGNET_SLH_SIGN_ALLOW_SANITIZERS; marked (SIGNET_SLH_SIGN_SANITIZER_BUILD), never installed;
++# - signet-slh-sign-fault-test: the faults SIGNET_SLH_SIGN_TEST_FAULT selects (a bit of every
++#   signature flipped between signing and verifying, or a failing random source), for
++#   tool_signet_slh_sign.py; never installed.
++#
++# Decided here, in one place, from the final values: every language is enabled by now (C by
++# cmake/secp256k1.cmake above), so CFLAGS and CXXFLAGS have reached CMAKE_C_FLAGS and
++# CMAKE_CXX_FLAGS. A sanitizer (SafeStack included) is seen in SANITIZERS, or as -fsanitize in the
++# compiler arguments; GCC's split stacks are seen as -fsplit-stack there. ASan's fake stack,
++# SafeStack's unsafe stack and split stacks move frames out of the signer's stack scrub's reach.
++# The compiler arguments are the compiler's own
++# (CMAKE_<LANG>_COMPILER_ARG1, from a compiler given as a list), the C, C++ and executable linker
++# flags and their per-configuration variants, Core's APPEND_* flags, and the compile and link options
++# of the SLH library and sanitize_interface, from which the signer's own are made. The results go to
++# the parent scope, where test/config.ini is written from them.
++set(signet_slh_sign_flag_vars CMAKE_C_COMPILER_ARG1 CMAKE_CXX_COMPILER_ARG1
++  CMAKE_C_FLAGS CMAKE_CXX_FLAGS CMAKE_EXE_LINKER_FLAGS
++  APPEND_CPPFLAGS APPEND_CFLAGS APPEND_CXXFLAGS APPEND_LDFLAGS)
++set(signet_slh_sign_configs DEBUG RELEASE RELWITHDEBINFO MINSIZEREL ${CMAKE_CONFIGURATION_TYPES})
++if(CMAKE_BUILD_TYPE)
++  list(APPEND signet_slh_sign_configs ${CMAKE_BUILD_TYPE})
++endif()
++foreach(config IN LISTS signet_slh_sign_configs)
++  string(TOUPPER "${config}" config)
++  list(APPEND signet_slh_sign_flag_vars CMAKE_C_FLAGS_${config} CMAKE_CXX_FLAGS_${config} CMAKE_EXE_LINKER_FLAGS_${config})
++endforeach()
++list(REMOVE_DUPLICATES signet_slh_sign_flag_vars)
++set(signet_slh_sign_sanitize_seen "")
++foreach(var IN LISTS signet_slh_sign_flag_vars)
++  if("${${var}}" MATCHES "-fsanitize|-fsplit-stack")
++    list(APPEND signet_slh_sign_sanitize_seen ${var})
++  endif()
++endforeach()
++foreach(target IN ITEMS bitcoin_slhdsa128s sanitize_interface)
++  foreach(property IN ITEMS COMPILE_OPTIONS LINK_OPTIONS INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS)
++    get_target_property(value ${target} ${property})
++    if(value AND "${value}" MATCHES "-fsanitize|-fsplit-stack")
++      list(APPEND signet_slh_sign_sanitize_seen "${property} of ${target}")
++    endif()
++  endforeach()
++endforeach()
++set(WITH_SIGNET_SLH_SIGN OFF)
++set(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST OFF)
++set(WITH_SIGNET_SLH_SIGN_FAULT_TEST OFF)
++if(BUILD_SIGNET_SLH_SIGNER)
++  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    message(STATUS "signet-slh-sign is Linux only; not built for ${CMAKE_SYSTEM_NAME}.")
++  elseif(SANITIZERS OR signet_slh_sign_sanitize_seen)
++    if(SANITIZERS AND SIGNET_SLH_SIGN_ALLOW_SANITIZERS AND BUILD_TESTS)
++      set(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST ON)
++      set(WITH_SIGNET_SLH_SIGN_FAULT_TEST ON)
++    endif()
++    if(SANITIZERS)
++      list(APPEND signet_slh_sign_sanitize_seen "SANITIZERS=${SANITIZERS}")
++    endif()
++    list(JOIN signet_slh_sign_sanitize_seen ", " signet_slh_sign_sanitize_seen)
++    message(STATUS "signet-slh-sign is not built: a sanitizer or split stacks are configured (${signet_slh_sign_sanitize_seen}), and no shipped signer may carry either (doc/signet-slhblock.md). signet-slh-sign-sanitizer-test: ${WITH_SIGNET_SLH_SIGN_SANITIZER_TEST}.")
++  else()
++    set(WITH_SIGNET_SLH_SIGN ON)
++    if(BUILD_TESTS)
++      set(WITH_SIGNET_SLH_SIGN_FAULT_TEST ON)
++    endif()
++  endif()
++endif()
++set(WITH_SIGNET_SLH_SIGN ${WITH_SIGNET_SLH_SIGN} PARENT_SCOPE)
++set(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST ${WITH_SIGNET_SLH_SIGN_SANITIZER_TEST} PARENT_SCOPE)
++set(WITH_SIGNET_SLH_SIGN_FAULT_TEST ${WITH_SIGNET_SLH_SIGN_FAULT_TEST} PARENT_SCOPE)
++
++function(add_signet_slh_sign_executable name)
++  add_executable(${name} ${ARGN} signet-slh-sign.c)
++  get_target_property(options bitcoin_slhdsa128s COMPILE_OPTIONS)
++  get_target_property(definitions bitcoin_slhdsa128s COMPILE_DEFINITIONS)
++  if(options)
++    target_compile_options(${name} PRIVATE ${options})
++  endif()
++  if(definitions)
++    target_compile_definitions(${name} PRIVATE ${definitions})
++  endif()
++  target_link_libraries(${name} PRIVATE sanitize_interface bitcoin_slhdsa128s)
++endfunction()
++if(WITH_SIGNET_SLH_SIGN)
++  add_signet_slh_sign_executable(signet-slh-sign)
++  # Fully static and not position-independent: it loads nothing, no loader and no library, so a
++  # release check (check-signer.sh in the patch repository) has no dependencies to follow, only
++  # this one file. It uses libc (open, read, prctl, getrandom) and the SLH library; libc.a comes
++  # with libc6-dev.
++  set_target_properties(signet-slh-sign PROPERTIES POSITION_INDEPENDENT_CODE OFF)
++  target_link_options(signet-slh-sign PRIVATE -static -no-pie)
++  install_binary_component(signet-slh-sign)
++  set(signet_slh_sign_main signet-slh-sign)
++elseif(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST)
++  add_signet_slh_sign_executable(signet-slh-sign-sanitizer-test)
++  target_compile_definitions(signet-slh-sign-sanitizer-test PRIVATE SIGNET_SLH_SIGN_ALLOW_SANITIZERS)
++  set(signet_slh_sign_main signet-slh-sign-sanitizer-test)
++endif()
++if(WITH_SIGNET_SLH_SIGN_FAULT_TEST)
++  add_signet_slh_sign_executable(signet-slh-sign-fault-test EXCLUDE_FROM_ALL)
++  target_compile_definitions(signet-slh-sign-fault-test PRIVATE SIGNET_SLH_SIGN_TEST_BUILD)
++  if(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST)
++    target_compile_definitions(signet-slh-sign-fault-test PRIVATE SIGNET_SLH_SIGN_ALLOW_SANITIZERS)
++  endif()
++  add_dependencies(${signet_slh_sign_main} signet-slh-sign-fault-test)
++endif()
+ 
+ if(BUILD_GUI)
+   add_subdirectory(qt)
+diff --git a/src/signet-slh-sign.c b/src/signet-slh-sign.c
+new file mode 100644
+index 0000000..9a3cb1d
+--- /dev/null
++++ b/src/signet-slh-sign.c
+@@ -0,0 +1,322 @@
++/* Copyright (c) 2026 duncan0k
++ * Distributed under the MIT software license, see the accompanying
++ * file COPYING or http://www.opensource.org/licenses/mit-license.php.
++ *
++ * signet-slh-sign: the SLH-DSA-SHA2-128s block signer of a signet block producer
++ * (doc/signet-slhblock.md). It is built from the vendored slhdsa-c of src/crypto/slhdsa128s/, the
++ * library the node verifies with, as a program of its own: no node binary links it. Linux only: it
++ * relies on prctl(PR_SET_DUMPABLE) and getrandom.
++ *
++ *   signet-slh-sign <keyfile>           read the 32-byte message slh_msg as 64 hexadecimal
++ *                                       characters on standard input (an optional final newline),
++ *                                       sign it, verify the signature, and print it in hexadecimal
++ *   signet-slh-sign -pubkey <keyfile>   print the public key, PK.seed || PK.root, in hexadecimal
++ *
++ * <keyfile> holds exactly 48 bytes, SK.seed || SK.prf || PK.seed (FIPS 205 slh_keygen_internal),
++ * as raw bytes. The signature is slh_sign of FIPS 205 (pure SLH-DSA) with the context string
++ * "SIGNET/SLHBLOCK/EXP0" and a fresh 16-byte opt_rand from the operating system (hedged signing).
++ * It is verified with the public key before anything is printed.
++ *
++ * On any error, malformed input or failed verification the program exits non-zero, with the
++ * reason on standard error. On a non-zero exit, standard output must be ignored: it is empty
++ * except when writing the result itself failed part way. Nothing derived from the secret key but
++ * the signature and the public key is ever printed.
++ *
++ * The secret, and how far it is kept:
++ * - Before the key file is opened the process makes itself non-dumpable (PR_SET_DUMPABLE 0, then
++ *   checked with PR_GET_DUMPABLE), so no core dump of it is written: do_coredump() in the kernel's
++ *   fs/coredump.c gives up first thing for a non-dumpable process, whatever core_pattern says (a
++ *   file, a pipe or a socket). It also keeps other unprivileged processes of the same user from
++ *   ptrace and from /proc/<pid>/mem.
++ * - The key file is read with open() and read() into the program's own buffer: no stdio buffer
++ *   holds it.
++ * - Every buffer of the program's own that held the key or a secret derived from it is
++ *   overwritten on every return path; after key generation, signing and verification the stack
++ *   region the library used (under 9 KiB, measured) is overwritten too, 64 KiB of it
++ *   (burn_stack), since the vendored library, which the node compiles as well, is not changed.
++ * - What remains: CPU registers, and the process's pages until the kernel reclaims them at exit.
++ *   A C program cannot clear either; with dumps off and a process that lives under a second,
++ *   nothing else can read them.
++ */
++
++#if !defined(__linux__)
++#error "signet-slh-sign is Linux only: it relies on prctl(PR_SET_DUMPABLE) and getrandom."
++#endif
++
++/* Three mechanisms move stack frames where burn_stack() does not reach, so that the library's
++ * copies of the key would stay there: AddressSanitizer's fake stack (use-after-return detection),
++ * SafeStack's unsafe stack (address-taken locals, such as the key's buffers) and GCC's split
++ * stacks (-fsplit-stack, frames on stack segments from __morestack). The stack scrub holds only
++ * for an optimised build without any of them, the only kind that ships. Such a build is refused
++ * unless it is the test-only target signet-slh-sign-sanitizer-test (CMake option
++ * SIGNET_SLH_SIGN_ALLOW_SANITIZERS defines the macro of the same name), which marks itself so that
++ * release staging refuses the binary; CMake builds no production signer with any sanitizer or
++ * with split stacks. Neither GCC 13 nor Clang 18 defines a macro for -fsplit-stack, so the source
++ * cannot see it: the configure check and release staging refuse it. */
++#if defined(__has_feature)
++#if __has_feature(address_sanitizer) || __has_feature(hwaddress_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(safe_stack)
++#define SIGNET_SLH_SIGN_UNDER_SANITIZER 1
++#endif
++#endif
++#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_HWADDRESS__) || defined(__SANITIZE_THREAD__)
++#define SIGNET_SLH_SIGN_UNDER_SANITIZER 1
++#endif
++#if defined(SIGNET_SLH_SIGN_UNDER_SANITIZER) && !defined(SIGNET_SLH_SIGN_ALLOW_SANITIZERS)
++#error "signet-slh-sign must not be built with a sanitizer (AddressSanitizer's fake stack and SafeStack's unsafe stack move frames out of its stack scrub's reach). Tests only: -DSIGNET_SLH_SIGN_ALLOW_SANITIZERS=ON."
++#endif
++#if defined(SIGNET_SLH_SIGN_ALLOW_SANITIZERS)
++/* Found by name in the binary by stage-miner.sh and Dockerfile.miner, which refuse it. */
++__attribute__((used)) static const char SANITIZER_BUILD_MARK[] = "SIGNET_SLH_SIGN_SANITIZER_BUILD";
++#endif
++
++#include <slh_dsa.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/prctl.h>
++#include <sys/random.h>
++#include <unistd.h>
++
++#define KEY_SEED_SIZE 48
++#define SECKEY_SIZE 64
++#define PUBKEY_SIZE 32
++#define MESSAGE_SIZE 32
++#define SIGNATURE_SIZE 7856
++#define OPT_RAND_SIZE 16
++/* The stack burnt after the library ran: about seven times the most it uses (keygen, sign and
++ * verify each stay under 9 KiB with the build's flags). */
++#define BURN_STACK_SIZE (64 * 1024)
++
++/* Exit codes. */
++#define EXIT_USAGE 1
++#define EXIT_INPUT 2
++#define EXIT_RANDOM 3
++#define EXIT_SIGN 4
++#define EXIT_OUTPUT 5
++#define EXIT_DUMPABLE 6
++
++static const char CONTEXT[] = "SIGNET/SLHBLOCK/EXP0";
++
++/* memset that the compiler may not remove as a dead store. */
++static void cleanse(void *ptr, size_t len)
++{
++    volatile unsigned char *p = (volatile unsigned char *)ptr;
++    while (len--) *p++ = 0;
++}
++
++/* Overwrite the stack below the caller's frame, where the library's frames were (as libgcrypt's
++ * _gcry_burn_stack). Not inlined, so that its array lies where the callee frames lay; written
++ * through volatile, so that the stores stay. */
++__attribute__((noinline)) static void burn_stack(void)
++{
++    volatile unsigned char area[BURN_STACK_SIZE];
++    for (size_t i = 0; i < sizeof(area); ++i) area[i] = 0;
++    __asm__ __volatile__("" : : "r"(area) : "memory");
++}
++
++static int hex_value(int c)
++{
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++}
++
++static void to_hex(char *out, const uint8_t *in, size_t len)
++{
++    static const char DIGITS[] = "0123456789abcdef";
++    for (size_t i = 0; i < len; ++i) {
++        out[2 * i] = DIGITS[in[i] >> 4];
++        out[2 * i + 1] = DIGITS[in[i] & 15];
++    }
++}
++
++/* The 48 key bytes, from a file that holds exactly those, read with read() into key itself:
++ * one byte more is asked for, to tell a longer file. */
++static int read_key(const char *path, uint8_t key[KEY_SEED_SIZE + 1])
++{
++    const int fd = open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        fprintf(stderr, "signet-slh-sign: cannot open the key file: %s\n", strerror(errno));
++        return 0;
++    }
++    size_t got = 0;
++    int failed = 0;
++    while (got < KEY_SEED_SIZE + 1) {
++        const ssize_t r = read(fd, key + got, KEY_SEED_SIZE + 1 - got);
++        if (r < 0) {
++            if (errno == EINTR) continue;
++            failed = 1;
++            break;
++        }
++        if (r == 0) break;
++        got += (size_t)r;
++    }
++    close(fd);
++    if (failed || got != KEY_SEED_SIZE) {
++        cleanse(key, KEY_SEED_SIZE + 1);
++        fprintf(stderr, "signet-slh-sign: the key file must hold exactly %d bytes\n", KEY_SEED_SIZE);
++        return 0;
++    }
++    return 1;
++}
++
++/* The message: 64 hexadecimal characters and at most one final newline, nothing else. */
++static int read_message(uint8_t msg[MESSAGE_SIZE])
++{
++    char buf[2 * MESSAGE_SIZE + 2];
++    const size_t got = fread(buf, 1, sizeof(buf), stdin);
++    if (ferror(stdin)) {
++        fprintf(stderr, "signet-slh-sign: cannot read standard input\n");
++        return 0;
++    }
++    if (!(got == 2 * MESSAGE_SIZE || (got == 2 * MESSAGE_SIZE + 1 && buf[2 * MESSAGE_SIZE] == '\n'))) {
++        fprintf(stderr, "signet-slh-sign: standard input must be the %d-byte message as %d hexadecimal characters\n",
++                MESSAGE_SIZE, 2 * MESSAGE_SIZE);
++        return 0;
++    }
++    for (size_t i = 0; i < MESSAGE_SIZE; ++i) {
++        const int hi = hex_value((unsigned char)buf[2 * i]), lo = hex_value((unsigned char)buf[2 * i + 1]);
++        if (hi < 0 || lo < 0) {
++            fprintf(stderr, "signet-slh-sign: the message is not hexadecimal\n");
++            return 0;
++        }
++        msg[i] = (uint8_t)(hi << 4 | lo);
++    }
++    return 1;
++}
++
++#ifdef SIGNET_SLH_SIGN_TEST_BUILD
++/* Test builds only (signet-slh-sign-fault-test): the fault SIGNET_SLH_SIGN_TEST_FAULT names,
++ * "random" (the random source fails) or, by default, "flip" (a bit of every signature flips
++ * between signing and verifying). The build never defines SIGNET_SLH_SIGN_TEST_BUILD. */
++static int test_fault(const char *name)
++{
++    const char *fault = getenv("SIGNET_SLH_SIGN_TEST_FAULT");
++    return strcmp(fault ? fault : "flip", name) == 0;
++}
++#endif
++
++/* opt_rand from the operating system's CSPRNG. */
++static int os_random(uint8_t *out, size_t len)
++{
++#ifdef SIGNET_SLH_SIGN_TEST_BUILD
++    if (test_fault("random")) return 0;
++#endif
++    size_t done = 0;
++    while (done < len) {
++        const ssize_t r = getrandom(out + done, len - done, 0);
++        if (r < 0) {
++            if (errno == EINTR) continue;
++            return 0;
++        }
++        done += (size_t)r;
++    }
++    return 1;
++}
++
++/* Write the whole buffer and a newline to standard output, or report failure. A failure part way
++ * can leave part of it there: the caller exits non-zero, and standard output is then ignored. */
++static int write_line(const char *text, size_t len)
++{
++    if (fwrite(text, 1, len, stdout) != len || fputc('\n', stdout) == EOF || fflush(stdout) != 0) {
++        fprintf(stderr, "signet-slh-sign: cannot write standard output\n");
++        return 0;
++    }
++    return 1;
++}
++
++static int usage(void)
++{
++    fprintf(stderr,
++            "Usage: signet-slh-sign <keyfile>          sign the message (64 hex characters) on standard input\n"
++            "       signet-slh-sign -pubkey <keyfile>  print the public key\n"
++            "<keyfile> holds the 48 bytes SK.seed || SK.prf || PK.seed.\n"
++            "Exit 0: standard output holds the result. Any other exit: ignore standard output.\n");
++    return EXIT_USAGE;
++}
++
++int main(int argc, char **argv)
++{
++    static uint8_t key[KEY_SEED_SIZE + 1], seckey[SECKEY_SIZE], opt_rand[OPT_RAND_SIZE];
++    static uint8_t sig[SIGNATURE_SIZE];
++    static char out[2 * SIGNATURE_SIZE];
++    uint8_t pubkey[PUBKEY_SIZE], msg[MESSAGE_SIZE];
++    int code = EXIT_INPUT;
++
++    /* First of all, before any file is opened: no core dump, and checked. */
++    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 || prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0) {
++        fprintf(stderr, "signet-slh-sign: cannot make the process non-dumpable\n");
++        return EXIT_DUMPABLE;
++    }
++
++    const int pubkey_only = argc == 3 && strcmp(argv[1], "-pubkey") == 0;
++    if (!(argc == 2 && argv[1][0] != '-') && !pubkey_only) return usage();
++    const char *path = argv[argc - 1];
++
++    /* The message is read and checked before the key file is opened, so malformed input never
++     * loads the key. */
++    if (!pubkey_only && !read_message(msg)) goto done;
++    if (!read_key(path, key)) goto done;
++    {
++        const int failed = slh_keygen_internal(seckey, pubkey, key, key + 16, key + 32, &slh_dsa_sha2_128s) != 0;
++        cleanse(key, sizeof(key));
++        burn_stack();
++        if (failed) {
++            fprintf(stderr, "signet-slh-sign: key generation failed\n");
++            code = EXIT_SIGN;
++            goto done;
++        }
++    }
++    if (pubkey_only) {
++        cleanse(seckey, sizeof(seckey));
++        to_hex(out, pubkey, PUBKEY_SIZE);
++        code = write_line(out, 2 * PUBKEY_SIZE) ? 0 : EXIT_OUTPUT;
++        goto done;
++    }
++
++    if (!os_random(opt_rand, sizeof(opt_rand))) {
++        fprintf(stderr, "signet-slh-sign: cannot read randomness from the operating system\n");
++        code = EXIT_RANDOM;
++        goto done;
++    }
++    {
++        const size_t len = slh_sign(sig, msg, MESSAGE_SIZE, (const uint8_t *)CONTEXT, sizeof(CONTEXT) - 1, seckey, opt_rand,
++                                    &slh_dsa_sha2_128s);
++        cleanse(seckey, sizeof(seckey));
++        cleanse(opt_rand, sizeof(opt_rand));
++        burn_stack();
++        if (len != SIGNATURE_SIZE) {
++            fprintf(stderr, "signet-slh-sign: signing failed\n");
++            code = EXIT_SIGN;
++            goto done;
++        }
++    }
++#ifdef SIGNET_SLH_SIGN_TEST_BUILD
++    if (test_fault("flip")) sig[1000] ^= 1;
++#endif
++    /* The signature is printed only once it verifies under the public key. */
++    {
++        const int valid = slh_verify(msg, MESSAGE_SIZE, sig, SIGNATURE_SIZE, (const uint8_t *)CONTEXT, sizeof(CONTEXT) - 1,
++                                     pubkey, &slh_dsa_sha2_128s) == 1;
++        burn_stack();
++        if (!valid) {
++            fprintf(stderr, "signet-slh-sign: the signature does not verify; nothing printed\n");
++            code = EXIT_SIGN;
++            goto done;
++        }
++    }
++    to_hex(out, sig, SIGNATURE_SIZE);
++    code = write_line(out, 2 * SIGNATURE_SIZE) ? 0 : EXIT_OUTPUT;
++
++done:
++    cleanse(key, sizeof(key));
++    cleanse(seckey, sizeof(seckey));
++    cleanse(opt_rand, sizeof(opt_rand));
++    burn_stack();
++    return code;
++}
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index eac3ec5..63c53c7 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -20,6 +20,9 @@ function(create_test_config)
+   set_configure_variable(BUILD_CLI BUILD_BITCOIN_CLI)
+   set_configure_variable(BUILD_TX BUILD_BITCOIN_TX)
+   set_configure_variable(BUILD_UTIL BUILD_BITCOIN_UTIL)
++  set_configure_variable(WITH_SIGNET_SLH_SIGN BUILD_SIGNET_SLH_SIGNER)
++  set_configure_variable(WITH_SIGNET_SLH_SIGN_SANITIZER_TEST BUILD_SIGNET_SLH_SIGN_SANITIZER_TEST)
++  set_configure_variable(WITH_SIGNET_SLH_SIGN_FAULT_TEST BUILD_SIGNET_SLH_SIGN_FAULT_TEST)
+   set_configure_variable(BUILD_UTIL_CHAINSTATE BUILD_BITCOIN_CHAINSTATE)
+   set_configure_variable(BUILD_WALLET_TOOL BUILD_BITCOIN_WALLET)
+   set_configure_variable(BUILD_DAEMON BUILD_BITCOIND)
+@@ -30,10 +33,10 @@ function(create_test_config)
+   set_configure_variable(WITH_USDT ENABLE_USDT_TRACEPOINTS)
+   set_configure_variable(ENABLE_IPC ENABLE_IPC)
+ 
+-  configure_file(config.ini.in config.ini USE_SOURCE_PERMISSIONS @ONLY)
++  configure_file(${PROJECT_SOURCE_DIR}/test/config.ini.in ${PROJECT_BINARY_DIR}/test/config.ini USE_SOURCE_PERMISSIONS @ONLY)
+ endfunction()
+-
+-create_test_config()
++# Called from the top-level CMakeLists.txt after src/, which decides which signet-slh-sign targets
++# exist (doc/signet-slhblock.md).
+ 
+ 
+ function(create_test_directory_links)
+diff --git a/test/config.ini.in b/test/config.ini.in
+index 20fa36b..69bb735 100644
+--- a/test/config.ini.in
++++ b/test/config.ini.in
+@@ -20,6 +20,9 @@ RPCAUTH=@abs_top_srcdir@/share/rpcauth/rpcauth.py
+ @BUILD_BITCOIN_CLI_TRUE@ENABLE_CLI=true
+ @BUILD_BITCOIN_TX_TRUE@BUILD_BITCOIN_TX=true
+ @BUILD_BITCOIN_UTIL_TRUE@ENABLE_BITCOIN_UTIL=true
++@BUILD_SIGNET_SLH_SIGNER_TRUE@BUILD_SIGNET_SLH_SIGNER=true
++@BUILD_SIGNET_SLH_SIGN_SANITIZER_TEST_TRUE@BUILD_SIGNET_SLH_SIGN_SANITIZER_TEST=true
++@BUILD_SIGNET_SLH_SIGN_FAULT_TEST_TRUE@BUILD_SIGNET_SLH_SIGN_FAULT_TEST=true
+ @BUILD_BITCOIN_CHAINSTATE_TRUE@ENABLE_BITCOIN_CHAINSTATE=true
+ @BUILD_BITCOIN_WALLET_TRUE@ENABLE_WALLET_TOOL=true
+ @BUILD_BITCOIND_TRUE@ENABLE_BITCOIND=true
+-- 
+2.43.0
+

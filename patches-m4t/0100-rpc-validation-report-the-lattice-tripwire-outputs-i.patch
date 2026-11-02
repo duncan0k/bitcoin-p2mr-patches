@@ -1,0 +1,178 @@
+From c3730acd73506362c0cd9eeda3b48288d7e27286 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 08:46:38 +0000
+Subject: [PATCH 100/105] rpc, validation: report the lattice tripwire outputs
+ in gettripwireinfo and log their spends
+
+gettripwireinfo gains a lattice object where the P2MR lattice tripwire
+rules have a height, read in the same cs_main snapshot as the rest, the
+tip, the tripwire outputs of leaf version 0xe0 and the rescue lane: the
+height, the leaf version "e2", the lattice tripwire outputs, each unspent
+or missing by the definition of present with the cutoff at the lattice
+height (for those the code fixes, on Ark-0, also the SHA256 of the
+ML-DSA-44 key and a label), and mldsa_disabled_next_block. The method
+stays one method, and the fields it had keep their meaning; the help says
+that ec_disabled_next_block also applies to leaf version 0xe2.
+
+A node on the active chainstate logs each lattice tripwire output a
+connected block spends, once ConnectTip has made it the tip, the way the
+tripwire outputs of leaf version 0xe0 are logged:
+
+  P2MR lattice tripwire <txid:vout> (<label>) spent by <txid> in block
+  <hash> (height N): OP_CHECKMLDSA44 in leaf version 0xe2 is disabled from
+  height max(H4T, N+1)
+
+or "is already disabled" when another lattice tripwire output was missing
+already. Block proposals, blocks that fail, VerifyDB and the background
+chainstate of an assumeutxo snapshot log nothing. The scan skips the
+coinbase, whose input names the null outpoint. At startup, and when the
+chain reaches the height of the rules, a node logs whether each lattice
+tripwire output is present and whether ML-DSA-44 checks in leaf version
+0xe2 are disabled for the next block. feature_p2mr_tripwire.py, which
+compares the whole result of gettripwireinfo, expects the lattice object a
+regtest node has by default: the height of leaf version 0xe0, no outputs.
+---
+ src/init.cpp                             |  5 +++
+ src/rpc/blockchain.cpp                   | 40 ++++++++++++++++++++++--
+ src/validation.cpp                       | 22 +++++++++++++
+ test/functional/feature_p2mr_tripwire.py |  3 ++
+ 4 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/src/init.cpp b/src/init.cpp
+index fb3f4c6..dc8e295 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -2119,6 +2119,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
+             LogInfo("P2MR tripwire state at height %d: %s", tip.nHeight,
+                     DescribeP2MRTripwireState(&tip, chainman.ActiveChainstate().CoinsTip(), chainman));
+         }
++        // And the lattice tripwire outputs (doc/p2mr-lattice-tripwire.md): whether all of them are present.
++        if (!chainman.GetConsensus().p2mr_lattice_tripwires.empty() && DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++            LogInfo("P2MR lattice tripwire state at height %d: %s", tip.nHeight,
++                    DescribeP2MRLatticeTripwireState(&tip, chainman.ActiveChainstate().CoinsTip(), chainman));
++        }
+         chain_active_height = tip.nHeight;
+         best_block_time = tip.GetBlockTime();
+         if (tip_info) {
+diff --git a/src/rpc/blockchain.cpp b/src/rpc/blockchain.cpp
+index 9794778..cfe22c9 100644
+--- a/src/rpc/blockchain.cpp
++++ b/src/rpc/blockchain.cpp
+@@ -1551,7 +1551,10 @@ static RPCHelpMan gettripwireinfo()
+         "gettripwireinfo",
+         "Returns the state of the experimental P2MR tripwire rules (doc/p2mr-tripwire.md) at the active chain tip.\n"
+         "From their height on, elliptic curve signature checks in P2MR leaves of leaf version 0xe0 fail in every block "
+-        "whose parent leaves a tripwire output missing.\n",
++        "whose parent leaves a tripwire output missing, and so do those in leaf version 0xe2 once it executes.\n"
++        "Where the experimental P2MR lattice tripwire rules (doc/p2mr-lattice-tripwire.md) have a height, the lattice object "
++        "gives their state from the same snapshot: from their height on, OP_CHECKMLDSA44 checks with a non-empty signature in "
++        "P2MR leaves of leaf version 0xe2 fail in every block whose parent leaves a lattice tripwire output missing.\n",
+         {},
+         RPCResult{
+             RPCResult::Type::OBJ, "", "",
+@@ -1569,7 +1572,7 @@ static RPCHelpMan gettripwireinfo()
+                         {RPCResult::Type::STR, "label", /*optional=*/true, "what the output is for (only for the outputs the code fixes, on the Ark-0 signet)"},
+                     }},
+                 }},
+-                {RPCResult::Type::BOOL, "ec_disabled_next_block", "whether elliptic curve signature checks in those leaves fail in the next block"},
++                {RPCResult::Type::BOOL, "ec_disabled_next_block", "whether elliptic curve signature checks in those leaves, and in leaves of leaf version 0xe2, fail in the next block"},
+                 {RPCResult::Type::OBJ, "rescue", /*optional=*/true, "the P2MR rescue lane (doc/p2mr-rescue.md), only where it has a height", {
+                     {RPCResult::Type::NUM, "height", "the height from which the lane is open"},
+                     {RPCResult::Type::BOOL, "active_next_block", "whether the lane is open in the next block"},
+@@ -1579,6 +1582,20 @@ static RPCHelpMan gettripwireinfo()
+                         {RPCResult::Type::STR_HEX, "", "a statement id"},
+                     }},
+                 }},
++                {RPCResult::Type::OBJ, "lattice", /*optional=*/true, "the P2MR lattice tripwire rules (doc/p2mr-lattice-tripwire.md), only where they have a height", {
++                    {RPCResult::Type::NUM, "height", "the height from which the rules apply"},
++                    {RPCResult::Type::STR_HEX, "leaf_version", "the leaf version the rules apply to"},
++                    {RPCResult::Type::ARR, "tripwires", "the lattice tripwire outputs", {
++                        {RPCResult::Type::OBJ, "", "", {
++                            {RPCResult::Type::STR, "outpoint", "the output, as txid:vout"},
++                            {RPCResult::Type::STR, "state", "\"unspent\" while it is an unspent output created below the height of these rules; "
++                                                            "\"missing\" otherwise: spent, never created, or created at or above that height, which the UTXO set does not tell apart"},
++                            {RPCResult::Type::STR_HEX, "key_sha256", /*optional=*/true, "the SHA256 of the ML-DSA-44 public key the output's leaf checks (only for the outputs the code fixes, on the Ark-0 signet)"},
++                            {RPCResult::Type::STR, "label", /*optional=*/true, "what the output is for (only for the outputs the code fixes, on the Ark-0 signet)"},
++                        }},
++                    }},
++                    {RPCResult::Type::BOOL, "mldsa_disabled_next_block", "whether OP_CHECKMLDSA44 checks with a non-empty signature in those leaves fail in the next block"},
++                }},
+             }},
+         RPCExamples{
+             HelpExampleCli("gettripwireinfo", "")
+@@ -1630,6 +1647,25 @@ static RPCHelpMan gettripwireinfo()
+         rescue.pushKV("statements", std::move(statements));
+         result.pushKV("rescue", std::move(rescue));
+     }
++    if (DeploymentEnabled(chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        // From the same snapshot. An output counts as present only when it was created below the height
++        // of these rules, not of the tripwire rules above.
++        UniValue lattice_tripwires(UniValue::VARR);
++        for (const Consensus::P2MRLatticeTripwire& tripwire : consensus.p2mr_lattice_tripwires) {
++            UniValue entry(UniValue::VOBJ);
++            entry.pushKV("outpoint", strprintf("%s:%u", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n));
++            entry.pushKV("state", IsP2MRTripwirePresent(coins, tripwire.outpoint, consensus.P2MRLatticeTripwireHeight) ? "unspent" : "missing");
++            if (tripwire.key_sha256) entry.pushKV("key_sha256", HexStr(*tripwire.key_sha256));
++            if (!tripwire.label.empty()) entry.pushKV("label", tripwire.label);
++            lattice_tripwires.push_back(std::move(entry));
++        }
++        UniValue lattice(UniValue::VOBJ);
++        lattice.pushKV("height", consensus.P2MRLatticeTripwireHeight);
++        lattice.pushKV("leaf_version", strprintf("%02x", P2MR_LEAF_LATTICE_TRIPWIRED));
++        lattice.pushKV("tripwires", std::move(lattice_tripwires));
++        lattice.pushKV("mldsa_disabled_next_block", P2MRMLDSADisabledAfter(&tip, coins, chainman));
++        result.pushKV("lattice", std::move(lattice));
++    }
+     return result;
+ },
+     };
+diff --git a/src/validation.cpp b/src/validation.cpp
+index b64cac7..86fd1fc 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -3575,6 +3575,28 @@ bool Chainstate::ConnectTip(
+                     pindexNew->GetBlockHash().ToString(), DescribeP2MRTripwireState(pindexNew, CoinsTip(), m_chainman));
+         }
+     }
++    // Likewise the lattice tripwire outputs (doc/p2mr-lattice-tripwire.md), under the same restriction.
++    // A coinbase spends no output: its input's null prevout is never a lattice tripwire output, which
++    // -signetlatticetripwire refuses with a null txid.
++    if (this == &m_chainman.ActiveChainstate() && !consensus.p2mr_lattice_tripwires.empty() &&
++        DeploymentEnabled(m_chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        for (const CTransactionRef& tx : block_to_connect->vtx) {
++            if (tx->IsCoinBase()) continue;
++            for (const CTxIn& txin : tx->vin) {
++                const auto tripwire{std::ranges::find_if(consensus.p2mr_lattice_tripwires, [&](const Consensus::P2MRLatticeTripwire& t) { return t.outpoint == txin.prevout; })};
++                if (tripwire == consensus.p2mr_lattice_tripwires.end()) continue;
++                LogInfo("P2MR lattice tripwire %s:%u%s spent by %s in block %s (height %d): OP_CHECKMLDSA44 in leaf version 0x%02x is %s",
++                        txin.prevout.hash.ToString(), txin.prevout.n, tripwire->label.empty() ? std::string{} : strprintf(" (%s)", tripwire->label),
++                        tx->GetHash().ToString(), pindexNew->GetBlockHash().ToString(), pindexNew->nHeight, P2MR_LEAF_LATTICE_TRIPWIRED,
++                        mldsa_disabled_before ? std::string{"already disabled"} :
++                                                strprintf("disabled from height %d", std::max(consensus.P2MRLatticeTripwireHeight, pindexNew->nHeight + 1)));
++            }
++        }
++        if (pindexNew->nHeight == consensus.P2MRLatticeTripwireHeight) {
++            LogInfo("P2MR lattice tripwire rules active from height %d, reached by block %s: %s", pindexNew->nHeight,
++                    pindexNew->GetBlockHash().ToString(), DescribeP2MRLatticeTripwireState(pindexNew, CoinsTip(), m_chainman));
++        }
++    }
+ 
+     const auto time_6{SteadyClock::now()};
+     m_chainman.time_post_connect += time_6 - time_5;
+diff --git a/test/functional/feature_p2mr_tripwire.py b/test/functional/feature_p2mr_tripwire.py
+index 7b012f5..f137aef 100644
+--- a/test/functional/feature_p2mr_tripwire.py
++++ b/test/functional/feature_p2mr_tripwire.py
+@@ -426,6 +426,9 @@ class P2MRTripwireTest(BitcoinTestFramework):
+             # The P2MR rescue lane (doc/p2mr-rescue.md) follows the tripwire height on regtest.
+             "rescue": {"height": H3, "active_next_block": False, "mempool_accepts": False,
+                        "network_id": hashlib.sha256(b"regtest").hexdigest(), "statements": ["01"]},
++            # Leaf version 0xe2 (doc/p2mr-lattice-tripwire.md) follows the tripwire height on regtest
++            # too, without lattice tripwire outputs.
++            "lattice": {"height": H3, "leaf_version": "e2", "tripwires": [], "mldsa_disabled_next_block": False},
+         })
+         assert_equal(n0.getdeploymentinfo()["deployments"]["p2mr_tripwire"], {"type": "buried", "active": False, "height": H3})
+ 
+-- 
+2.43.0
+

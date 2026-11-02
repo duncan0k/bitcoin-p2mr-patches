@@ -1,0 +1,241 @@
+From c57878a5bb5b37f4a5372be470fb81efb560d131 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 09:20:49 +0000
+Subject: [PATCH 111/112] test: add the signet_blocksig fuzz target for both
+ signet block signature parsers
+
+No fuzz target reached CheckSignetPQBlock: the signet target runs on the
+default signet, which has neither block signature rule. signet_blocksig runs
+on a custom signet with -signetpqblock and -signetslhblock, once with both
+rules from height 1 and once from the highest height, where the checks run
+only for the -debug=validation verdict, which the target enables.
+
+Blocks are either deserialized as they come or built from the fuzzer's
+choices: a coinbase with a BIP34 height or other bytes, and outputs near the
+forms the rules look at (the SLH output of every length around 7865, with a
+byte of its prefix changed or cut short; the cut SLH output; witness
+commitments with an ML-DSA-44 push or other bytes after them; OP_RETURN
+pushes; prefixes of the SLH output). It checks that a block committing to a
+height of 0 to 16 passes both rules below their height and, from 1 on,
+neither from height 1, as no fuzzer can sign for these keys; and that a
+signature span is exactly 7856 bytes of an output at c - 1 for which the
+message exists.
+---
+ src/test/fuzz/CMakeLists.txt      |   1 +
+ src/test/fuzz/signet_blocksig.cpp | 192 ++++++++++++++++++++++++++++++
+ 2 files changed, 193 insertions(+)
+ create mode 100644 src/test/fuzz/signet_blocksig.cpp
+
+diff --git a/src/test/fuzz/CMakeLists.txt b/src/test/fuzz/CMakeLists.txt
+index 3682e2a..0bba4f6 100644
+--- a/src/test/fuzz/CMakeLists.txt
++++ b/src/test/fuzz/CMakeLists.txt
+@@ -119,6 +119,7 @@ add_executable(fuzz
+   secp256k1_ecdsa_signature_parse_der_lax.cpp
+   signature_checker.cpp
+   signet.cpp
++  signet_blocksig.cpp
+   slhdsa128s_verify.cpp
+   socks5.cpp
+   span.cpp
+diff --git a/src/test/fuzz/signet_blocksig.cpp b/src/test/fuzz/signet_blocksig.cpp
+new file mode 100644
+index 0000000..ce6e9fe
+--- /dev/null
++++ b/src/test/fuzz/signet_blocksig.cpp
+@@ -0,0 +1,192 @@
++// Copyright (c) 2026 duncan0k
++// Distributed under the MIT software license, see the accompanying
++// file COPYING or http://www.opensource.org/licenses/mit-license.php.
++
++// The parsers of the signet block signatures, M2 (ML-DSA-44, doc/signet-pqblock.md) and M4-B
++// (SLH-DSA-SHA2-128s, doc/signet-slhblock.md), on a custom signet that requires both: the
++// `signet` target runs on the default signet, which has neither rule, so nothing reached them.
++
++#include <chainparams.h>
++#include <common/args.h>
++#include <consensus/amount.h>
++#include <consensus/merkle.h>
++#include <consensus/params.h>
++#include <consensus/validation.h>
++#include <crypto/mldsa44.h>
++#include <crypto/slhdsa128s.h>
++#include <logging.h>
++#include <primitives/block.h>
++#include <primitives/transaction.h>
++#include <script/script.h>
++#include <signet.h>
++#include <streams.h>
++#include <test/fuzz/FuzzedDataProvider.h>
++#include <test/fuzz/fuzz.h>
++#include <test/fuzz/util.h>
++#include <test/util/setup_common.h>
++#include <util/chaintype.h>
++#include <util/check.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++namespace {
++//! Rules from height 1 (enforced) and from the highest height (below it, only a verdict for the log).
++std::unique_ptr<const CChainParams> g_enforced;
++std::unique_ptr<const CChainParams> g_below;
++
++std::unique_ptr<const CChainParams> BlockSigParams(int height)
++{
++    ArgsManager args;
++    args.ForceSetArg("-signetchallenge", "51");
++    args.ForceSetArg("-signetpqblock", std::string(2 * MLDSA44_PUBKEY_SIZE, 'a') + "@" + std::to_string(height));
++    args.ForceSetArg("-signetslhblock", std::string(2 * SLHDSA128S_PUBKEY_SIZE, 'b') + "@" + std::to_string(height));
++    return CreateChainParams(args, ChainType::SIGNET);
++}
++
++const std::vector<unsigned char> COMMITMENT_PREFIX{OP_RETURN, 0x24, 0xaa, 0x21, 0xa9, 0xed};
++
++//! size bytes: at most 64 from the fuzzer, repeated to the size it chose. A signature-sized field
++//! filled from the input itself would use up more than a whole input, and leave nothing for the
++//! outputs after it (the witness commitment after the SLH output).
++std::vector<unsigned char> Bytes(FuzzedDataProvider& provider, size_t size)
++{
++    std::vector<unsigned char> seed{provider.ConsumeBytes<unsigned char>(std::min<size_t>(size, 64))};
++    if (seed.empty()) seed.push_back(0);
++    std::vector<unsigned char> bytes(size);
++    for (size_t i{0}; i < size; ++i) bytes[i] = seed[i % seed.size()];
++    return bytes;
++}
++
++//! An output script near one of the forms the rules look at.
++CScript ConsumeOutputScript(FuzzedDataProvider& provider)
++{
++    std::vector<unsigned char> script;
++    switch (provider.ConsumeIntegralInRange<int>(0, 5)) {
++    case 0: { // anything
++        const auto bytes{Bytes(provider, provider.ConsumeIntegralInRange<size_t>(0, 64))};
++        return CScript(bytes.begin(), bytes.end());
++    }
++    case 1: { // the SLH output, of its size or near it, with a prefix that may be mutated
++        script.assign(SIGNET_SLH_SCRIPT_PREFIX.begin(), SIGNET_SLH_SCRIPT_PREFIX.end());
++        if (provider.ConsumeBool()) script.at(provider.ConsumeIntegralInRange<size_t>(0, script.size() - 1)) = provider.ConsumeIntegral<uint8_t>();
++        const size_t size{provider.ConsumeBool() ? SLHDSA128S_SIGNATURE_SIZE : provider.ConsumeIntegralInRange<size_t>(SLHDSA128S_SIGNATURE_SIZE - 2, SLHDSA128S_SIGNATURE_SIZE + 2)};
++        const auto tail{Bytes(provider, size)};
++        script.insert(script.end(), tail.begin(), tail.end());
++        if (provider.ConsumeBool()) script.resize(provider.ConsumeIntegralInRange<size_t>(0, script.size()));
++        return CScript(script.begin(), script.end());
++    }
++    case 2: // the cut SLH output
++        return CScript() << OP_RETURN << std::vector<unsigned char>{0x50, 0x51, 0x48, 0x31, 0x01};
++    case 3: { // a witness commitment, with an M2 push or bytes after it
++        script = COMMITMENT_PREFIX;
++        const auto commitment{Bytes(provider, 32)};
++        script.insert(script.end(), commitment.begin(), commitment.end());
++        CScript result(script.begin(), script.end());
++        if (provider.ConsumeBool()) {
++            std::vector<unsigned char> push{SIGNET_PQ_HEADER.begin(), SIGNET_PQ_HEADER.end()};
++            push.push_back(provider.ConsumeBool() ? SIGNET_PQ_VERSION : provider.ConsumeIntegral<uint8_t>());
++            const auto signature{Bytes(provider, provider.ConsumeBool() ? MLDSA44_SIGNATURE_SIZE : provider.ConsumeIntegralInRange<size_t>(0, MLDSA44_SIGNATURE_SIZE + 1))};
++            push.insert(push.end(), signature.begin(), signature.end());
++            result << push;
++        }
++        const auto tail{Bytes(provider, provider.ConsumeIntegralInRange<size_t>(0, 16))};
++        result.insert(result.end(), tail.begin(), tail.end());
++        return result;
++    }
++    case 4: // an OP_RETURN with a push
++        return CScript() << OP_RETURN << Bytes(provider, provider.ConsumeIntegralInRange<size_t>(0, 80));
++    default: // a prefix of the SLH output
++        return CScript(SIGNET_SLH_SCRIPT_PREFIX.begin(), SIGNET_SLH_SCRIPT_PREFIX.begin() + provider.ConsumeIntegralInRange<size_t>(0, SIGNET_SLH_SCRIPT_PREFIX.size()));
++    }
++}
++
++//! A block whose coinbase is built from the fuzzer's choices.
++CBlock ConsumeBlock(FuzzedDataProvider& provider)
++{
++    CMutableTransaction coinbase;
++    coinbase.vin.resize(1);
++    if (provider.ConsumeBool()) {
++        coinbase.vin[0].scriptSig = CScript() << provider.ConsumeIntegral<int64_t>() << OP_0;
++    } else {
++        const auto bytes{Bytes(provider, provider.ConsumeIntegralInRange<size_t>(0, 8))};
++        coinbase.vin[0].scriptSig = CScript(bytes.begin(), bytes.end());
++    }
++    const int outputs{provider.ConsumeIntegralInRange<int>(0, 5)};
++    for (int i{0}; i < outputs; ++i) {
++        coinbase.vout.emplace_back(provider.ConsumeBool() ? 0 : provider.ConsumeIntegralInRange<CAmount>(-1, MAX_MONEY), ConsumeOutputScript(provider));
++    }
++    CBlock block;
++    block.nVersion = provider.ConsumeIntegral<int32_t>();
++    block.nTime = provider.ConsumeIntegral<uint32_t>();
++    block.vtx.push_back(MakeTransactionRef(std::move(coinbase)));
++    const int others{provider.ConsumeIntegralInRange<int>(0, 3)};
++    for (int i{0}; i < others; ++i) {
++        CMutableTransaction tx;
++        tx.vin.resize(1);
++        tx.nLockTime = provider.ConsumeIntegral<uint32_t>();
++        block.vtx.push_back(MakeTransactionRef(std::move(tx)));
++    }
++    block.hashMerkleRoot = BlockMerkleRoot(block);
++    return block;
++}
++} // namespace
++
++void initialize_signet_blocksig()
++{
++    static const auto testing_setup = MakeNoLogFileContext<>(ChainType::SIGNET);
++    g_enforced = BlockSigParams(1);
++    g_below = BlockSigParams(std::numeric_limits<int>::max() - 1);
++    // Below the height the checks only run with -debug=validation: let them run.
++    LogInstance().EnableCategory(BCLog::VALIDATION);
++    LogInstance().SetCategoryLogLevel("validation", "debug");
++}
++
++FUZZ_TARGET(signet_blocksig, .init = initialize_signet_blocksig)
++{
++    FuzzedDataProvider provider{buffer.data(), buffer.size()};
++    std::optional<CBlock> block;
++    if (provider.ConsumeBool()) {
++        block = ConsumeDeserializable<CBlock>(provider, TX_WITH_WITNESS);
++    } else {
++        block = ConsumeBlock(provider);
++    }
++    if (!block) return;
++    const CScript challenge{0x51};
++
++    // The height a block commits to, when it is a single opcode OP_0 to OP_16 (CScript() << n).
++    std::optional<int> small_height;
++    if (!block->vtx.empty() && !block->vtx[0]->vin.empty()) {
++        const CScript& script_sig{block->vtx[0]->vin[0].scriptSig};
++        if (!script_sig.empty() && (script_sig[0] == OP_0 || (script_sig[0] >= OP_1 && script_sig[0] <= OP_16))) {
++            small_height = script_sig[0] == OP_0 ? 0 : CScript::DecodeOP_N(opcodetype(script_sig[0]));
++        }
++    }
++    const bool pq_enforced{CheckSignetPQBlock(*block, g_enforced->GetConsensus())};
++    const bool slh_enforced{CheckSignetSLHBlock(*block, g_enforced->GetConsensus())};
++    // Below the height every block passes (the checks still run, for the log). A height that
++    // cannot be read counts as reached, so only blocks that commit to a small height are below.
++    const bool pq_below{CheckSignetPQBlock(*block, g_below->GetConsensus())};
++    const bool slh_below{CheckSignetSLHBlock(*block, g_below->GetConsensus())};
++    if (small_height) Assert(pq_below && slh_below);
++
++    const auto signature{SignetSLHBlockSignature(*block)};
++    const auto message{SignetSLHBlockMessage(*block, challenge)};
++    (void)SignetPQBlockMessage(*block, challenge);
++    if (signature) {
++        // A signature means an SLH output at c - 1, so the message exists too.
++        Assert(signature->size() == SLHDSA128S_SIGNATURE_SIZE);
++        Assert(message);
++        const int cidx{GetWitnessCommitmentIndex(*block)};
++        Assert(cidx >= 1);
++        Assert(block->vtx[0]->vout[cidx - 1].scriptPubKey.size() == SIGNET_SLH_SCRIPT_SIZE);
++    }
++    // A block that commits to a height of at least 1 passes neither rule from height 1: that takes
++    // signatures that verify, which a fuzzer cannot make for these keys.
++    if (small_height && *small_height >= 1) Assert(!slh_enforced && !pq_enforced);
++}
+-- 
+2.43.0
+

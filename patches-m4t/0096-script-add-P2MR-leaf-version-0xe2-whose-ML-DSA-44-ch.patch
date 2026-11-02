@@ -1,0 +1,431 @@
+From 60e5b9d331e6c0b0a41f12dfd9fac0fe828ed2f9 Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 08:41:06 +0000
+Subject: [PATCH 096/105] script: add P2MR leaf version 0xe2, whose ML-DSA-44
+ checks can be disabled
+
+Leaf version 0xe2 (P2MR_LEAF_LATTICE_TRIPWIRED, control byte 0xe3)
+executes in a P2MR leaf of depth one or more as leaf version 0xc0 does,
+when the new SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE flag is set: the same
+tapscript rules, validation weight budget, OP_SUCCESSx pre-scan and
+signature message, with the leaf version in the tapleaf hash, and
+OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S where their flags are set too.
+Without the flag it stays an unknown leaf version, and in P2TR it is one
+whatever the flags. No deployment sets the flag yet.
+
+Such a leaf sets both m_tripwired_leaf, so that its elliptic curve checks
+follow the tripwire of leaf version 0xe0 exactly (they fail with
+SCRIPT_VERIFY_P2MR_EC_DISABLED), and the new m_lattice_tripwired_leaf,
+false unless set, which only the P2MR branch sets. m_tripwired_leaf has a
+second reader since the rescue lane: an elliptic curve check in an
+executed leaf of version 0xe2 is rescuable as one in 0xe0 is, wherever
+SCRIPT_VERIFY_P2MR_NO_RESCUE is not set.
+
+The second new flag, SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, makes
+OP_CHECKMLDSA44 with any non-empty signature chunk fail the script in such
+a leaf, with the new error SCRIPT_ERR_P2MR_MLDSA_DISABLED ("ML-DSA-44
+signature checks are disabled in this leaf"). EvalCheckMLDSA44 now takes
+the flags, and the check sits after the validation weight is charged and
+the public key chunks are checked, and before the signature chunks, the
+hash type, the signature cache and the verifier are looked at, so OP_NOT
+cannot turn the outcome around and a 520-byte chunk of any content fails
+the same way. An empty signature still pushes false. No rescue token is
+looked for there: the disabled ML-DSA-44 check is not rescuable in this
+series. Leaf versions 0xc0 and 0xe0, OP_CHECKSLHDSA128S, P2TR, legacy and
+witness v0 scripts are unaffected.
+
+The flags take bits 27 and 28, after M4-S's 25 and M4-R's 26; their names
+are P2MR_LATTICE_TRIPWIRE and P2MR_MLDSA_DISABLED. The unknown bits that
+formatscriptflags uses were moved above them by the rescue lane already.
+
+The script_flags fuzz targets no longer add or remove
+SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE: like the other P2MR execution flags it
+turns a script that DISCOURAGE_UPGRADABLE_TAPROOT_VERSION refuses into one
+that executes. SCRIPT_VERIFY_P2MR_MLDSA_DISABLED only makes more scripts
+fail, and is fuzzed.
+
+p2mr_ts_m4_tests pinned 0xe2 as an unknown leaf version. Its four pq2
+spends at 0xe2, signed by p2mr-ts, now execute and pass with the flag, and
+are pinned as unknown without it; with SCRIPT_VERIFY_P2MR_MLDSA_DISABLED
+the two ML-DSA-44 ones fail and the two SLH-DSA ones pass.
+
+See doc/p2mr-lattice-tripwire.md, added later in this series.
+---
+ src/script/interpreter.cpp     | 39 +++++++++++++++++++++--------
+ src/script/interpreter.h       | 45 ++++++++++++++++++++++++++--------
+ src/script/script_error.cpp    |  2 ++
+ src/script/script_error.h      |  3 +++
+ src/test/fuzz/p2mr_rescue.cpp  |  3 ++-
+ src/test/fuzz/script_flags.cpp | 11 ++++++---
+ src/test/p2mr_ts_m4_tests.cpp  | 43 +++++++++++++++++++++-----------
+ src/test/script_tests.cpp      |  3 ++-
+ 8 files changed, 109 insertions(+), 40 deletions(-)
+
+diff --git a/src/script/interpreter.cpp b/src/script/interpreter.cpp
+index d9995ba..6e5b890 100644
+--- a/src/script/interpreter.cpp
++++ b/src/script/interpreter.cpp
+@@ -349,7 +349,8 @@ static bool EvalChecksigPreTapscript(const valtype& vchSig, const valtype& vchPu
+ }
+ 
+ /** Rules R2 to R8 of a rescue check (doc/p2mr-rescue.md), after R1 has found a rescue token in place
+- *  of the signature of an elliptic curve check with a 32-byte key in an executed leaf of version 0xe0.
++ *  of the signature of an elliptic curve check with a 32-byte key in an executed leaf of version 0xe0,
++ *  or 0xe2, whose elliptic curve checks follow those of 0xe0 (doc/p2mr-lattice-tripwire.md).
+  *  True means the check passes, as a valid signature does. */
+ static bool EvalP2MRRescue(const valtype& token, const valtype& pubkey, ScriptExecutionData& execdata, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror)
+ {
+@@ -398,12 +399,13 @@ static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, Scr
+     } else if (pubkey.size() == 32) {
+         // R1: from the rescue lane's height on, a rescue token in place of the signature in leaf
+         // version 0xe0 is checked as a rescue, before the rule below (doc/p2mr-rescue.md). It passes
+-        // as a valid signature does: `success` stays true.
++        // as a valid signature does: `success` stays true. Leaf version 0xe2 sets m_tripwired_leaf
++        // too, so its elliptic curve checks are rescued alike (doc/p2mr-lattice-tripwire.md).
+         if (success && execdata.m_tripwired_leaf && !(flags & SCRIPT_VERIFY_P2MR_NO_RESCUE) && IsP2MRRescueToken(sig)) {
+             return EvalP2MRRescue(sig, pubkey, execdata, checker, sigversion, serror);
+         }
+-        // Once a tripwire output is missing, elliptic curve checks in leaf version 0xe0 fail rather
+-        // than push false, whatever the signature, before it is looked at (doc/p2mr-tripwire.md).
++        // Once a tripwire output is missing, elliptic curve checks in leaf versions 0xe0 and 0xe2 fail
++        // rather than push false, whatever the signature, before it is looked at (doc/p2mr-tripwire.md).
+         if (success && execdata.m_tripwired_leaf && (flags & SCRIPT_VERIFY_P2MR_EC_DISABLED)) {
+             return set_error(serror, SCRIPT_ERR_P2MR_EC_DISABLED);
+         }
+@@ -497,7 +499,7 @@ static bool EvalCheckSLHDSA128S(std::span<const valtype> items, ScriptExecutionD
+  * A return value of false means the script fails entirely. When true is returned, the
+  * success variable indicates whether a signature was given and checked.
+  */
+-static bool EvalCheckMLDSA44(std::span<const valtype> items, ScriptExecutionData& execdata, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
++static bool EvalCheckMLDSA44(std::span<const valtype> items, ScriptExecutionData& execdata, script_verify_flags flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
+ {
+     assert(sigversion == SigVersion::TAPSCRIPT);
+     assert(items.size() == MLDSA44_SIG_CHUNK_SIZES.size() + MLDSA44_PUBKEY_CHUNK_SIZES.size());
+@@ -509,6 +511,8 @@ static bool EvalCheckMLDSA44(std::span<const valtype> items, ScriptExecutionData
+      *    a signature is charged validation weight before anything else is looked at;
+      *    the script execution fails on a public key of the wrong size, even with an empty signature;
+      *    five empty signature chunks are an empty signature, which pushes false;
++     *    in a lattice tripwired P2MR leaf with SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, the script
++     *    execution fails when using any non-empty signature, before its chunks are looked at;
+      *    the script execution fails when using a non-empty invalid signature.
+      */
+     success = std::ranges::any_of(sig_chunks, [](const valtype& chunk) { return !chunk.empty(); });
+@@ -523,6 +527,13 @@ static bool EvalCheckMLDSA44(std::span<const valtype> items, ScriptExecutionData
+         if (pubkey_chunks[i].size() != MLDSA44_PUBKEY_CHUNK_SIZES[i]) return set_error(serror, SCRIPT_ERR_MLDSA44_PUBKEY_SIZE);
+     }
+     if (!success) return true;
++    // Once a lattice tripwire output is missing, ML-DSA-44 checks in leaf version 0xe2 fail rather
++    // than push false, whatever the signature: its chunk sizes, hash type and the signature cache are
++    // not looked at, and OP_NOT cannot turn the outcome around (doc/p2mr-lattice-tripwire.md). Not a
++    // rescuable check: no rescue token is looked for here.
++    if (execdata.m_lattice_tripwired_leaf && (flags & SCRIPT_VERIFY_P2MR_MLDSA_DISABLED)) {
++        return set_error(serror, SCRIPT_ERR_P2MR_MLDSA_DISABLED);
++    }
+     for (size_t i = 0; i < sig_chunks.size(); ++i) {
+         // The last chunk may end in an explicit hash type.
+         const bool last{i + 1 == sig_chunks.size()};
+@@ -1273,7 +1284,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript&
+                     if (stack.size() < item_count) return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+ 
+                     bool success = true;
+-                    if (!EvalCheckMLDSA44(std::span{stack}.last(item_count), execdata, checker, sigversion, serror, success)) return false;
++                    if (!EvalCheckMLDSA44(std::span{stack}.last(item_count), execdata, flags, checker, sigversion, serror, success)) return false;
+                     for (size_t i = 0; i < item_count; ++i) popstack(stack);
+                     stack.push_back(success ? vchTrue : vchFalse);
+                 }
+@@ -2388,16 +2399,22 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion,
+         const uint8_t leaf_version{static_cast<uint8_t>(control[0] & TAPROOT_LEAF_MASK)};
+         // Leaf version 0xe0 executes as 0xc0 does once SCRIPT_VERIFY_P2MR_TRIPWIRE is set (doc/p2mr-tripwire.md).
+         const bool tripwired{leaf_version == P2MR_LEAF_TRIPWIRED && (flags & SCRIPT_VERIFY_P2MR_TRIPWIRE)};
+-        if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || tripwired) {
+-            // Tapscript (leaf version 0xc0, or 0xe0)
++        // Leaf version 0xe2 does too once SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE is set
++        // (doc/p2mr-lattice-tripwire.md).
++        const bool lattice_tripwired{leaf_version == P2MR_LEAF_LATTICE_TRIPWIRED && (flags & SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE)};
++        if (leaf_version == TAPROOT_LEAF_TAPSCRIPT || tripwired || lattice_tripwired) {
++            // Tapscript (leaf version 0xc0, 0xe0 or 0xe2)
+             exec_script = CScript(script.begin(), script.end());
+             execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
+             execdata.m_validation_weight_left_init = true;
+             // Where OP_CHECKMLDSA44 (doc/p2mr-mldsa44.md) and OP_CHECKSLHDSA128S (doc/p2mr-slhdsa128s.md)
+             // can execute.
+             execdata.m_p2mr_leaf = true;
+-            // Where elliptic curve checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
+-            execdata.m_tripwired_leaf = tripwired;
++            // Where elliptic curve checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md):
++            // leaf version 0xe2 follows the tripwire of 0xe0 there (doc/p2mr-lattice-tripwire.md).
++            execdata.m_tripwired_leaf = tripwired || lattice_tripwired;
++            // Where OP_CHECKMLDSA44 fails with SCRIPT_VERIFY_P2MR_MLDSA_DISABLED (doc/p2mr-lattice-tripwire.md).
++            execdata.m_lattice_tripwired_leaf = lattice_tripwired;
+             return ExecuteWitnessScript(stack, exec_script, flags, SigVersion::TAPSCRIPT, checker, execdata, serror);
+         }
+         if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
+@@ -2610,6 +2627,8 @@ const std::map<std::string, script_verify_flag_name>& ScriptFlagNamesToEnum()
+         FLAG_NAME(P2MR_EC_DISABLED),
+         FLAG_NAME(P2MR_SLHDSA128S),
+         FLAG_NAME(P2MR_NO_RESCUE),
++        FLAG_NAME(P2MR_LATTICE_TRIPWIRE),
++        FLAG_NAME(P2MR_MLDSA_DISABLED),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_PUBKEYTYPE),
+         FLAG_NAME(DISCOURAGE_OP_SUCCESS),
+         FLAG_NAME(DISCOURAGE_UPGRADABLE_TAPROOT_VERSION),
+diff --git a/src/script/interpreter.h b/src/script/interpreter.h
+index 5ddb9b2..b01a87b 100644
+--- a/src/script/interpreter.h
++++ b/src/script/interpreter.h
+@@ -159,8 +159,8 @@ enum class script_verify_flag_name : uint8_t {
+ 
+     // Experimental ML-DSA-44 signature checks in P2MR tapscript leaves: byte 0xf0
+     // (OP_SUCCESS240) executes as OP_CHECKMLDSA44 in a leaf of depth one or more
+-    // with leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. See
+-    // doc/p2mr-mldsa44.md.
++    // with leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE, or 0xe2 with
++    // SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE. See doc/p2mr-mldsa44.md.
+     //
+     SCRIPT_VERIFY_P2MR_MLDSA44,
+ 
+@@ -170,8 +170,8 @@ enum class script_verify_flag_name : uint8_t {
+     //
+     SCRIPT_VERIFY_P2MR_TRIPWIRE,
+ 
+-    // In P2MR leaves of leaf version 0xe0 that execute, a signature check with a
+-    // 32-byte public key and a non-empty signature fails the script. Not a deployment:
++    // In P2MR leaves of leaf version 0xe0 that execute, and of 0xe2 (doc/p2mr-lattice-tripwire.md),
++    // a signature check with a 32-byte public key and a non-empty signature fails the script. Not a deployment:
+     // validation sets it for a block once a tripwire output is missing from the UTXO
+     // set the block builds on. See doc/p2mr-tripwire.md.
+     //
+@@ -179,8 +179,8 @@ enum class script_verify_flag_name : uint8_t {
+ 
+     // Experimental SLH-DSA-SHA2-128s signature checks in P2MR tapscript leaves: byte
+     // 0xf1 (OP_SUCCESS241) executes as OP_CHECKSLHDSA128S in a leaf that executes as
+-    // tapscript, of leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. See
+-    // doc/p2mr-slhdsa128s.md.
++    // tapscript, of leaf version 0xc0, or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE, or 0xe2 with
++    // SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE. See doc/p2mr-slhdsa128s.md.
+     //
+     SCRIPT_VERIFY_P2MR_SLHDSA128S,
+ 
+@@ -190,6 +190,20 @@ enum class script_verify_flag_name : uint8_t {
+     //
+     SCRIPT_VERIFY_P2MR_NO_RESCUE,
+ 
++    // Experimental P2MR leaf version 0xe2 (P2MR_LEAF_LATTICE_TRIPWIRED): a leaf of depth one
++    // or more with this leaf version executes as tapscript, as leaf version 0xc0 does, and its
++    // elliptic curve checks follow the tripwire rules of leaf version 0xe0. Without the flag it
++    // stays an unknown leaf version. See doc/p2mr-lattice-tripwire.md.
++    //
++    SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE,
++
++    // In P2MR leaves of leaf version 0xe2 that execute, OP_CHECKMLDSA44 with a non-empty
++    // signature fails the script. Not a deployment: validation sets it for a block once a
++    // lattice tripwire output is missing from the UTXO set the block builds on. See
++    // doc/p2mr-lattice-tripwire.md.
++    //
++    SCRIPT_VERIFY_P2MR_MLDSA_DISABLED,
++
+     // Constants to point to the highest flag in use. Add new flags above this line.
+     //
+     SCRIPT_VERIFY_END_MARKER
+@@ -282,14 +296,20 @@ struct ScriptExecutionData
+     std::optional<uint256> m_output_hash;
+ 
+     //! Whether the script is a P2MR leaf that is executed: leaf version 0xc0 at depth one or more,
+-    //! or 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE. Where OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S can
+-    //! execute.
++    //! 0xe0 with SCRIPT_VERIFY_P2MR_TRIPWIRE, or 0xe2 with SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE. Where
++    //! OP_CHECKMLDSA44 and OP_CHECKSLHDSA128S can execute.
+     bool m_p2mr_leaf = false;
+ 
+-    //! Whether the script is a P2MR leaf of leaf version 0xe0 that is executed, whose elliptic
+-    //! curve signature checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED (doc/p2mr-tripwire.md).
++    //! Whether the script is a P2MR leaf of leaf version 0xe0 or 0xe2 that is executed, whose
++    //! elliptic curve signature checks fail with SCRIPT_VERIFY_P2MR_EC_DISABLED
++    //! (doc/p2mr-tripwire.md, doc/p2mr-lattice-tripwire.md).
+     bool m_tripwired_leaf{false};
+ 
++    //! Whether the script is a P2MR leaf of leaf version 0xe2 that is executed, whose
++    //! OP_CHECKMLDSA44 checks fail with SCRIPT_VERIFY_P2MR_MLDSA_DISABLED
++    //! (doc/p2mr-lattice-tripwire.md). False unless the P2MR branch sets it, like m_tripwired_leaf.
++    bool m_lattice_tripwired_leaf{false};
++
+     //! Whether a rescue check (doc/p2mr-rescue.md) has been made in this input, which allows one.
+     //! Set before the signature cache is looked at.
+     bool m_rescue_done{false};
+@@ -324,6 +344,11 @@ static_assert(P2MR_CONTROL_MAX_SIZE == 4097);
+  *  tapscript with SCRIPT_VERIFY_P2MR_TRIPWIRE, and its elliptic curve signature checks fail
+  *  with SCRIPT_VERIFY_P2MR_EC_DISABLED. In P2TR it stays an unknown leaf version. */
+ static constexpr uint8_t P2MR_LEAF_TRIPWIRED{0xe0};
++/** Experimental P2MR leaf version (doc/p2mr-lattice-tripwire.md), control byte 0xe3: executed as
++ *  tapscript with SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE; its elliptic curve signature checks fail
++ *  with SCRIPT_VERIFY_P2MR_EC_DISABLED, as in leaf version 0xe0, and its OP_CHECKMLDSA44 checks
++ *  with SCRIPT_VERIFY_P2MR_MLDSA_DISABLED. In P2TR it stays an unknown leaf version. */
++static constexpr uint8_t P2MR_LEAF_LATTICE_TRIPWIRED{0xe2};
+ 
+ /** OP_CHECKMLDSA44 (doc/p2mr-mldsa44.md) takes the ML-DSA-44 public key as three stack
+  *  elements of these sizes, and the signature as five: the last one may carry one more
+diff --git a/src/script/script_error.cpp b/src/script/script_error.cpp
+index d0344fa..dcb87b9 100644
+--- a/src/script/script_error.cpp
++++ b/src/script/script_error.cpp
+@@ -117,6 +117,8 @@ std::string ScriptErrorString(const ScriptError serror)
+             return "Invalid ML-DSA-44 signature";
+         case SCRIPT_ERR_P2MR_EC_DISABLED:
+             return "Elliptic curve signature checks are disabled in this leaf";
++        case SCRIPT_ERR_P2MR_MLDSA_DISABLED:
++            return "ML-DSA-44 signature checks are disabled in this leaf";
+         case SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE:
+             return "Invalid SLH-DSA-SHA2-128s public key size";
+         case SCRIPT_ERR_SLHDSA128S_SIG_SIZE:
+diff --git a/src/script/script_error.h b/src/script/script_error.h
+index d96a942..dc049e5 100644
+--- a/src/script/script_error.h
++++ b/src/script/script_error.h
+@@ -88,6 +88,9 @@ typedef enum ScriptError_t
+     /* Tripwired P2MR leaves (doc/p2mr-tripwire.md) */
+     SCRIPT_ERR_P2MR_EC_DISABLED,
+ 
++    /* Lattice tripwired P2MR leaves (doc/p2mr-lattice-tripwire.md) */
++    SCRIPT_ERR_P2MR_MLDSA_DISABLED,
++
+     /* OP_CHECKSLHDSA128S in P2MR leaves (doc/p2mr-slhdsa128s.md) */
+     SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE,
+     SCRIPT_ERR_SLHDSA128S_SIG_SIZE,
+diff --git a/src/test/fuzz/p2mr_rescue.cpp b/src/test/fuzz/p2mr_rescue.cpp
+index 919a959..bc761f5 100644
+--- a/src/test/fuzz/p2mr_rescue.cpp
++++ b/src/test/fuzz/p2mr_rescue.cpp
+@@ -291,7 +291,8 @@ FUZZ_TARGET(p2mr_rescue_script_flags)
+         script_verify_flags fuzzed_flags{script_verify_flags::from_int(raw_fuzzed & (end.as_int() - 1))};
+         if (!IsValidFlagCombination(verify_flags)) return;
+         // The upgrade hooks stay as they are (see script_flags).
+-        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S);
++        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S |
++                          SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE);
+ 
+         std::vector<CTxOut> spent_outputs;
+         for (unsigned i = 0; i < tx.vin.size(); ++i) {
+diff --git a/src/test/fuzz/script_flags.cpp b/src/test/fuzz/script_flags.cpp
+index caa7701..ca03579 100644
+--- a/src/test/fuzz/script_flags.cpp
++++ b/src/test/fuzz/script_flags.cpp
+@@ -45,10 +45,13 @@ FUZZ_TARGET(script_flags)
+         // (DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM), OP_CHECKMLDSA44 is OP_SUCCESS240
+         // (DISCOURAGE_OP_SUCCESS), a P2MR leaf of version 0xe0 has an unknown leaf version
+         // (DISCOURAGE_UPGRADABLE_TAPROOT_VERSION), OP_CHECKSLHDSA128S is OP_SUCCESS241
+-        // (DISCOURAGE_OP_SUCCESS). Removing one can turn a pass into a failure and adding one a
+-        // failure into a pass, so the check below leaves them alone.
+-        // SCRIPT_VERIFY_P2MR_EC_DISABLED only makes more scripts fail, and is fuzzed.
+-        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S);
++        // (DISCOURAGE_OP_SUCCESS), and so has a P2MR leaf of version 0xe2 (also
++        // DISCOURAGE_UPGRADABLE_TAPROOT_VERSION). Removing one can turn a pass into a failure and
++        // adding one a failure into a pass, so the check below leaves them alone.
++        // SCRIPT_VERIFY_P2MR_EC_DISABLED and SCRIPT_VERIFY_P2MR_MLDSA_DISABLED only make more
++        // scripts fail, and are fuzzed.
++        fuzzed_flags &= ~(SCRIPT_VERIFY_P2MR | SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S |
++                          SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE);
+ 
+         std::vector<CTxOut> spent_outputs;
+         for (unsigned i = 0; i < tx.vin.size(); ++i) {
+diff --git a/src/test/p2mr_ts_m4_tests.cpp b/src/test/p2mr_ts_m4_tests.cpp
+index 0c04a1e..474ba3b 100644
+--- a/src/test/p2mr_ts_m4_tests.cpp
++++ b/src/test/p2mr_ts_m4_tests.cpp
+@@ -38,12 +38,13 @@
+ namespace {
+ using valtype = std::vector<unsigned char>;
+ 
+-//! The flags of a block with P2MR, OP_CHECKMLDSA44, leaf version 0xe0 and OP_CHECKSLHDSA128S active.
++//! The flags of a block with P2MR, OP_CHECKMLDSA44, leaf version 0xe0, OP_CHECKSLHDSA128S and leaf
++//! version 0xe2 active.
+ constexpr script_verify_flags ACTIVE{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT | SCRIPT_VERIFY_P2MR |
+-                                     SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S};
+-//! Leaf version 0xe2, which p2mr-ts also covers and this series does not implement: an unknown leaf
+-//! version here.
+-constexpr uint8_t LEAF_VERSION_E2{0xe2};
++                                     SCRIPT_VERIFY_P2MR_MLDSA44 | SCRIPT_VERIFY_P2MR_TRIPWIRE | SCRIPT_VERIFY_P2MR_SLHDSA128S |
++                                     SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE};
++//! Leaf version 0xe2 (doc/p2mr-lattice-tripwire.md), which p2mr-ts covers with its pq2 spends.
++constexpr uint8_t LEAF_VERSION_E2{P2MR_LEAF_LATTICE_TRIPWIRED};
+ 
+ UniValue ReadObject(std::string_view text)
+ {
+@@ -194,15 +195,29 @@ BOOST_AUTO_TEST_CASE(spends)
+             spending.vin[in].scriptWitness = witness;
+             const MutableTransactionSignatureChecker checker{&spending, in, spent_outputs[in].nValue, txdata, MissingDataBehavior::ASSERT_FAIL};
+             ScriptError err;
+-            VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE, checker, &err);
+             if (leaf_version == LEAF_VERSION_E2) {
+-                // Leaf version 0xe2 is not part of this series: an unknown leaf version, which succeeds without
+-                // executing the leaf, and which policy refuses. Its signatures were checked above.
++                // Below the height of leaf version 0xe2 it is an unknown leaf version, which succeeds
++                // without executing the leaf, and which policy refuses.
++                const script_verify_flags below{ACTIVE & ~SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE};
++                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, below, checker, &err);
+                 BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(SCRIPT_ERR_OK));
+-                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE | SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION, checker, &err);
++                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, below | SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION, checker, &err);
+                 BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(SCRIPT_ERR_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION));
+-                ++counts["unexecuted 0xe2"];
+-            } else if (sig.empty()) {
++                // Once a lattice tripwire output is missing, the ML-DSA-44 leaf of pq2 fails and its
++                // SLH-DSA leaf still passes (doc/p2mr-lattice-tripwire.md); a missing elliptic curve
++                // tripwire output changes neither.
++                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE | SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, checker, &err);
++                BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(slh ? SCRIPT_ERR_OK : SCRIPT_ERR_P2MR_MLDSA_DISABLED));
++                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE | SCRIPT_VERIFY_P2MR_EC_DISABLED, checker, &err);
++                BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(SCRIPT_ERR_OK));
++                ++counts["executed 0xe2"];
++            } else {
++                // Leaf versions 0xc0 and 0xe0 do not know SCRIPT_VERIFY_P2MR_MLDSA_DISABLED.
++                VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE | SCRIPT_VERIFY_P2MR_MLDSA_DISABLED, checker, &err);
++                BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(sig.empty() ? SCRIPT_ERR_EVAL_FALSE : SCRIPT_ERR_OK));
++            }
++            VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &witness, ACTIVE, checker, &err);
++            if (sig.empty()) {
+                 // The unsigned form: sixteen empty chunks push false.
+                 BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(SCRIPT_ERR_EVAL_FALSE));
+                 ++counts["rejected"];
+@@ -214,15 +229,15 @@ BOOST_AUTO_TEST_CASE(spends)
+                 bad.stack[3][7] ^= 1;
+                 spending.vin[in].scriptWitness = bad;
+                 VerifyScript(CScript{}, spent_outputs[in].scriptPubKey, &bad, ACTIVE, checker, &err);
+-                BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(SCRIPT_ERR_SLHDSA128S_SIG));
++                BOOST_CHECK_EQUAL(ScriptErrorString(err), ScriptErrorString(slh ? SCRIPT_ERR_SLHDSA128S_SIG : SCRIPT_ERR_MLDSA44_SIG));
+             }
+         }
+     }
+     BOOST_CHECK_EQUAL(counts["messages"], 33);
+     BOOST_CHECK_EQUAL(counts["signatures"], 10);
+-    BOOST_CHECK_EQUAL(counts["accepted"], 6);
++    BOOST_CHECK_EQUAL(counts["accepted"], 10);
+     BOOST_CHECK_EQUAL(counts["rejected"], 1);
+-    BOOST_CHECK_EQUAL(counts["unexecuted 0xe2"], 4);
++    BOOST_CHECK_EQUAL(counts["executed 0xe2"], 4);
+ }
+ 
+ BOOST_AUTO_TEST_CASE(construction)
+diff --git a/src/test/script_tests.cpp b/src/test/script_tests.cpp
+index a755188..90af366 100644
+--- a/src/test/script_tests.cpp
++++ b/src/test/script_tests.cpp
+@@ -99,6 +99,7 @@ static ScriptErrorDesc script_errors[]={
+     {SCRIPT_ERR_MLDSA44_SIG_HASHTYPE, "MLDSA44_SIG_HASHTYPE"},
+     {SCRIPT_ERR_MLDSA44_SIG, "MLDSA44_SIG"},
+     {SCRIPT_ERR_P2MR_EC_DISABLED, "P2MR_EC_DISABLED"},
++    {SCRIPT_ERR_P2MR_MLDSA_DISABLED, "P2MR_MLDSA_DISABLED"},
+     {SCRIPT_ERR_SLHDSA128S_PUBKEY_SIZE, "SLHDSA128S_PUBKEY_SIZE"},
+     {SCRIPT_ERR_SLHDSA128S_SIG_SIZE, "SLHDSA128S_SIG_SIZE"},
+     {SCRIPT_ERR_SLHDSA128S_SIG_HASHTYPE, "SLHDSA128S_SIG_HASHTYPE"},
+@@ -1759,7 +1760,7 @@ BOOST_AUTO_TEST_CASE(formatscriptflags)
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_TAPROOT), "P2SH,TAPROOT");
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH | script_verify_flags::from_int(1u<<31)), "P2SH,0x80000000");
+     // Bits far above the flags in use, which stay unknown as flags are added (the P2MR series
+-    // took 21 to 26).
++    // took 21 to 28).
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int(1ull<<45)), "TAPROOT,0x200000000000");
+     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int((1ull<<46) | (1ull<<58))), "TAPROOT,0x400400000000000");
+     BOOST_CHECK_EQUAL(FormatScriptFlags(script_verify_flags::from_int(1ull<<44)), "0x100000000000");
+-- 
+2.43.0
+

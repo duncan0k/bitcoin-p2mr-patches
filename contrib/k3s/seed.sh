@@ -17,7 +17,7 @@ set -euo pipefail
 ensure_workspace
 
 log "clearing the patch directories"
-in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1 /work/patches/m2 /work/patches/m2a /work/patches/m2b /work/patches/m3 /work/patches/m4 /work/patches/m4r
+in_shell rm -rf /work/patches/master /work/patches/m05 /work/patches/spacing /work/patches/m1 /work/patches/m2 /work/patches/m2a /work/patches/m2b /work/patches/m3 /work/patches/m4 /work/patches/m4r /work/patches/m4t /work/patches/m4b
 
 log "copying the consensus series (patches/) to /work/patches/master"
 push_dir "$REPO_ROOT/patches" /work/patches/master
@@ -88,13 +88,34 @@ else
     log "patches-m4r/ is absent on this branch, skipping the M4-R1 series"
 fi
 
+# M4-T: leaf version 0xe2 and its lattice tripwire outputs, on m4r (without its
+# kill switch).
+if [ -d "$REPO_ROOT/patches-m4t" ]; then
+    log "copying the M4-T series (patches-m4t/) to /work/patches/m4t"
+    push_dir "$REPO_ROOT/patches-m4t" /work/patches/m4t
+    push_file "$REPO_ROOT/SHA256SUMS-m4t" /work/patches/m4t
+else
+    log "patches-m4t/ is absent on this branch, skipping the M4-T series"
+fi
+
+# M4-B: the SLH-DSA block signature, on m4t: its patches are numbered from 0106
+# and apply only after the M4-T series. It also builds signet-slh-sign, the
+# producer image's signer.
+if [ -d "$REPO_ROOT/patches-m4b" ]; then
+    log "copying the M4-B series (patches-m4b/) to /work/patches/m4b"
+    push_dir "$REPO_ROOT/patches-m4b" /work/patches/m4b
+    push_file "$REPO_ROOT/SHA256SUMS-m4b" /work/patches/m4b
+else
+    log "patches-m4b/ is absent on this branch, skipping the M4-B series"
+fi
+
 log "copying the image build contexts"
 push_file "$HERE/Dockerfile.builder" /work/imgctx/builder
 push_file "$HERE/Dockerfile.node" /work/imgctx/node
 in_shell mkdir -p /work/imgctx/node/bin /work/img
 
 log "verifying the checksums on the volume"
-for set_name in master m05 spacing m1 m2 m2a m2b m3 m4 m4r; do
+for set_name in master m05 spacing m1 m2 m2a m2b m3 m4 m4r m4t m4b; do
     if in_shell test -d "/work/patches/$set_name"; then
         # sha256sum's own exit status, on its own, with nothing downstream of
         # it. The previous version ended in `| tail -3`, so the pipeline

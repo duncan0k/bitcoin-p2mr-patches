@@ -1,0 +1,156 @@
+From c28a1940c1c472fd351ccc0a5fa7402bc2e073de Mon Sep 17 00:00:00 2001
+From: duncan0k <dev@ark0.si>
+Date: Sat, 31 Oct 2026 08:44:18 +0000
+Subject: [PATCH 098/105] validation: fail ML-DSA-44 checks in leaf version
+ 0xe2 once a lattice tripwire output is missing
+
+ConnectBlock adds SCRIPT_VERIFY_P2MR_MLDSA_DISABLED to the script flags of a
+block when the P2MR lattice tripwire rules apply to it and a lattice
+tripwire output is not present in the UTXO set the block builds on. It
+decides this in the same place as SCRIPT_VERIFY_P2MR_EC_DISABLED of the
+tripwire rules of leaf version 0xe0, right after GetBlockScriptFlags and
+before any of the block's transactions is applied, from the view it is
+given, which is still the parent's: so a block that spends a lattice
+tripwire output keeps ML-DSA-44 checks working for all its inputs, before
+and after that spend, and they fail from the next block on. Every caller
+connects on a view of its own -- ConnectTip, TestBlockValidity for
+templates and proposals, VerifyDB at level 4, and the background
+chainstate of an assumeutxo snapshot -- so each reads the state from the
+UTXO set it is checking against, through GetCoin, never from a cache that
+only says what it holds.
+
+"Present" is the definition of the tripwire rules of leaf version 0xe0:
+unspent, and created below the height of the rules. That height used to be
+fixed to P2MRTripwireHeight inside IsP2MRTripwirePresent; it is now a
+parameter, which the lattice tripwire outputs pass as
+P2MRLatticeTripwireHeight, and the old form remains for the outputs of
+leaf version 0xe0. So an output that a deep reorganization moved to H4T or
+above stays missing, and a missing outpoint disables ML-DSA-44 in leaf
+version 0xe2 from H4T on. The two tripwires are independent: either can be
+missing, and a reorganization can bring back one and not the other.
+
+P2MRMLDSADisabledAfter tells whether the checks fail in the block after a
+given one, as P2MRECDisabledAfter does for elliptic curve checks; the
+mempool and the RPC use both later in this series.
+DescribeP2MRLatticeTripwireState gives the state as the logs describe it.
+---
+ src/validation.cpp | 50 ++++++++++++++++++++++++++++++++++++++++------
+ src/validation.h   | 15 ++++++++++++++
+ 2 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/src/validation.cpp b/src/validation.cpp
+index a6dade4..d6a45c1 100644
+--- a/src/validation.cpp
++++ b/src/validation.cpp
+@@ -2511,12 +2511,17 @@ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
+     return flags;
+ }
+ 
+-bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, const Consensus::Params& params)
++bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, int cutoff_height)
+ {
+     // GetCoin reads through a cache to the database. The creation height is what keeps an output
+     // that a deep reorganization moved to the rules' height or above from counting again.
+     const std::optional<Coin> coin{view.GetCoin(outpoint)};
+-    return coin && coin->nHeight < params.P2MRTripwireHeight;
++    return coin && static_cast<int>(coin->nHeight) < cutoff_height;
++}
++
++bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, const Consensus::Params& params)
++{
++    return IsP2MRTripwirePresent(view, outpoint, params.P2MRTripwireHeight);
+ }
+ 
+ bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman)
+@@ -2544,6 +2549,34 @@ std::string DescribeP2MRTripwireState(const CBlockIndex* pindex, const CCoinsVie
+                      util::Join(outputs, ", "), P2MR_LEAF_TRIPWIRED, P2MRECDisabledAfter(pindex, view, chainman) ? "disabled" : "enabled");
+ }
+ 
++bool P2MRMLDSADisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman)
++{
++    // The condition GetBlockScriptFlags sets SCRIPT_VERIFY_P2MR_LATTICE_TRIPWIRE on.
++    if (!DeploymentActiveAfter(pindex, chainman, Consensus::DEPLOYMENT_P2MR) ||
++        !DeploymentActiveAfter(pindex, chainman, Consensus::DEPLOYMENT_P2MR_LATTICE_TRIPWIRE)) {
++        return false;
++    }
++    const Consensus::Params& params{chainman.GetConsensus()};
++    // The cutoff of the lattice tripwire outputs is the height of their own rules, not that of the
++    // tripwire rules of leaf version 0xe0: the two tripwires are independent.
++    return std::ranges::any_of(params.p2mr_lattice_tripwires, [&](const Consensus::P2MRLatticeTripwire& tripwire) {
++        return !IsP2MRTripwirePresent(view, tripwire.outpoint, params.P2MRLatticeTripwireHeight);
++    });
++}
++
++std::string DescribeP2MRLatticeTripwireState(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman)
++{
++    const Consensus::Params& params{chainman.GetConsensus()};
++    std::vector<std::string> outputs;
++    for (const Consensus::P2MRLatticeTripwire& tripwire : params.p2mr_lattice_tripwires) {
++        outputs.push_back(strprintf("%s:%u %s", tripwire.outpoint.hash.ToString(), tripwire.outpoint.n,
++                                    IsP2MRTripwirePresent(view, tripwire.outpoint, params.P2MRLatticeTripwireHeight) ? "unspent" : "missing"));
++    }
++    return strprintf("lattice tripwire outputs %s; ML-DSA-44 checks in leaf version 0x%02x are %s for the next block",
++                     outputs.empty() ? std::string{"none"} : util::Join(outputs, ", "), P2MR_LEAF_LATTICE_TRIPWIRED,
++                     P2MRMLDSADisabledAfter(pindex, view, chainman) ? "disabled" : "enabled");
++}
++
+ 
+ /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
+  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
+@@ -2739,13 +2772,18 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state,
+ 
+     // Get the script flags for this block
+     script_verify_flags flags{GetBlockScriptFlags(*pindex, m_chainman)};
+-    // Elliptic curve checks in P2MR leaves of leaf version 0xe0 fail in this block once a tripwire
+-    // output is missing from the UTXO set it builds on (doc/p2mr-tripwire.md). The view still is that
+-    // set: no transaction of this block has been applied to it yet. Decided once for the whole
+-    // block, so a spend of a tripwire output in it leaves the checks of its other inputs alone.
++    // Elliptic curve checks in P2MR leaves of leaf versions 0xe0 and 0xe2 fail in this block once a
++    // tripwire output is missing from the UTXO set it builds on (doc/p2mr-tripwire.md), and
++    // OP_CHECKMLDSA44 checks in leaf version 0xe2 once a lattice tripwire output is
++    // (doc/p2mr-lattice-tripwire.md). The view still is that set: no transaction of this block has
++    // been applied to it yet. Both are decided here, once for the whole block, so a spend of a
++    // tripwire output in it leaves the checks of its other inputs alone.
+     if (P2MRECDisabledAfter(pindex->pprev, view, m_chainman)) {
+         flags |= SCRIPT_VERIFY_P2MR_EC_DISABLED;
+     }
++    if (P2MRMLDSADisabledAfter(pindex->pprev, view, m_chainman)) {
++        flags |= SCRIPT_VERIFY_P2MR_MLDSA_DISABLED;
++    }
+ 
+     const auto time_2{SteadyClock::now()};
+     m_chainman.time_forks += time_2 - time_1;
+diff --git a/src/validation.h b/src/validation.h
+index 62a0c68..81c8e8c 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -1410,6 +1410,11 @@ bool IsBIP30Unspendable(const uint256& block_hash, int block_height);
+ // Returns the script flags which should be checked for a given block
+ script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
+ 
++/** Whether a tripwire output is present in a UTXO set: unspent, and created below `cutoff_height`, the
++ *  height of its rules: P2MRTripwireHeight for the outputs of the P2MR tripwire rules
++ *  (doc/p2mr-tripwire.md), P2MRLatticeTripwireHeight for those of the lattice tripwire rules
++ *  (doc/p2mr-lattice-tripwire.md). */
++bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, int cutoff_height);
+ /** Whether a tripwire output of the P2MR tripwire rules (doc/p2mr-tripwire.md) is present in a UTXO
+  *  set: unspent, and created below the height of those rules. */
+ bool IsP2MRTripwirePresent(const CCoinsView& view, const COutPoint& outpoint, const Consensus::Params& params);
+@@ -1424,4 +1429,14 @@ bool P2MRECDisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, cons
+  *  block, as the logs describe them (doc/p2mr-tripwire.md). */
+ std::string DescribeP2MRTripwireState(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
+ 
++/** Whether OP_CHECKMLDSA44 checks with a non-empty signature in P2MR leaves of leaf version 0xe2 fail in
++ *  the block after `pindex` (doc/p2mr-lattice-tripwire.md): the P2MR lattice tripwire rules apply to
++ *  that block, and a lattice tripwire output is missing from `view`, the UTXO set after `pindex`. */
++bool P2MRMLDSADisabledAfter(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
++
++/** The lattice tripwire outputs in `view`, the UTXO set after `pindex`, each unspent or missing, and
++ *  whether ML-DSA-44 checks in leaf version 0xe2 fail in the next block, as the logs describe them
++ *  (doc/p2mr-lattice-tripwire.md). */
++std::string DescribeP2MRLatticeTripwireState(const CBlockIndex* pindex, const CCoinsView& view, const ChainstateManager& chainman);
++
+ #endif // BITCOIN_VALIDATION_H
+-- 
+2.43.0
+

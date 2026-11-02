@@ -78,9 +78,9 @@ The rendered file is not a secret but it is not repository content either.
 Write it outside the checkout; `-o` is required so that it cannot default into
 one.
 
-## The three Secrets
+## The Secrets
 
-All three are created by hand and none appears in any file here. `kubectl create
+All of them are created by hand and none appears in any file here. `kubectl create
 secret` keeps their values out of the shell history only if the shell is
 configured to ignore commands with a leading space, so prefer `--from-file`
 over `--from-literal` where there is a choice.
@@ -122,6 +122,127 @@ sudo k3s kubectl -n ark0 create secret generic ark0-pq-signer --from-file=seed=s
 ```
 
 The exact commands for the first two are in `../ARK0-MIGRATION.md`, step 3.
+
+**`ark0-slh-signer`** (M4-B, not active on Ark-0 yet), one key, `key`: the 48
+bytes `SK.seed || SK.prf || PK.seed` of the SLH-DSA-SHA2-128s block key, raw,
+from the operating system's CSPRNG. It is the third block key: once M4-B is
+active, the chain stops without any one of the three. `50-miner.yaml` mounts it
+at `/slh` (optional, so that the pod starts before it exists) and, once the
+height and key are decided, gives the producer `ARK0_SLH_BLOCK_KEY_FILE=/slh/key`.
+Only the signer program, `signet-slh-sign` in the producer image, reads it; it
+prints the signature after verifying it, or the public key with `-pubkey`, and
+never the key.
+
+**The backup is an open decision.** On the operator's Windows machine the raw
+key would pass through the backup tool's Node process, whose memory can be
+paged to disk, hibernated or dumped. The M2 and M3 block keys were backed up
+that way; changing the practice is the project owner's decision:
+
+- **(a)** the encrypted backup is made on the Linux host below (the backup tool
+  needs only the backup public key); the operator's machine receives and
+  uploads only ciphertext; the restore drill decrypts on a Linux host that meets
+  the same preconditions;
+- **(b)** as for the M2 and M3 keys: the backup tool runs on the operator's
+  Windows machine, with its paging, hibernation and crash-dump exposure.
+
+**Do not generate the key until that decision is made and recorded in the
+runbook.** Three backups, each checked against the public key, and a restore
+drill with the same image before the height (M4 design section 4.5), follow
+whichever option is recorded.
+
+The steps that run on the Linux host: **Linux only** (Windows and Git Bash are
+not supported for them; Git Bash's `/dev/shm` is a directory on disk), with
+`signet-slh-sign` from the producer image. Every check fails closed: a command
+that cannot run stops the procedure, and its exit status is checked apart from
+its output. Not run yet: there is no key.
+
+Why a core limit of 1 byte (Linux `fs/coredump.c`, checked at v6.17, commit
+`e5f0a698b34e`): `coredump_pipe()` aborts the dump when `RLIMIT_CORE` is 1, the
+value it uses to catch recursive crashes, so a pipe `core_pattern` (which
+otherwise ignores the limit) gets nothing; `coredump_file()` writes nothing when
+the limit is below the format's `min_coredump`, a page for ELF. A socket
+`core_pattern` (`@`, from Linux 6.17) goes through `coredump_socket()`, which
+checks no limit: the procedure stops on one. `sudo` 1.9.9 and later sets the
+core limit of its command to 0, which a pipe pattern ignores, so the one step
+that runs through `sudo` and reads the key (`kubectl`) sets 1:1 again inside it
+(`sudo prlimit --core=1:1 --`) and checks it before it runs; the backup step of
+option (a), when it is written, does the same.
+
+```sh
+set -eu; umask 077                                     # every file below: owner only
+fail() { echo "stopped: $*" >&2; exit 1; }
+os="$(uname -s)" || fail "uname"; [ "$os" = Linux ] || fail "Linux only"
+n="$(wc -l < /proc/swaps)" || fail "cannot read /proc/swaps"
+[ "$n" = 1 ] || fail "swap is on (/proc/swaps lists more than its header)"
+states="$(cat /sys/power/state)" || fail "cannot read /sys/power/state"
+case " $states " in
+  *" disk "*)                                          # the kernel can hibernate: confirm by hand
+    echo "Confirm that this host cannot hibernate: hibernate.target, hybrid-sleep.target and"
+    echo "suspend-then-hibernate.target masked, no resume= on the kernel command line, swap off."
+    printf 'Type "hibernation is off" to go on: '; read -r answer || fail "no answer"
+    [ "$answer" = "hibernation is off" ] || fail "hibernation not confirmed off" ;;
+esac
+# No process of the procedure may dump core while it holds the key: a core limit of exactly 1
+# byte, soft and hard, set on this shell so that every child inherits it (ulimit -c counts blocks).
+command -v prlimit > /dev/null || fail "prlimit is not available"
+prlimit --pid $$ --core=1:1 || fail "prlimit"
+lim="$(prlimit --pid $$ --core --noheadings --output SOFT,HARD)" || fail "prlimit"
+set -- $lim; [ "$*" = "1 1" ] || fail "the core limit is not 1:1 ($lim)"
+cp="$(cat /proc/sys/kernel/core_pattern)" || fail "cannot read core_pattern"
+case "$cp" in @*) fail "core_pattern is a socket, which no core limit stops" ;; esac
+# sudo (1.9.9 and later) runs its command with a core limit of 0, which a pipe core_pattern ignores:
+# every command run through sudo that reads the key sets the limit again after the privilege change,
+# inside the sudo, and checks it before it runs. No other step changes users or limits (no su,
+# env -i or systemd-run); one added later must do the same.
+as_root() {
+  sudo prlimit --core=1:1 -- sh -c 'l="$(prlimit --pid $$ --core --noheadings --output SOFT,HARD)" || exit 97
+    [ "$(echo $l)" = "1 1" ] || exit 98; exec "$@"' as_root "$@"
+}
+d="$(mktemp -d /dev/shm/ark0-slh.XXXXXX)" || fail "mktemp"
+cleanup() { rm -f -- "$d/key" "$d/pub"; rmdir -- "$d" 2> /dev/null || true; }
+trap cleanup EXIT                                      # before the key exists; every signal
+for sig in HUP INT QUIT PIPE TERM; do                  # takes the same path (dash skips EXIT
+  trap "cleanup; trap - EXIT; exit 1" "$sig"           # traps on an untrapped signal)
+done
+fs="$(findmnt -n -o FSTYPE --target "$d")" || fail "findmnt"
+[ "$(printf '%s\n' "$fs" | tail -n 1)" = tmpfs ] || fail "$d is not on tmpfs"
+head -c 48 /dev/urandom > "$d/key" || fail "key generation"
+signet-slh-sign -pubkey "$d/key" > "$d/pub" || fail "signet-slh-sign -pubkey"
+python3 -c 'import hashlib, sys; print(hashlib.sha256(bytes.fromhex(open(sys.argv[1]).read())).hexdigest())' "$d/pub" \
+  || fail "public key hash"
+# ^ ARK0_SLH_BLOCK_KEY_SHA256; the runbook and the release notes give the same SHA256
+#
+# The three backups go here, as the runbook records (option (a) or (b) above).
+as_root k3s kubectl -n ark0 create secret generic ark0-slh-signer --from-file=key="$d/key" || fail "kubectl"
+cleanup; trap - EXIT; test ! -e "$d" || fail "$d was not removed"; echo "removed $d"
+```
+
+SLH-DSA is stateless: restoring a backup or moving the producer reuses no
+one-time key.
+
+### M4-B: what has to be live, and in which order
+
+1. `blockreservedweight=48000` on node A (`10-configmap.yaml`), **before** the
+   first block with an SLH output. It was 16000 for M2. The SLH output is
+   31,504 weight units on top of M2's push: with 16000 a full template no longer
+   fits once the producer inserts it, and the block is refused for its size
+   (`bad-blk-length` or `bad-blk-weight`; `feature_signet_slhblock.py` shows
+   it). The value is already 48000 here; it takes effect when node A restarts
+   with the new configuration.
+2. The producer image with `signet-slh-sign` (`Dockerfile.miner`,
+   `../stage-miner.sh`), from a build of the M4-B series.
+3. The Secret `ark0-slh-signer`.
+4. The Core series and `ark0.py` with the Ark-0 height and key
+   (`ARK0_SLH_BLOCK_HEIGHT`, `ARK0_SLH_KEY_SHA256`): until both are set,
+   `ark0.py` refuses to mine Ark-0 blocks with any `ARK0_SLH_*` variable.
+5. The three `ARK0_SLH_*` variables in `50-miner.yaml`, with a start at least
+   1,920 blocks (about 48 hours) before the height; `ark0.py` refuses a later
+   one, a wrong key hash and a missing variable.
+
+The producer signs in a fixed order: the SLH output first (placeholder,
+`slh_msg`, the signer, the full output), then the ML-DSA-44 signature over it,
+then the classical solution. `producer/test_m4b_producer.py` runs `ark0.py`
+against a local node of the M4-B build and checks that and every gate.
 
 ## The wallet `70-soak.yaml` needs
 
