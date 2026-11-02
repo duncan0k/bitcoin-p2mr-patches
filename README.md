@@ -34,6 +34,14 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     seed behind the key, carried in the annex. It relaxes the rules, so it is a hard fork. Ark-0
     opens it from height 51000; regtest has it, and another custom signet only if it sets
     `-signetrescue`. See "Experimental M4-R series" below.
+  - The M4-T series in `patches-m4t/` adds a P2MR leaf version, `0xe2`, whose ML-DSA-44 signature
+    checks stop working once one of three designated outputs is spent; its elliptic curve checks
+    follow the tripwire of `0xe0`, and its SLH-DSA checks always work. The M4-B series in
+    `patches-m4b/` requires an SLH-DSA-SHA2-128s signature by a fixed key on every block from a
+    height on, next to M2's. On Ark-0 both apply from height 55000, which patch 113 fixes with the
+    three outputs and the key. Another custom signet gets them only if it sets
+    `-signetlatticetripwire` and `-signetslhblock`. See "Experimental M4-T series" and
+    "Experimental M4-B series" below.
 
 ## Layout
 
@@ -131,10 +139,12 @@ validation only after activation.
 
 - No activation on mainnet or the public signet: this holds for everything in this repository. No
   post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum
-  signature checks are the experimental M1, M2 and M4-S series in `patches-m1/`, `patches-m2/` and
-  `patches-m4/`, which Ark-0 activates from heights 8600, 20000 and 32000 (`ark0/NETWORK.md`); another
-  custom signet can switch M2 on with `-signetpqblock`, M1 with `-signetmldsa44`, which `patches-m3/`
-  adds, and M4-S with `-signetslhdsa128s`.
+  signature checks are the experimental M1, M2, M4-S and M4-B series in `patches-m1/`, `patches-m2/`,
+  `patches-m4/` and `patches-m4b/`, which Ark-0 activates from heights 8600, 20000, 32000 and 55000
+  (`ark0/NETWORK.md`), and M4-T in `patches-m4t/` disables one of them in leaves of version `0xe2`
+  from height 55000; another custom signet can switch M2 on with `-signetpqblock`, M1 with
+  `-signetmldsa44`, which `patches-m3/` adds, M4-S with `-signetslhdsa128s`, M4-T with
+  `-signetlatticetripwire` and M4-B with `-signetslhblock`.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
   is a separate series applying on top.
@@ -173,6 +183,15 @@ validation only after activation.
   of BIP-360 or BIP-361, it is not a proposal for Bitcoin, and it is not a way to recover frozen coins
   in general: it helps only keys derived from a seed as its statement says, and its proof system has
   had no external review.
+- Describe M4-T as: "a drill of disabling ML-DSA-44 checks inside one experimental P2MR leaf version,
+  `0xe2`, on the Ark-0 test signet: from height 55000, from the block after one of three designated
+  outputs is missing, ML-DSA-44 signature checks in those leaves stop working, and SLH-DSA checks keep
+  working". It is not part of BIP-360, it is not a proposal for Bitcoin, and it does not show that
+  ML-DSA-44 is broken, or that it is not.
+- Describe M4-B as: "an experimental SLH-DSA-SHA2-128s block signature, required on the Ark-0 test
+  signet from height 55000, next to M2's ML-DSA-44 one". It is not part of BIP 325, it is not a
+  proposal for Bitcoin, and it does not make Ark-0 a quantum-resistant network: blocks still need the
+  classical signet solution and proof of work, and one party holds all three block keys.
 - Show only `tb1z` (signet) / `bcrt1z` (regtest) addresses. Do not generate single-leaf (m = 0) outputs
   from tooling: consensus accepts them per the BIP, and they are anyone-can-spend.
 
@@ -952,20 +971,50 @@ functional suite, the extended tests and fuzzing were not run. 0113 was exported
 statements corrected, on how `H4T` was chosen (its message, `doc/p2mr-lattice-tripwire.md` and a comment in
 `src/kernel/chainparams.h`); its code and tests are the ones these runs passed.
 
+M4-T and M4-B were released on [RELEASE DATE], with patch 113, as the release `ark0-node-m4tb` of this
+repository ("Prebuilt node", below). Verification record of that build (2026-11-02, the release
+pipeline of `contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 8 CPUs, the files as published
+here): from a fresh clone of v31.1 with the 112 patches of the ten sets, `test_bitcoin` passed 814 of 820
+test cases and skipped 5; 24 P2MR, signet and related functional scripts passed, 25 runs with
+`rpc_blockchain.py` over both transports (`feature_p2mr_rescue.py` with the M4-S release's `bitcoind` as
+the late node); the default functional suite passed, 286 passed and 17 skipped. A second build from a
+fresh clone with an empty compiler cache (503 compilations, no cache hit) produced the same five
+binaries and `signet-slh-sign`, byte for byte, and passed the unit tests and five functional scripts of
+the two series. An Ark-0 node of the build with no peers logged the two start-up lines of
+`ark0/NETWORK.md`, "Rule change at height 55000 (M4-T and M4-B)", listed `p2mr_lattice_tripwire` as
+buried at 55000, and gave the `lattice` object of `gettripwireinfo`. The four binaries with the Rust
+library need glibc 2.39, `bitcoin-cli` 2.34, as for M4-R; `signet-slh-sign` is static. Their SHA-256:
+
+| Binary | SHA-256 |
+|---|---|
+| `bitcoind` | `a352d945fce8498b81b2d9406eb3258bbcada73613630db6cff101507430a246` |
+| `bitcoin-cli` | `977c1ab17d4330bcde6c595784197f3ab7eaf402833c0fd50651847f24703551` |
+| `bitcoin-tx` | `16d2227f61191b8e2136e1ab08c09018cc6d6bfdd6226c38514cc1083cdc4f74` |
+| `bitcoin-util` | `1e5b95b1ed5e64c5c786d16846ebff8776ea9c8d0de92b7b5fc31c3405a2c329` |
+| `bitcoin-wallet` | `a9385cf0278a3e736c274906427b107c3fb8e21060e4e25d1c6d90dfc59d14cb` |
+| `signet-slh-sign` | `a44525d983e7a8771c42246b5045a3b602c3ebe08971b6259bc59a7325bd32de` |
+
 ## Prebuilt node
 
-The release `ark0-node-m4r` of this repository carries the build the Ark-0 nodes run, all eight patch
-sets: the five binaries for x86_64 Linux in an archive, and the same build as a container image,
-`ghcr.io/duncan0k/ark0-node`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
+The release `ark0-node-m4tb` of this repository carries the build with all ten patch sets, to which
+the Ark-0 nodes move on [ROLL DATE]: the five binaries for x86_64 Linux in an archive,
+`ark0-node-m4tb-x86_64-linux-gnu.tar.gz`, and the same build as a container image,
+`ghcr.io/duncan0k/ark0-node:m4tb`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
 in `ark0/release-signing-key.asc`. `ark0/JOIN.md`, section 1, says how to check both and what the
-binaries need from the system. The release was first published on 2026-10-30 with a build that set the
-lane's height at 63000, and replaced the same day, under the same tag, with this one; a node that runs
-the first build has to be replaced as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").
+binaries need from the system.
+
+The release before, `ark0-node-m4r`, carries the build with the first eight patch sets, which the Ark-0
+nodes run until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It
+was first published on 2026-10-30 with a build that set the lane's height at 63000, and replaced the
+same day, under the same tag, with the build with 51000; a node that runs the first build has to be
+replaced as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
-`patches-m4r/` as published, produced the same five binaries byte for byte. That image comes from
+`patches-m4r/` as published, produced the same five binaries byte for byte; for `ark0-node-m4tb`, with
+the ten sets as published, the same five binaries and `signet-slh-sign` (the verification record at the
+end of "Experimental M4-B series"). That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
@@ -979,7 +1028,7 @@ archives and without the wallet, GUI, ZMQ, IPC and USDT: `bitcoind.exe` for 64-b
 Intel, and `bitcoind` for 64-bit Linux with glibc 2.35 or later, on x86_64 and on aarch64. Up to
 `ark0-witness-0.2.0` each is the M3 node, Bitcoin Core v31.1 with the six patch sets at the tag
 `ark0-node-m3`; from `ark0-witness-0.3.0` on, the M4-R node, with the eight patch sets at the tag
-`ark0-node-m4r`. Each is cross-compiled with Core's own depends system by a script that stops unless Core
+`ark0-node-m4r`, until a later release of the witness program moves to the ten. Each is cross-compiled with Core's own depends system by a script that stops unless Core
 and this repository are at the commits it names. For the rescue verifier of `patches-m4r/`,
 `contrib/windows/build.sh` and `contrib/cross/build.sh` install Rust 1.97.0 from static.rust-lang.org,
 each component checked against its hash in the channel manifest that the Rust release key signs.
@@ -1013,7 +1062,8 @@ build of the node above for its system and shows, on a page served on 127.0.0.1 
 reports: how far it has synced, whether it is on Ark-0, block 30000 and the two tripwires of M3, and whether
 elliptic curve signatures in leaves of version `0xe0` are still accepted. It can also have the node judge a
 raw transaction with `testmempoolaccept`; the transaction is never broadcast. The release
-`ark0-witness-0.3.0` runs the M4-R build, which follows Ark-0 past height 51000; the M3 build of
+`ark0-witness-0.3.0` runs the M4-R build, which follows Ark-0 past heights 51000 and 55000 but checks
+neither M4-T nor M4-B from 55000; the M3 build of
 `ark0-witness-0.2.0` and earlier stops at the first block with a rescue spend. Releases 0.2.0 and 0.3.0
 each have a zip for Windows, a zip for macOS and a tarball each for Linux on x86_64 and on aarch64, their
 `SHA256SUMS` and the signature of that file by the release key. None of the programs is code-signed, and
