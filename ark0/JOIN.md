@@ -95,7 +95,7 @@ sha256sum --ignore-missing -c SHA256SUMS &&
 ```
 
 The binaries are linked against the system's C and C++ runtimes, libevent and SQLite. They need
-glibc 2.39 or later (`bitcoin-cli` 2.34) and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
+glibc 2.39 or later (2.34 for `bitcoin-cli`) and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
 both, Ubuntu 22.04 and Debian 12 do not. On Ubuntu 24.04 or Debian 13, install the libraries with
 `sudo apt-get install libevent-core-2.1-7t64 libevent-extra-2.1-7t64 libevent-pthreads-2.1-7t64 libsqlite3-0`.
 Wherever this guide says `./build/bin/`, use `ark0-node-m4tb/bin/` instead. The release before,
@@ -172,7 +172,7 @@ follows it too (up to the first rescue spend, below), but does not check `OP_CHE
 height 32000 on. But one built without `patches-m4r/`, as this guide described before M4-R, stops at
 the first block with a rescue spend, which can come from height 51000 on (section 5). One built
 without `patches-m4t/` and `patches-m4b/`, as this guide described before M4-T and M4-B, follows it
-again, but does not run leaves of version `0xe2` or check the SLH-DSA block signature from height
+too, but does not run leaves of version `0xe2` or check the SLH-DSA block signature from height
 55000 on. `patches-m4b/` applies only right after `patches-m4t/`.
 
 ## 2. Configure it
@@ -245,9 +245,9 @@ The chain is small, so the first sync takes minutes rather than hours.
   and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network
   id of the startup line. Its `lattice` object reports `height` 55000, `leaf_version` `e2`, the
   three lattice tripwire outputs of the startup line, each with its `key_sha256`, its `label` and
-  `state` `unspent`, and `mldsa_disabled_next_block` false. After the drill of M4-T, when the
-  operator spends the drill key's output, that output is `missing`, and from height 55000 on
-  `mldsa_disabled_next_block` is true. A node that has not yet synced past
+  `state` `unspent`, and `mldsa_disabled_next_block` false. After the drill of M4-T, once the
+  operator's spend of the drill key's output is in a block, that output is `missing`, and
+  `mldsa_disabled_next_block` is true whenever the next block is at height 55000 or above. A node that has not yet synced past
   height 15748, where both tripwire outputs were created, reports both as `missing`, and one not yet
   past height 39971 reports the three lattice tripwire outputs so, and logs so at startup; that is
   expected.

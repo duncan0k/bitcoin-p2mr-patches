@@ -76,9 +76,10 @@ describes how to follow the live chain with a node of your own.
   experimental leaf version, `0xe0`, and refuse elliptic curve signatures in
   them from the block after one of two designated outputs is spent. The
   operator holds the key of one of these outputs and spent it on
-  2026-10-30, at the announced time, as a drill. Leaves of version `0xc0`,
-  and outputs without leaves of version `0xe0`, are unchanged. See "Rule
-  change at height 30000 (M3)" below.
+  2026-10-30, at the announced time, as a drill. Leaves of version `0xc0`
+  are unchanged, and so are outputs with no leaf of version `0xe0` or, from
+  height 55000, of version `0xe2`. See "Rule change at height 30000 (M3)"
+  below.
 - **A third exception from height 32000 (M4-S).** From that height the nodes
   built with `patches-m4/` also check a second post-quantum signature scheme,
   SLH-DSA-SHA2-128s, in outputs that opt into it. Outputs that do not opt in
@@ -780,8 +781,9 @@ control block starts with `0xe3`) is executed as a leaf of version `0xc0` is,
   in a block but not relayed, since template R1 is of version `0xe0` only;
 - its `OP_CHECKMLDSA44` checks with a non-empty signature fail in every block
   whose parent leaves any one of three designated outputs, the lattice
-  tripwires, missing from the UTXO set: spent, never created, or created at
-  or above height 55000. So a spend takes effect from the next block, and
+  tripwires, missing: spent, never created, or created at or above height
+  55000 (an output counts as present only while it is in the UTXO set and
+  was created below that height). So a spend takes effect from the next block, and
   only a reorganization that undoes the spend brings the output back. The
   mempool and a block refuse such a check with the reason
   `ML-DSA-44 signature checks are disabled in this leaf`.
@@ -790,7 +792,7 @@ Its `OP_CHECKSLHDSA128S` checks keep working, whatever happens to the
 tripwires. Leaves of version `0xc0` and `0xe0`, P2TR, witness v0 and legacy
 scripts are not affected. The three outputs were created at height 39971, by
 `aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c`, 10,000
-sats each, and the build fixes them:
+sats each, and patch 113 puts them in the build:
 
 | Output | Outpoint | Key | Label |
 |---|---|---|---|
@@ -807,23 +809,28 @@ library alone.
 
 - **What the rule does with them.** An output whose tree holds an ML-DSA-44
   leaf S1 and an SLH-DSA leaf SLH1, both of version `0xe2` at depth one (the
-  pq2 template), can be spent through either. If L1 or L2 is spent, from the
-  next block the S1 path of every such output fails and the SLH1 path still
-  works. A spend of L1 or L2 does not show that ML-DSA-44 is broken, and their
+  pq2 template), can be spent through either. If any of the three is spent
+  (L3 in the drill, below), from the next block the S1 path of every such
+  output fails and the SLH1 path still works. A spend of L1 or L2 does not show that ML-DSA-44 is broken, and their
   staying unspent does not show that it is not: someone who could forge
   signatures in secret would not spend them, and on a network with one block
-  producer the operator could keep such a spend out of the chain, or spend L2
-  itself. General progress against lattice problems would reach L1 and L2 at
+  producer the operator could keep such a spend out of the chain or, had it
+  kept L2's key against its statement, spend L2 itself. General progress against lattice problems would reach L1 and L2 at
   about the same cost, so neither is an earlier warning than the other.
-- **Below height 55000, nothing changes.** Until then `0xe2` is an unknown
-  leaf version: a spend through such a leaf succeeds without running it, and
-  nodes do not relay it. No coins should be paid to `0xe2` leaves before the
-  chain is past height 55000. A single leaf sits at depth zero and is spent
-  without being executed, at any height.
-- **What is relayed from the height.** Spends of leaves of version `0xe2`
-  follow the same standardness rules as those of `0xc0` and `0xe0`: S1 and
-  SLH1 are relayed. S2, which needs both an ML-DSA-44 and a Schnorr signature,
-  is not relayed in `0xe2`.
+- **Below height 55000, no rule changes.** Until then a leaf of version
+  `0xe2` at depth one or more is of an unknown leaf version: a spend through
+  it succeeds without running it, and nodes do not relay it. No coins should
+  be paid to `0xe2` leaves before the chain is past height 55000.
+- **At depth zero.** A single leaf sits at depth zero and is spent without
+  being executed, at any height. Its spends follow, at every height, the
+  standardness limit of `0xc0` and `0xe0` leaves, stack elements of at most
+  80 bytes with S1 and SLH1 excepted; a node without these series does not
+  apply that limit and relays such spends.
+- **What is relayed from the height.** Spends of leaves of version `0xe2` at
+  depth one or more follow the same standardness rules as those of `0xc0`
+  and `0xe0`: S1 and SLH1 are relayed. S2, which needs both an ML-DSA-44 and
+  a Schnorr signature, is not relayed in `0xe2`, and neither is a rescue
+  (template R1 is of version `0xe0` only).
 - **The drill.** The operator will spend L3 at an announced time, announced at
   least two weeks ahead and no earlier than seven days after a wallet offers
   pq2 outputs. From the next block, ML-DSA-44 checks in `0xe2` fail and SLH1
@@ -840,8 +847,8 @@ signature, an SLH-DSA-SHA2-128s
 `012b50fafe6e265ce48cb16b0c28cfe25957c6b9410e353bcb88733b9a841b5e`, whose
 SHA256 is `a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569`.
 It sits in a coinbase output right before the witness commitment output, with
-amount 0: `OP_RETURN` and one push of the tag `PQH1`, a version byte `01` and
-the 7,856-byte signature. A block without it, or with a wrong one, is invalid
+amount 0: `OP_RETURN` and one push of 7,861 bytes, the tag `PQH1`, a version
+byte `01` and the 7,856-byte signature. A block without it, or with a wrong one, is invalid
 (`bad-signet-slhblk`).
 
 - **The order of the signatures.** The SLH-DSA signature covers what the
@@ -868,7 +875,7 @@ the 7,856-byte signature. A block without it, or with a wrong one, is invalid
 ### Both
 
 - **What a node logs and reports.** At startup a node with these series logs
-  these two lines, which operators can compare with these:
+  these two lines, for operators to compare:
 
   ```
   Signet P2MR lattice tripwire rules from height 55000 in leaf version 0xe2; tripwire outputs aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0 (NUMS ML-DSA-44, pk SHA256 591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:1 (destroyed key, pk SHA256 c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:2 (drill key, pk SHA256 5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495)
@@ -890,7 +897,8 @@ the 7,856-byte signature. A block without it, or with a wrong one, is invalid
   `bitcoin-cli getdeploymentinfo` lists `p2mr_lattice_tripwire` as a buried
   deployment with height 55000, and from that height
   `P2MR_LATTICE_TRIPWIRE` among the script flags. `gettripwireinfo` has a
-  `lattice` object: the height, the leaf version `e2`, each output with its
+  `lattice` object: the height the rules start at, the leaf version `e2`, each
+  output with its
   `state`, `unspent` or `missing`, its key's SHA256 and its label, and
   `mldsa_disabled_next_block`. A node that has not yet synced past height
   39971 reports all three as `missing`; that is expected, and matters only
@@ -900,10 +908,11 @@ the 7,856-byte signature. A block without it, or with a wrong one, is invalid
 - **They are soft forks.** A node without these series (an M4-R build)
   accepts every block a node with them accepts and keeps following the chain,
   but does not run leaves of version `0xe2`, does not check the SLH-DSA block
-  signature, and does not relay spends of `0xe2` leaves. A node that accepted
-  blocks at or above height 55000 before it upgraded has not checked them; one
-  start with `-reindex-chainstate` (`-reindex` on a pruned node), without
-  `-assumevalid`, checks them.
+  signature, and does not relay spends of `0xe2` leaves at depth one or more.
+  A node that accepted blocks at or above height 55000 before it upgraded has
+  not checked them; one start with `-reindex-chainstate` (`-reindex` on a
+  pruned node) checks them, and a node set with `-assumevalid` drops that
+  setting first.
 - **They are not part of BIP-360 or BIP 325**, and they are not a proposal
   for Bitcoin.
 - **The height, the three outputs and the key are rules of this network and

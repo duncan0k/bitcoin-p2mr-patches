@@ -142,7 +142,7 @@ validation only after activation.
   signature checks are the experimental M1, M2, M4-S and M4-B series in `patches-m1/`, `patches-m2/`,
   `patches-m4/` and `patches-m4b/`, which Ark-0 activates from heights 8600, 20000, 32000 and 55000
   (`ark0/NETWORK.md`), and M4-T in `patches-m4t/` disables one of them in leaves of version `0xe2`
-  from height 55000; another custom signet can switch M2 on with `-signetpqblock`, M1 with
+  from height 55000, once one of three designated outputs is spent; another custom signet can switch M2 on with `-signetpqblock`, M1 with
   `-signetmldsa44`, which `patches-m3/` adds, M4-S with `-signetslhdsa128s`, M4-T with
   `-signetlatticetripwire` and M4-B with `-signetslhblock`.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
@@ -168,7 +168,8 @@ validation only after activation.
   Wuille's mail of 2026-06-25, but what it constrains is one experimental leaf version, and its
   tripwires are two designated outputs. It is not part of BIP-360 or BIP-361, it is not a proposal
   for Bitcoin, and it does not mean that any elliptic curve key has been broken, or tell when one
-  will be. It disables no elliptic curve check outside leaves of version `0xe0`: leaves of version
+  will be. It disables no elliptic curve check outside leaves of version `0xe0` (with M4-T, also in leaves
+  of version `0xe2` from height 55000): leaves of version
   `0xc0`, P2TR and the other output types are not affected.
 - Describe M4-S as: "an experimental SLH-DSA-SHA2-128s signature check in P2MR leaves, active on the
   Ark-0 test signet from height 32000" (regtest activates it too, for tests, and another custom signet
@@ -975,7 +976,7 @@ M4-T and M4-B were released on [RELEASE DATE], with patch 113, as the release `a
 repository ("Prebuilt node", below). Verification record of that build (2026-11-02, the release
 pipeline of `contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 8 CPUs, the files as published
 here): from a fresh clone of v31.1 with the 112 patches of the ten sets, `test_bitcoin` passed 814 of 820
-test cases and skipped 5; 24 P2MR, signet and related functional scripts passed, 25 runs with
+test cases and one more with a warning, and skipped 5; 24 P2MR, signet and related functional scripts passed, 25 runs with
 `rpc_blockchain.py` over both transports (`feature_p2mr_rescue.py` with the M4-S release's `bitcoind` as
 the late node); the default functional suite passed, 286 passed and 17 skipped. A second build from a
 fresh clone with an empty compiler cache (503 compilations, no cache hit) produced the same five
@@ -983,7 +984,8 @@ binaries and `signet-slh-sign`, byte for byte, and passed the unit tests and fiv
 the two series. An Ark-0 node of the build with no peers logged the two start-up lines of
 `ark0/NETWORK.md`, "Rule change at height 55000 (M4-T and M4-B)", listed `p2mr_lattice_tripwire` as
 buried at 55000, and gave the `lattice` object of `gettripwireinfo`. The four binaries with the Rust
-library need glibc 2.39, `bitcoin-cli` 2.34, as for M4-R; `signet-slh-sign` is static. Their SHA-256:
+library need glibc 2.39, `bitcoin-cli` 2.34, as for M4-R; `signet-slh-sign`, the producer's signer, which is not in the release, is static. Their
+SHA-256:
 
 | Binary | SHA-256 |
 |---|---|
@@ -1013,8 +1015,8 @@ replaced as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in
 `patches-m4r/` as published, produced the same five binaries byte for byte; for `ark0-node-m4tb`, with
-the ten sets as published, the same five binaries and `signet-slh-sign` (the verification record at the
-end of "Experimental M4-B series"). That image comes from
+the ten sets as published, the same five binaries and the same `signet-slh-sign`, which is not in the
+release (see the verification record at the end of "Experimental M4-B series"). That image comes from
 `contrib/k3s/Dockerfile.builder`, which pins its Ubuntu 24.04 base by digest but not its package
 versions: the archive's `BUILDER-PACKAGES.txt` lists the version of every package it had, and
 `PROVENANCE.txt` the toolchain, so an image built later matches only if it installs those versions
@@ -1028,7 +1030,7 @@ archives and without the wallet, GUI, ZMQ, IPC and USDT: `bitcoind.exe` for 64-b
 Intel, and `bitcoind` for 64-bit Linux with glibc 2.35 or later, on x86_64 and on aarch64. Up to
 `ark0-witness-0.2.0` each is the M3 node, Bitcoin Core v31.1 with the six patch sets at the tag
 `ark0-node-m3`; from `ark0-witness-0.3.0` on, the M4-R node, with the eight patch sets at the tag
-`ark0-node-m4r`, until a later release of the witness program moves to the ten. Each is cross-compiled with Core's own depends system by a script that stops unless Core
+`ark0-node-m4r`, for now. Each is cross-compiled with Core's own depends system by a script that stops unless Core
 and this repository are at the commits it names. For the rescue verifier of `patches-m4r/`,
 `contrib/windows/build.sh` and `contrib/cross/build.sh` install Rust 1.97.0 from static.rust-lang.org,
 each component checked against its hash in the channel manifest that the Rust release key signs.
