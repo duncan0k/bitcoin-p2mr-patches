@@ -8,22 +8,27 @@ Before you start:
 
 - **One party produces every block.** The signet challenge is a 1-of-1 multisig and only the
   operator holds the key, and it alone holds the ML-DSA-44 block key that M2 requires from height
-  20000. Your node verifies every block but cannot produce one. Ark-0 is not
-  a decentralized network.
+  20000 and the SLH-DSA block key that M4-B requires from height 55000. Your node verifies every
+  block but cannot produce one. Ark-0 is not a decentralized network.
 - **It is a test network for trying things out.** It may be reset at any time.
 - **The explorer and the faucet are the operator's too.** A block explorer at
   <https://explorer.ark0.si> shows blocks and transactions, with P2MR spends taken
   apart, and a faucet at <https://faucet.ark0.si> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
-- **Rule changes are announced in this repository before they apply.** The latest one, milestone
-  M4-R, applies from height 51000 ("Rule change at height 51000 (M4-R)" in `NETWORK.md`), expected
-  around 2026-11-15 05:00 UTC and not before 2026-11-14 00:00 UTC. From there nodes accept, in P2MR
-  leaves of version `0xe0`, a zero-knowledge proof that the spender knows the seed behind a key in
-  place of an elliptic curve signature. **It is a hard fork:** a node built with `patches-m3/` but
-  without `patches-m4r/` stops following the chain at the first block that uses it, so upgrade
-  before height 51000 (section 1). The one before, M4-S, applies from height 32000 ("Rule change at
-  height 32000 (M4-S)"). From there nodes check `OP_CHECKSLHDSA128S`, an SLH-DSA signature check in
-  P2MR leaves. M3 applies from height 30000 ("Rule change at height 30000 (M3)"). From there nodes
+- **Rule changes are announced in this repository before they apply.** The latest ones, milestones
+  M4-T and M4-B, apply from height 55000 ("Rule change at height 55000 (M4-T and M4-B)" in
+  `NETWORK.md`), expected around [DATE TIME] UTC and not before [EARLIEST DATE TIME] UTC. From there
+  nodes run P2MR leaves of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of
+  three designated outputs is spent, and require an SLH-DSA signature on every block. Both are soft
+  forks: a node built with `patches-m4r/` but without `patches-m4t/` and `patches-m4b/` keeps
+  following the chain but checks neither rule. The one before, M4-R, applies from height 51000
+  ("Rule change at height 51000 (M4-R)"), expected around 2026-11-15 05:00 UTC and not before
+  2026-11-14 00:00 UTC. From there nodes accept, in P2MR leaves of version `0xe0`, a zero-knowledge
+  proof that the spender knows the seed behind a key in place of an elliptic curve signature. **It is
+  a hard fork:** a node built with `patches-m3/` but without `patches-m4r/` stops following the chain
+  at the first block that uses it, so upgrade before height 51000 (section 1). M4-S applies from
+  height 32000 ("Rule change at height 32000 (M4-S)"). From there nodes check `OP_CHECKSLHDSA128S`,
+  an SLH-DSA signature check in P2MR leaves. M3 applies from height 30000 ("Rule change at height 30000 (M3)"). From there nodes
   run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once one of
   two designated outputs is spent; the operator spent one of them in a drill on 2026-10-30. M2 and
   M1 have applied since heights 20000 and 8600. Those four are soft forks: a node built without
@@ -38,32 +43,35 @@ Before you start:
 
 A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
 the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). Since 2026-10-30 the operator's nodes have
-run eight patch sets on Bitcoin Core v31.1: the consensus series in `patches/`, the wallet series
-in `patches-m05/` (section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in
-`patches-m1/`, the M2 series in `patches-m2/`, the M3 series in `patches-m3/`, the M4-S series in
-`patches-m4/` and the M4-R series in `patches-m4r/`, applied in that order. You can take that build
+seconds per block (see "Parameters" in `NETWORK.md`). The node this guide describes is Bitcoin Core
+v31.1 with ten patch sets: the consensus series in `patches/`, the wallet series in `patches-m05/`
+(section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in `patches-m1/`, the
+M2 series in `patches-m2/`, the M3 series in `patches-m3/`, the M4-S series in `patches-m4/`, the
+M4-R series in `patches-m4r/`, the M4-T series in `patches-m4t/` and the M4-B series in
+`patches-m4b/`, applied in that order. Since 2026-10-30 the operator's nodes have run the first
+eight; they move to all ten on [ROLL DATE], after height 51000. You can take the build with all ten
 prebuilt, as binaries or as a container image, or build it yourself; the rest of this guide works
 the same with either.
 
 On Windows, macOS and Linux there is a way without commands: the witness program of the release
 [`ark0-witness-0.3.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.3.0)
-runs a build of the node with all eight patch sets, up to `patches-m4r/`, and shows what it reports
-(`witness/README.md`). Earlier releases of the witness program run a build with the six patch sets
+runs a build of the node with the eight patch sets up to `patches-m4r/`, and shows what it reports
+(`witness/README.md`). That build keeps following Ark-0 past height 55000, but checks neither M4-T
+nor M4-B. Earlier releases of the witness program run a build with the six patch sets
 up to `patches-m3/`, which stops following Ark-0 at the first block with a rescue spend, from height
 51000 on. This guide does not cover the witness program.
 
 ### Prebuilt binaries or image
 
-The release [`ark0-node-m4r`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m4r)
-has the binaries for x86_64 Linux, `SHA256SUMS` and its signature `SHA256SUMS.asc`. Download the
+The release [`ark0-node-m4tb`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-node-m4tb)
+has the binaries for x86_64 Linux, built from all ten patch sets, `SHA256SUMS` and its signature `SHA256SUMS.asc`. Download the
 three into an empty directory, with the release key from this repository, and check the signature:
 
 ```bash
 R=https://github.com/duncan0k/bitcoin-p2mr-patches
-curl -fsSL --remote-name-all $R/releases/download/ark0-node-m4r/ark0-node-m4r-x86_64-linux-gnu.tar.gz \
-  $R/releases/download/ark0-node-m4r/SHA256SUMS $R/releases/download/ark0-node-m4r/SHA256SUMS.asc \
-  https://raw.githubusercontent.com/duncan0k/bitcoin-p2mr-patches/ark0-node-m4r/ark0/release-signing-key.asc
+curl -fsSL --remote-name-all $R/releases/download/ark0-node-m4tb/ark0-node-m4tb-x86_64-linux-gnu.tar.gz \
+  $R/releases/download/ark0-node-m4tb/SHA256SUMS $R/releases/download/ark0-node-m4tb/SHA256SUMS.asc \
+  https://raw.githubusercontent.com/duncan0k/bitcoin-p2mr-patches/ark0-node-m4tb/ark0/release-signing-key.asc
 gpg --import release-signing-key.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 ```
@@ -82,18 +90,20 @@ succeeded:
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS &&
-  tar -xzf ark0-node-m4r-x86_64-linux-gnu.tar.gz &&
+  tar -xzf ark0-node-m4tb-x86_64-linux-gnu.tar.gz &&
   sha256sum --ignore-missing -c SHA256SUMS
 ```
 
 The binaries are linked against the system's C and C++ runtimes, libevent and SQLite. They need
-glibc 2.39 or later and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
+glibc 2.39 or later (`bitcoin-cli` 2.34) and the C++ runtime of GCC 13.2 or later: Ubuntu 24.04 and Debian 13 have
 both, Ubuntu 22.04 and Debian 12 do not. On Ubuntu 24.04 or Debian 13, install the libraries with
 `sudo apt-get install libevent-core-2.1-7t64 libevent-extra-2.1-7t64 libevent-pthreads-2.1-7t64 libsqlite3-0`.
-Wherever this guide says `./build/bin/`, use `ark0-node-m4r/bin/` instead.
+Wherever this guide says `./build/bin/`, use `ark0-node-m4tb/bin/` instead. The release before,
+`ark0-node-m4r`, has the build with the first eight patch sets: it keeps following Ark-0 past height
+55000, but checks neither M4-T nor M4-B.
 
-The image is `ghcr.io/duncan0k/ark0-node`, also for x86_64, with the libraries in it. Pull it by
-its digest, the hash on the line of `SHA256SUMS` that names `ark0-node-m4r-image-manifest.json`, so
+The image is `ghcr.io/duncan0k/ark0-node:m4tb`, also for x86_64, with the libraries in it. Pull it by
+its digest, the hash on the line of `SHA256SUMS` that names `ark0-node-m4tb-image-manifest.json`, so
 that what you run is what the signature covers:
 
 ```bash
@@ -130,11 +140,14 @@ git clone --branch v31.1 --depth 1 https://github.com/bitcoin/bitcoin.git
 (cd bitcoin-p2mr-patches/patches-m3 && sha256sum -c ../SHA256SUMS-m3)
 (cd bitcoin-p2mr-patches/patches-m4 && sha256sum -c ../SHA256SUMS-m4)
 (cd bitcoin-p2mr-patches/patches-m4r && sha256sum -c ../SHA256SUMS-m4r)
+(cd bitcoin-p2mr-patches/patches-m4t && sha256sum -c ../SHA256SUMS-m4t)
+(cd bitcoin-p2mr-patches/patches-m4b && sha256sum -c ../SHA256SUMS-m4b)
 cd bitcoin
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
        ../bitcoin-p2mr-patches/patches-spacing/*.patch ../bitcoin-p2mr-patches/patches-m1/*.patch \
        ../bitcoin-p2mr-patches/patches-m2/*.patch ../bitcoin-p2mr-patches/patches-m3/*.patch \
-       ../bitcoin-p2mr-patches/patches-m4/*.patch ../bitcoin-p2mr-patches/patches-m4r/*.patch
+       ../bitcoin-p2mr-patches/patches-m4/*.patch ../bitcoin-p2mr-patches/patches-m4r/*.patch \
+       ../bitcoin-p2mr-patches/patches-m4t/*.patch ../bitcoin-p2mr-patches/patches-m4b/*.patch
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DENABLE_WALLET=ON -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DENABLE_IPC=OFF
 cmake --build build -j"$(nproc)"
 ```
@@ -157,7 +170,10 @@ described before M3, follows it as well, but does not run leaves of version `0xe
 rule from height 30000 on. One built without `patches-m4/`, as this guide described before M4-S,
 follows it too (up to the first rescue spend, below), but does not check `OP_CHECKSLHDSA128S` from
 height 32000 on. But one built without `patches-m4r/`, as this guide described before M4-R, stops at
-the first block with a rescue spend, which can come from height 51000 on (section 5).
+the first block with a rescue spend, which can come from height 51000 on (section 5). One built
+without `patches-m4t/` and `patches-m4b/`, as this guide described before M4-T and M4-B, follows it
+again, but does not run leaves of version `0xe2` or check the SLH-DSA block signature from height
+55000 on. `patches-m4b/` applies only right after `patches-m4t/`.
 
 ## 2. Configure it
 
@@ -203,12 +219,14 @@ The chain is small, so the first sync takes minutes rather than hours.
 
   ```
   Signet P2MR tripwire rules from height 30000 in leaf version 0xe0; tripwire outputs 4319a38c0842846474ff038b54f22aec844147a97c2abc462bfb92957c1bc3a0:1 (BIP-341 NUMS) and 8991bb83673474b7c324f303365479c093d0b34f5e7d7ddf0648bcfdb1d42495:0 (drill key SHA256 077556bdd8807450ae70c372505543fdce8f6e97b51cc827a576a17233839cc2)
+  Signet P2MR lattice tripwire rules from height 55000 in leaf version 0xe2; tripwire outputs aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0 (NUMS ML-DSA-44, pk SHA256 591dae318a0fdde81a590eab8c8581e07657d2c30b97cf31d87bafe636c92805), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:1 (destroyed key, pk SHA256 c7a02f1f92cb9b73dc324dab81e85737b43cbc06acf8c3d959e68153eaa1df44), aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:2 (drill key, pk SHA256 5237bdf62ebe594076000f2231b7fcf741e01a7482ffa64f50cc3ce14c28b495)
   Signet difficulty retargets against 90 s per block from height 8064
   Signet blocks need an ML-DSA-44 block signature from height 20000, by the key whose SHA256 is eee8548f51f25492de3ae430b7ce7ec549edfaa663b8f577f026ce0498fdd6ad
+  Signet SLH-DSA block signature required from height 55000, public key SHA256 a64c10772542226abe2b1495b2576f50773d3725c5065f48abb5d4559fdef569
   Signet derived magic (message start): 40e8e404
   P2MR consensus rules active from height 1
   P2MR ML-DSA-44 rules active from height 8600
-  P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0)
+  P2MR SLH-DSA-SHA2-128s rules active from height 32000 (leaf versions 0xc0, 0xe0, 0xe2)
   Signet P2MR rescue lane from height 51000 for elliptic curve checks disabled by the tripwire (VOLEitH v0.2, statement 0x01); network id afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e
   ```
 
@@ -217,15 +235,22 @@ The chain is small, so the first sync takes minutes rather than hours.
   snapshot in `snapshot/`. The genesis hash is the same on every signet and proves nothing.
 - `./build/bin/bitcoin-cli getdeploymentinfo` lists `p2mr` as a buried deployment, active
   from height 1, `p2mr_mldsa44` as one active from height 8600, `p2mr_tripwire` as one with
-  height 30000, `p2mr_slhdsa128s` as one with height 32000 and `p2mr_rescue` as one with height
-  51000, and `P2MR` and `P2MR_MLDSA44` among the script flags (`P2MR_TRIPWIRE` too, from height
-  30000, `P2MR_SLHDSA128S` from height 32000, and `P2MR_NO_RESCUE` below height 51000).
+  height 30000, `p2mr_slhdsa128s` as one with height 32000, `p2mr_rescue` as one with height
+  51000 and `p2mr_lattice_tripwire` as one with height 55000, and `P2MR` and `P2MR_MLDSA44` among
+  the script flags (`P2MR_TRIPWIRE` too, from height 30000, `P2MR_SLHDSA128S` from height 32000,
+  `P2MR_NO_RESCUE` below height 51000, and `P2MR_LATTICE_TRIPWIRE` from height 55000).
 - `./build/bin/bitcoin-cli gettripwireinfo` reports `height` 30000, `leaf_version` `e0`, the two
   tripwire outputs of "Rule change at height 30000 (M3)" in `NETWORK.md`, each `unspent`, and
   `ec_disabled_next_block` false. After the drill described there, the drill output is `missing`
   and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network
-  id of the startup line. A node that has not yet synced past height 15748, where both outputs
-  were created, reports both as `missing`, and logs so at startup; that is expected.
+  id of the startup line. Its `lattice` object reports `height` 55000, `leaf_version` `e2`, the
+  three lattice tripwire outputs of the startup line, each with its `key_sha256`, its `label` and
+  `state` `unspent`, and `mldsa_disabled_next_block` false. After the drill of M4-T, when the
+  operator spends the drill key's output, that output is `missing`, and from height 55000 on
+  `mldsa_disabled_next_block` is true. A node that has not yet synced past
+  height 15748, where both tripwire outputs were created, reports both as `missing`, and one not yet
+  past height 39971 reports the three lattice tripwire outputs so, and logs so at startup; that is
+  expected.
 - `./build/bin/bitcoin-cli getpeerinfo` lists `node.ark0.si`, `node2.ark0.si` or both, and once `getblockchaininfo`
   shows `blocks` equal to `headers` and `initialblockdownload` false, your node has caught up.
 
@@ -243,7 +268,7 @@ include. A node built from `patches/` and `patches-spacing/` alone, as this guid
 lacks it. Rebuild such a node in the `bitcoin/` clone from section 1: update your clone of this
 repository with `git -C ../bitcoin-p2mr-patches pull`, run `git am --abort` if an earlier `git am`
 stopped halfway, then `git reset --hard v31.1` (it discards any change of your own in that clone),
-check all eight sets from there as section 1 does, with `../bitcoin-p2mr-patches/` in place of
+check all ten sets from there as section 1 does, with `../bitcoin-p2mr-patches/` in place of
 `bitcoin-p2mr-patches/`, and run its `git am` line and `cmake --build build -j"$(nproc)"`. Then stop
 the node with `./build/bin/bitcoin-cli stop`, wait until it has exited, and start it again with
 `./build/bin/bitcoind -daemonwait` (both with your `-datadir`, if you use one); it keeps its chain.
@@ -314,6 +339,10 @@ not build them yet. Pay nothing to such leaves before height 32000: until then t
 `OP_SUCCESS241`, and anyone who knows the leaf and its path in the tree can spend the output
 through it.
 
+Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T). [PQ2 WALLET: WHEN AND WHICH]
+Pay nothing to such leaves before height 55000: until then they are not executed, and anyone who
+knows a leaf and its path in the tree can spend the output through it.
+
 Nor does the node's wallet make rescue spends (M4-R). The proofs are made off the node, with the
 prover of [ark0-rescue](https://github.com/duncan0k/ark0-rescue), and a rescue gives away the key it
 rescues: `doc/p2mr-rescue.md` in the patched tree, "Wallets and operators", says what a wallet has to
@@ -356,6 +385,14 @@ do first.
   `patches-m4r/` when that block came and refused its rescue spend. Rebuild it (section 1), restart
   it, and let it continue with `./build/bin/bitcoin-cli reconsiderblock <hash of that block>`; the
   hash is in `debug.log`, in the line `InvalidChainFound: invalid block=`.
+- **`debug.log` has no `Signet P2MR lattice tripwire rules` or no `Signet SLH-DSA block signature
+  required` line, `getdeploymentinfo` does not list `p2mr_lattice_tripwire`, or `gettripwireinfo` has
+  no `lattice` object:** the node was built without `patches-m4t/` and `patches-m4b/`, or still runs
+  the binary from before (the `ark0-node-m4r` release, say). It follows the chain but does not run
+  leaves of version `0xe2` or check the SLH-DSA block signature; rebuild it (section 1) and restart
+  it. If it accepted blocks at or above height 55000 before it was upgraded, start it once with
+  `-reindex-chainstate` so that it checks them (`-reindex` on a pruned node).
+- **`git am` stops in `patches-m4b/`:** apply `patches-m4t/` right before it, as section 1 does.
 - **A prebuilt binary does not start**, saying that `GLIBC_2.39` or `GLIBCXX_3.4.32` is not found or
   that `libevent_core-2.1.so.7` cannot be opened: the system is older than the binaries need, or the
   libraries are missing (section 1). Install them, or use the image or a build from source.
