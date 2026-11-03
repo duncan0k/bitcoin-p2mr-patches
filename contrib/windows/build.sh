@@ -159,7 +159,7 @@ if [ "$PHASE" = full ]; then
     "$WINE" wineboot --init > "$OUT/wineboot.log" 2>&1 || true
     "$WINE" "$OUT/stripped/bitcoind.exe" -version | head -1 | tr -d '\r' | tee version.txt
 
-    SUITES=mldsa44_tests,p2mr_mldsa44_tests,signet_pqblock_tests,p2mr_tripwire_tests,slhdsa128s_tests,p2mr_slhdsa128s_tests,p2mr_ts_m4_tests,p2mr_rescue_tests,script_tests,transaction_tests,script_standard_tests,descriptor_tests,pow_tests
+    SUITES=mldsa44_tests,p2mr_mldsa44_tests,signet_pqblock_tests,p2mr_tripwire_tests,slhdsa128s_tests,p2mr_slhdsa128s_tests,p2mr_ts_m4_tests,p2mr_rescue_tests,p2mr_lattice_tripwire_tests,signet_slhblock_tests,script_tests,transaction_tests,script_standard_tests,descriptor_tests,pow_tests
     say "unit tests of the patch sets under Wine: $SUITES"
     t0=$(date +%s)
     rc=0; "$WINE" "$OUT/test_bitcoin.exe" --run_test="$SUITES" --log_level=test_suite > unit-patches.log 2>&1 || rc=$?
