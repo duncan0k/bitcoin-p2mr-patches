@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +14,14 @@ const block1264 = "00000036e6e81d9884217ca9918e38b9683617b41195a6d4ccc4c4696b31e
 
 // m3Height is where M3 applies, until the node itself says (gettripwireinfo).
 const m3Height = 30000
+
+// The lattice tripwires of M4-T: gettripwireinfo has a "lattice" object where these rules have a height. Without
+// it, the page and the report say nothing about M4-T.
+const (
+	latticeNone    = ""        // the node gave no lattice object
+	latticeOK      = "ok"      // the fields below hold
+	latticeUnknown = "unknown" // no answer this time, or a malformed object, from a node that gave one before
+)
 
 type tripwire struct {
 	Outpoint string `json:"outpoint"`
@@ -44,7 +53,14 @@ type status struct {
 	TripwireTipHash     string     `json:"tripwireTipHash"`
 	Tripwires           []tripwire `json:"tripwires"`
 	ECDisabledNextBlock bool       `json:"ecDisabledNextBlock"`
-	Subversion          string     `json:"subversion"`
+	// M4-T: what the "lattice" object of gettripwireinfo gave, latticeNone, latticeOK or latticeUnknown. The
+	// fields after it hold only with latticeOK, and are of block TripwireTip.
+	LatticeInfo            string     `json:"latticeInfo"`
+	H4T                    int64      `json:"h4t"`
+	ReachedH4T             bool       `json:"reachedH4T"` // the newest tip the node reported is at or past H4T
+	LatticeTripwires       []tripwire `json:"latticeTripwires"`
+	MLDSADisabledNextBlock bool       `json:"mldsaDisabledNextBlock"`
+	Subversion             string     `json:"subversion"`
 }
 
 // collector asks the node for its status, at most every two seconds whoever asks.
@@ -56,6 +72,7 @@ type collector struct {
 	last       status
 	at         time.Time
 	subversion string
+	lattice    bool // the node has given a lattice object before
 }
 
 func (c *collector) get() status {
@@ -69,7 +86,7 @@ func (c *collector) get() status {
 
 func (c *collector) collect() status {
 	s := status{Version: version, Now: nowUTC(), DataDir: c.dataDir, Ark0: "pending", H3: m3Height, TripwireInfo: "unknown",
-		Tripwires: []tripwire{}}
+		Tripwires: []tripwire{}, LatticeTripwires: []tripwire{}}
 	var rpc *rpcClient
 	s.Node, s.NodeError, rpc = c.node.snapshot()
 	if rpc == nil || s.Node == "stopped" {
@@ -115,6 +132,8 @@ func (c *collector) collect() status {
 		Height     int64      `json:"height"`
 		Tripwires  []tripwire `json:"tripwires"`
 		ECDisabled *bool      `json:"ec_disabled_next_block"`
+		// Read on its own, so that a malformed lattice object leaves the rest of the answer as it is.
+		Lattice json.RawMessage `json:"lattice"`
 	}
 	err := rpc.call("gettripwireinfo", nil, &tw)
 	var answer *rpcError
@@ -127,12 +146,16 @@ func (c *collector) collect() status {
 	case errors.As(err, &answer) && answer.Code == rpcMethodNotFound:
 		s.TripwireInfo = "absent"
 	}
+	c.readLattice(&s, tw.Lattice)
 	tip := s.Blocks
 	if s.TripwireInfo == "ok" && s.TripwireTip > tip {
 		tip = s.TripwireTip
 	}
 	if s.ReachedH3 = tip >= s.H3; s.ReachedH3 {
 		_ = rpc.call("getblockhash", []any{s.H3}, &s.BlockH3)
+	}
+	if s.LatticeInfo == latticeOK {
+		s.ReachedH4T = tip >= s.H4T
 	}
 	if c.subversion == "" {
 		var network struct {
@@ -144,6 +167,32 @@ func (c *collector) collect() status {
 	}
 	s.Subversion = c.subversion
 	return s
+}
+
+// readLattice reads the lattice object of gettripwireinfo, all or nothing, and only with the rest of the answer
+// read: its states are of the same block. No object leaves M4-T out, unless the node gave one before; then, as a
+// malformed one, it counts as no answer this time.
+func (c *collector) readLattice(s *status, raw json.RawMessage) {
+	var lattice struct {
+		Height       int64      `json:"height"`
+		Tripwires    []tripwire `json:"tripwires"`
+		MLDSADisable *bool      `json:"mldsa_disabled_next_block"`
+	}
+	switch {
+	case s.TripwireInfo == "ok" && len(raw) == 0:
+		c.lattice = false
+	case s.TripwireInfo == "ok" && json.Unmarshal(raw, &lattice) == nil && lattice.Height > 0 && lattice.Tripwires != nil &&
+		lattice.MLDSADisable != nil:
+		c.lattice = true
+		s.LatticeInfo, s.H4T = latticeOK, lattice.Height
+		s.LatticeTripwires, s.MLDSADisabledNextBlock = lattice.Tripwires, *lattice.MLDSADisable
+		return
+	case s.TripwireInfo == "ok":
+		c.lattice = true // a malformed object
+	}
+	if c.lattice {
+		s.LatticeInfo = latticeUnknown
+	}
 }
 
 func nowUTC() string {
@@ -199,6 +248,20 @@ func witnessReport(s status, last *checkResult) string {
 		b.WriteString("Tripwires: unknown, this node has no gettripwireinfo (not the M3 release)\n")
 	default:
 		b.WriteString("Tripwires: unknown, the node did not answer gettripwireinfo just now\n")
+	}
+	switch s.LatticeInfo {
+	case latticeOK:
+		if s.ReachedH4T {
+			fmt.Fprintf(&b, "Block %d (M4-T): reached\n", s.H4T)
+		} else {
+			fmt.Fprintf(&b, "Block %d (M4-T): not reached yet\n", s.H4T)
+		}
+		for _, w := range s.LatticeTripwires {
+			fmt.Fprintf(&b, "Lattice tripwire %s %s: %s\n", w.Label, w.Outpoint, w.State)
+		}
+		fmt.Fprintf(&b, "mldsa_disabled_next_block: %t\n", s.MLDSADisabledNextBlock)
+	case latticeUnknown:
+		b.WriteString("Lattice tripwires (M4-T): unknown, the node did not answer just now\n")
 	}
 	switch {
 	case last == nil:

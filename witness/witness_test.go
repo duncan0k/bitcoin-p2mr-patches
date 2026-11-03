@@ -1040,3 +1040,138 @@ func TestErrorText(t *testing.T) {
 		t.Errorf("tail %q", tl.String())
 	}
 }
+
+// The three lattice tripwires of M4-T on Ark-0, as gettripwireinfo gives them.
+const latticeTxid = "aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c"
+
+// withLattice adds a lattice object to the fake node's gettripwireinfo; lattice(height) makes it, or nil for none.
+func (f *fakeNode) withLattice(lattice func(tip int64) any) {
+	answer := f.answers["gettripwireinfo"]
+	f.answers["gettripwireinfo"] = func(p []json.RawMessage) (any, *rpcError) {
+		info, err := answer(p)
+		if err != nil {
+			return info, err
+		}
+		if l := lattice(info.(map[string]any)["tip_height"].(int64)); l != nil {
+			info.(map[string]any)["lattice"] = l
+		}
+		return info, nil
+	}
+}
+
+func latticeObject(drillKeyState string, mldsaDisabled bool) func(int64) any {
+	return func(int64) any {
+		return map[string]any{"height": 55000, "leaf_version": "e2", "mldsa_disabled_next_block": mldsaDisabled,
+			"tripwires": []map[string]any{
+				{"outpoint": latticeTxid + ":0", "state": "unspent", "key_sha256": "591dae31", "label": "NUMS ML-DSA-44"},
+				{"outpoint": latticeTxid + ":1", "state": "unspent", "key_sha256": "c7a02f1f", "label": "destroyed key"},
+				{"outpoint": latticeTxid + ":2", "state": drillKeyState, "key_sha256": "5237bdf6", "label": "drill key"},
+			}}
+	}
+}
+
+func TestLatticeStatusAndReport(t *testing.T) {
+	// A node without the lattice object: nothing about M4-T.
+	f := newFakeNode(t)
+	f.ark0(40000, "missing", true)
+	s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+	if r := witnessReport(s, nil); s.LatticeInfo != latticeNone || len(s.LatticeTripwires) != 0 || s.ReachedH4T ||
+		strings.Contains(r, "M4-T") || strings.Contains(r, "attice") || strings.Contains(r, "mldsa") {
+		t.Errorf("no lattice: %+v\n%s", s, r)
+	}
+
+	// Below 55000, all three in place.
+	f.withLattice(latticeObject("unspent", false))
+	s = (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+	if s.LatticeInfo != latticeOK || s.H4T != 55000 || s.ReachedH4T || len(s.LatticeTripwires) != 3 || s.MLDSADisabledNextBlock ||
+		s.LatticeTripwires[2].Label != "drill key" || s.LatticeTripwires[2].State != "unspent" || s.TripwireInfo != "ok" {
+		t.Fatalf("lattice below: %+v", s)
+	}
+	r := witnessReport(s, nil)
+	for _, want := range []string{"Block 55000 (M4-T): not reached yet",
+		"Lattice tripwire NUMS ML-DSA-44 " + latticeTxid + ":0: unspent",
+		"Lattice tripwire destroyed key " + latticeTxid + ":1: unspent",
+		"Lattice tripwire drill key " + latticeTxid + ":2: unspent", "mldsa_disabled_next_block: false"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("report lacks %q:\n%s", want, r)
+		}
+	}
+	// The M4-T lines come after the M3 lines.
+	if strings.Index(r, "Block 55000") < strings.Index(r, "ec_disabled_next_block") {
+		t.Errorf("M4-T before M3:\n%s", r)
+	}
+
+	// Past 55000, after the drill: the drill key missing and the flag set. The tip of gettripwireinfo counts.
+	g := newFakeNode(t)
+	g.ark0(54999, "missing", true)
+	answer := g.answers["gettripwireinfo"]
+	g.answers["gettripwireinfo"] = func(p []json.RawMessage) (any, *rpcError) {
+		info, _ := answer(p)
+		info.(map[string]any)["tip_height"] = int64(55000)
+		return info, nil
+	}
+	g.withLattice(latticeObject("missing", true))
+	s = (&collector{node: g.node(), dataDir: g.dataDir}).collect()
+	r = witnessReport(s, nil)
+	if s.LatticeInfo != latticeOK || !s.ReachedH4T || !s.MLDSADisabledNextBlock || s.LatticeTripwires[2].State != "missing" ||
+		!strings.Contains(r, "Block 55000 (M4-T): reached\n") || !strings.Contains(r, "mldsa_disabled_next_block: true") ||
+		!strings.Contains(r, "Lattice tripwire drill key "+latticeTxid+":2: missing") {
+		t.Errorf("lattice after: %+v\n%s", s, r)
+	}
+}
+
+func TestLatticeEdges(t *testing.T) {
+	malformed := []func(int64) any{
+		func(int64) any { return "lattice" },
+		func(int64) any { return []any{} },
+		func(int64) any {
+			return map[string]any{"height": 55000, "leaf_version": "e2", "tripwires": []any{}} // no flag
+		},
+		func(int64) any {
+			return map[string]any{"height": 55000, "leaf_version": "e2", "mldsa_disabled_next_block": "no", "tripwires": []any{}}
+		},
+		func(int64) any {
+			return map[string]any{"leaf_version": "e2", "mldsa_disabled_next_block": false, "tripwires": []any{}}
+		},
+		func(int64) any { return map[string]any{"height": 55000, "mldsa_disabled_next_block": false} }, // no tripwires
+		func(int64) any {
+			return map[string]any{"height": 55000, "mldsa_disabled_next_block": false, "tripwires": []any{"x"}}
+		},
+	}
+	for i, lattice := range malformed {
+		f := newFakeNode(t)
+		f.ark0(40000, "missing", true)
+		f.withLattice(lattice)
+		s := (&collector{node: f.node(), dataDir: f.dataDir}).collect()
+		r := witnessReport(s, nil)
+		// The M3 part stays as it is; M4-T counts as no answer this time, not as an error.
+		if s.TripwireInfo != "ok" || len(s.Tripwires) != 2 || s.LatticeInfo != latticeUnknown || len(s.LatticeTripwires) != 0 ||
+			s.MLDSADisabledNextBlock || s.ReachedH4T || !strings.Contains(r, "Lattice tripwires (M4-T): unknown") ||
+			strings.Contains(r, "mldsa_disabled_next_block") || !strings.Contains(r, "ec_disabled_next_block: true") {
+			t.Errorf("malformed lattice %d: %+v\n%s", i, s, r)
+		}
+	}
+
+	// A node that gave the object before and does not answer gettripwireinfo now: unknown, as for M3; one that never
+	// gave it: nothing.
+	f := newFakeNode(t)
+	f.ark0(40000, "unspent", false)
+	f.withLattice(latticeObject("unspent", false))
+	c := &collector{node: f.node(), dataDir: f.dataDir}
+	if s := c.collect(); s.LatticeInfo != latticeOK {
+		t.Fatalf("%+v", s)
+	}
+	f.answers["gettripwireinfo"] = func([]json.RawMessage) (any, *rpcError) { return nil, &rpcError{Code: -1, Message: "boom"} }
+	if s := c.collect(); s.LatticeInfo != latticeUnknown || !strings.Contains(witnessReport(s, nil), "Lattice tripwires (M4-T): unknown") {
+		t.Errorf("no answer after a lattice: %+v", s)
+	}
+	if s := (&collector{node: f.node(), dataDir: f.dataDir}).collect(); s.LatticeInfo != latticeNone ||
+		strings.Contains(witnessReport(s, nil), "M4-T") {
+		t.Errorf("no answer, never a lattice: %+v", s)
+	}
+	// A node that stops giving the object (another build): nothing about M4-T again.
+	f.ark0(40000, "unspent", false)
+	if s := c.collect(); s.LatticeInfo != latticeNone {
+		t.Errorf("lattice gone: %+v", s)
+	}
+}
