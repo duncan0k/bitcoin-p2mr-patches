@@ -105,6 +105,13 @@ git -c user.name=duncan0k -c user.email=dev@ark0.si am -q --committer-date-is-au
 tree=$(git rev-parse 'HEAD^{tree}')
 echo "applied $(git rev-list --count "$core_head"..HEAD) patches, HEAD $(git rev-parse HEAD), tree $tree" | tee -a "$OUT/sources.txt"
 [ "$tree" = "$SERIES_TREE" ] || { echo "the patch sets give tree $tree, not the reviewed $SERIES_TREE" >&2; exit 1; }
+# windows.h declares a type named CONTEXT, so the constant of that name in this test file (patches-m4b) does not
+# compile with mingw-w64. It is renamed in this tree only, after the check above; the file is part of
+# test_bitcoin.exe, not of bitcoind.exe or bitcoin-cli.exe. As v31.1 is a release version, the tree being dirty
+# does not show in the version string.
+sed -i 's/\bCONTEXT\b/TEST_CONTEXT/g' src/test/signet_slhblock_tests.cpp
+[ "$(git diff --name-only)" = src/test/signet_slhblock_tests.cpp ] || { echo "the rename changed more than that test file" >&2; exit 1; }
+git diff --stat
 
 say "depends for $HOST_TRIPLET"
 t0=$(date +%s)
