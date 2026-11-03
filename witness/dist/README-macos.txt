@@ -1,7 +1,7 @@
 Ark0Witness {version} for macOS
 
-Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
-things out; it may be reset at any time.
+Watch Ark-0 and its M3 and M4-T tripwires with a node of your own. Ark-0 is a test network
+for trying things out; it may be reset at any time.
 
 This version's node checks the rules that apply from height 55000, milestones M4-T and M4-B:
 P2MR leaves of version 0xe2 and the SLH-DSA signature on every block. The node of version
@@ -22,8 +22,9 @@ For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
    closing it stops the node. Terminal asks first; click Terminate.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, and has your node judge a raw transaction you paste into
-it, which is never broadcast. All times are UTC.
+applies and the two tripwires, block 55000 where M4-T applies and its three lattice
+tripwires, and has your node judge a raw transaction you paste into it, which is never
+broadcast. All times are UTC.
 
 The node needs no approval of its own: the witness checks bitcoind against the SHA-256
 below and runs a copy of it that it keeps in its data folder.

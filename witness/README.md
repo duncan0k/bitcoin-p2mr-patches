@@ -1,13 +1,16 @@
 # Ark0Witness
 
-A small program for Windows, macOS and Linux for watching Ark-0 and its M3 tripwires with a node of your own,
-without typing commands. Start it (on Windows and macOS with a double-click, on Linux from a terminal) and it:
+A small program for Windows, macOS and Linux for watching Ark-0 and its M3 and M4-T tripwires with a node
+of your own, without typing commands. Start it (on Windows and macOS with a double-click, on Linux from a
+terminal) and it:
 
 - starts the Ark-0 node that ships next to it (`bitcoind`, the code of release `ark0-node-m4tb` built for that
   system) in the background, with the settings of [`ark0/JOIN.md`](../ark0/JOIN.md);
 - opens a page in your browser, served on 127.0.0.1 only, that shows what that node reports: how far it has
   synced, whether it is on Ark-0 (the hash of block 1264), block 30000 where M3 applies, the two tripwires,
-  and whether elliptic curve signatures in leaves of version `0xe0` are still accepted;
+  and whether elliptic curve signatures in leaves of version `0xe0` are still accepted; then block 55000
+  where M4-T applies, its three lattice tripwires, and whether ML-DSA-44 signatures in leaves of version
+  `0xe2` are still accepted. A node that does not report the lattice tripwires gets no M4-T part;
 - lets you paste a raw transaction for the node to judge with `testmempoolaccept`. It is never broadcast;
 - gives a short witness report to share. It holds no IP address and no folder name.
 
@@ -115,10 +118,11 @@ are joined into one universal file by `contrib/cross/lipo.sh`.
 
 ## Test
 
-`go test ./...` covers the node's arguments, the RPC client, the status and report, the page server's
-boundaries (Host, path, methods, content type, origin), the strings of the six languages and, with the test
-program standing in for bitcoind, how the node is started, trusted and stopped; on macOS and Linux also the
-data folder rules, the private copy, the signals and the left-over node.
+`go test ./...` covers the node's arguments, the RPC client, the status and report (with and without the
+lattice tripwires of M4-T), the page server's boundaries (Host, path, methods, content type, origin), the
+strings of the six languages and, with the test program standing in for bitcoind, how the node is started,
+trusted and stopped; on macOS and Linux also the data folder rules, the private copy, the signals and the
+left-over node.
 `test/e2e-linux.sh` runs the Linux build against the Linux node of release `ark0-node-m4tb`, syncing from
 `node.ark0.si` and `node2.ark0.si`.
 The tests pass on Windows 11 and Windows 10 22H2, macOS 26 on Apple silicon (the Intel build under Rosetta

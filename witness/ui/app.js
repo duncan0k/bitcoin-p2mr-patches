@@ -125,11 +125,9 @@
     }
   }
 
-  function renderTripwires(s) {
-    const body = $('tw');
+  // One row per tripwire, its state as the node gives it.
+  function fillTripwires(body, wires) {
     body.replaceChildren();
-    const known = s && s.node === 'running' && s.tripwireInfo === 'ok';
-    const wires = known ? s.tripwires : [];
     if (wires.length === 0) {
       const row = body.insertRow();
       const cell = row.insertCell();
@@ -146,12 +144,42 @@
       out.textContent = w.outpoint || '';
       out.className = 'mono';
     }
+  }
+
+  function renderTripwires(s) {
+    const known = s && s.node === 'running' && s.tripwireInfo === 'ok';
+    fillTripwires($('tw'), known ? s.tripwires : []);
     if (known) {
       setText('ec', s.ecDisabledNextBlock ? t('ec_off') : t('ec_on'));
       setText('ec-raw', '(ec_disabled_next_block: ' + String(Boolean(s.ecDisabledNextBlock)) + ')');
     } else {
       setText('ec', '');
       setText('ec-raw', '');
+    }
+  }
+
+  // M4-T: shown only for a node that gives the lattice object of gettripwireinfo.
+  function renderM4T(s) {
+    const shown = s && s.node === 'running' && (s.latticeInfo === 'ok' || s.latticeInfo === 'unknown');
+    $('m4t-card').hidden = !shown;
+    if (!shown) return;
+    const known = s.latticeInfo === 'ok';
+    const h4t = known ? s.h4t : 55000;
+    setText('m4t-title', t('m4t_title', { h4t: number(h4t) }));
+    if (!known) {
+      setText('m4t', t('node_no_answer'));
+    } else if (s.reachedH4T) {
+      setText('m4t', t('m4t_after', { h4t: number(h4t) }));
+    } else {
+      setText('m4t', t('m3_before', { n: number(Math.max(0, h4t - Math.max(s.blocks, s.tripwireTip))) }));
+    }
+    fillTripwires($('ltw'), known ? s.latticeTripwires : []);
+    if (known) {
+      setText('mldsa', s.mldsaDisabledNextBlock ? t('ec_off') : t('ec_on'));
+      setText('mldsa-raw', '(mldsa_disabled_next_block: ' + String(Boolean(s.mldsaDisabledNextBlock)) + ')');
+    } else {
+      setText('mldsa', '');
+      setText('mldsa-raw', '');
     }
   }
 
@@ -183,6 +211,7 @@
     renderNode(s);
     renderM3(s);
     renderTripwires(s);
+    renderM4T(s);
     renderCheck();
     setText('data', s ? t('data_body', { path: s.dataDir }) : '');
     setText('updated', s ? t('updated', { time: s.now }) + ' · Ark0Witness ' + s.version : '');

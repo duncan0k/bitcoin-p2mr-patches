@@ -1175,3 +1175,32 @@ func TestLatticeEdges(t *testing.T) {
 		t.Errorf("lattice gone: %+v", s)
 	}
 }
+
+// The strings of the M4-T part, in every language, with the height placeholder where English has it.
+func TestLatticeStrings(t *testing.T) {
+	var all map[string]map[string]string
+	data, err := os.ReadFile("ui/strings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &all); err != nil {
+		t.Fatal(err)
+	}
+	for _, lang := range []string{"en", "zh", "ja", "ko", "ru", "es"} {
+		for _, key := range []string{"m4t_title", "m4t_after", "mldsa_label", "ltw_note"} {
+			text := all[lang][key]
+			if strings.TrimSpace(text) == "" {
+				t.Errorf("%s: missing %s", lang, key)
+			}
+			if (key == "m4t_title" || key == "m4t_after") && !strings.Contains(text, "{h4t}") {
+				t.Errorf("%s.%s lacks {h4t}", lang, key)
+			}
+		}
+		if note := all[lang]["ltw_note"]; !strings.Contains(note, "39971") || !strings.Contains(note, "drill key") {
+			t.Errorf("%s.ltw_note: %q", lang, note)
+		}
+		if label := all[lang]["mldsa_label"]; !strings.Contains(label, "0xe2") || !strings.Contains(label, "ML-DSA-44") {
+			t.Errorf("%s.mldsa_label: %q", lang, label)
+		}
+	}
+}

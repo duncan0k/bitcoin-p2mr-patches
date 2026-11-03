@@ -1,7 +1,7 @@
 Ark0Witness {version} for Linux ({arch})
 
-Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
-things out; it may be reset at any time.
+Watch Ark-0 and its M3 and M4-T tripwires with a node of your own. Ark-0 is a test network
+for trying things out; it may be reset at any time.
 
 This version's node checks the rules that apply from height 55000, milestones M4-T and M4-B:
 P2MR leaves of version 0xe2 and the SLH-DSA signature on every block. The node of version
@@ -22,8 +22,9 @@ aarch64 download for 64-bit ARM, such as a Raspberry Pi with the 64-bit system.
    open: closing it, or pressing Ctrl+C, stops the node.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, and has your node judge a raw transaction you paste into
-it, which is never broadcast. All times are UTC.
+applies and the two tripwires, block 55000 where M4-T applies and its three lattice
+tripwires, and has your node judge a raw transaction you paste into it, which is never
+broadcast. All times are UTC.
 
 The page answers on this computer only. To see it from another computer, forward the same
 port number over SSH. For example, if the program printed http://127.0.0.1:41234/..., run
