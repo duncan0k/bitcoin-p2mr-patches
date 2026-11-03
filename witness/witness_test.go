@@ -332,6 +332,7 @@ func TestNodeArgsAreJoinMd(t *testing.T) {
 		"-signetchallenge=5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae",
 		"-signetpowtargetspacing=90@8064",
 		"-addnode=node.ark0.si:38433",
+		"-addnode=node2.ark0.si:38433",
 		"-listen=0",
 		"-rpcbind=127.0.0.1",
 		"-rpcallowip=127.0.0.1",

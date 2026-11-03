@@ -21,6 +21,7 @@ const (
 	signetChallenge = "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae"
 	powSpacing      = "90@8064"
 	publicNode      = "node.ark0.si:38433"
+	publicNode2     = "node2.ark0.si:38433"
 )
 
 // Files of this program in the data folder, next to the node's own.
@@ -44,6 +45,7 @@ func nodeArgs(dataDir string, rpcPort int) []string {
 		"-signetchallenge=" + signetChallenge,
 		"-signetpowtargetspacing=" + powSpacing,
 		"-addnode=" + publicNode,
+		"-addnode=" + publicNode2,
 		"-listen=0",
 		"-server=1",
 		"-rpcbind=127.0.0.1",
