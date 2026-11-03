@@ -34,14 +34,13 @@ Patch series implementing the BIP-360 Pay-to-Merkle-Root (P2MR) spending rules o
     seed behind the key, carried in the annex. It relaxes the rules, so it is a hard fork. Ark-0
     opens it from height 51000; regtest has it, and another custom signet only if it sets
     `-signetrescue`. See "Experimental M4-R series" below.
-  - The M4-T series in `patches-m4t/` adds a P2MR leaf version, `0xe2`, whose ML-DSA-44 signature
-    checks stop working once one of three designated outputs is spent; its elliptic curve checks
-    follow the tripwire of `0xe0`, and its SLH-DSA checks always work. The M4-B series in
-    `patches-m4b/` requires an SLH-DSA-SHA2-128s signature by a fixed key on every block from a
-    height on, next to M2's. On Ark-0 both apply from height 55000, which patch 113 fixes with the
-    three outputs and the key. Another custom signet gets them only if it sets
-    `-signetlatticetripwire` and `-signetslhblock`. See "Experimental M4-T series" and
-    "Experimental M4-B series" below.
+  - The M4-T series in `patches-m4t/` adds a P2MR leaf version, `0xe2`, whose ML-DSA-44 signature checks
+    stop working once one of three designated outputs is spent; its elliptic curve checks follow the
+    tripwire of `0xe0`, and its SLH-DSA checks always work. The M4-B series in `patches-m4b/` requires an
+    SLH-DSA-SHA2-128s signature by a fixed key on every block from a height on, next to M2's. On Ark-0 both
+    apply from height 55000; patch 113 sets that height, the three outputs and the key. Another custom
+    signet gets them only if it sets `-signetlatticetripwire` and `-signetslhblock`. See "Experimental M4-T
+    series" and "Experimental M4-B series" below.
 
 ## Layout
 
@@ -138,12 +137,12 @@ validation only after activation.
 ## Out of scope / wording
 
 - No activation on mainnet or the public signet: this holds for everything in this repository. No
-  post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum
-  signature checks are the experimental M1, M2, M4-S and M4-B series in `patches-m1/`, `patches-m2/`,
-  `patches-m4/` and `patches-m4b/`, which Ark-0 activates from heights 8600, 20000, 32000 and 55000
-  (`ark0/NETWORK.md`), and M4-T in `patches-m4t/` disables one of them in leaves of version `0xe2`
-  from height 55000, once one of three designated outputs is spent; another custom signet can switch M2 on with `-signetpqblock`, M1 with
-  `-signetmldsa44`, which `patches-m3/` adds, M4-S with `-signetslhdsa128s`, M4-T with
+  post-quantum signatures in `patches/`, `patches-m05/` or `patches-spacing/`; the post-quantum signature
+  checks are the experimental M1, M2, M4-S and M4-B series in `patches-m1/`, `patches-m2/`, `patches-m4/`
+  and `patches-m4b/`, which Ark-0 activates from heights 8600, 20000, 32000 and 55000 (`ark0/NETWORK.md`).
+  From height 55000, M4-T in `patches-m4t/` disables one of them in leaves of version `0xe2` once one of
+  three designated outputs is spent. Another custom signet can switch M2 on with `-signetpqblock`, M1 with
+  `-signetmldsa44` (added by `patches-m3/`), M4-S with `-signetslhdsa128s`, M4-T with
   `-signetlatticetripwire` and M4-B with `-signetslhblock`.
 - The **M0 consensus series** in `patches/` is spending rules only: no `tmr()` descriptor, no wallet
   signing, no address generation. Those are the M0.5 series in `patches-m05/`, described below, which
@@ -162,15 +161,14 @@ validation only after activation.
   height 20000". It is not part of BIP 325, it is not a proposal for Bitcoin, and it does not make
   Ark-0 a quantum-resistant network either: blocks still need the classical signet solution and proof
   of work, one party holds both block keys, and M2 changes no rule for spending an output.
-- Describe M3 as: "a drill of disabling elliptic curve checks inside one experimental P2MR leaf
-  version, on the Ark-0 test signet: from the block after the drill tripwire is spent, elliptic curve
-  signature checks in leaves of version `0xe0` stop working". It follows the P2XX-T idea of Pieter
-  Wuille's mail of 2026-06-25, but what it constrains is one experimental leaf version, and its
-  tripwires are two designated outputs. It is not part of BIP-360 or BIP-361, it is not a proposal
-  for Bitcoin, and it does not mean that any elliptic curve key has been broken, or tell when one
-  will be. It disables no elliptic curve check outside leaves of version `0xe0` (with M4-T, also in leaves
-  of version `0xe2` from height 55000): leaves of version
-  `0xc0`, P2TR and the other output types are not affected.
+- Describe M3 as: "a drill of disabling elliptic curve checks inside one experimental P2MR leaf version, on
+  the Ark-0 test signet: from the block after the drill tripwire is spent, elliptic curve signature checks
+  in leaves of version `0xe0` stop working". It follows the P2XX-T idea of Pieter Wuille's mail of
+  2026-06-25, but what it constrains is one experimental leaf version, and its tripwires are two designated
+  outputs. It is not part of BIP-360 or BIP-361, it is not a proposal for Bitcoin, and it does not mean that
+  any elliptic curve key has been broken, or tell when one will be. It disables elliptic curve checks only
+  in leaves of version `0xe0` and, with M4-T, from height 55000 in leaves of version `0xe2`: leaves of
+  version `0xc0`, P2TR and the other output types are not affected.
 - Describe M4-S as: "an experimental SLH-DSA-SHA2-128s signature check in P2MR leaves, active on the
   Ark-0 test signet from height 32000" (regtest activates it too, for tests, and another custom signet
   can switch it on with `-signetslhdsa128s`). It is not part of BIP-360, it is not a proposal for
@@ -184,11 +182,10 @@ validation only after activation.
   of BIP-360 or BIP-361, it is not a proposal for Bitcoin, and it is not a way to recover frozen coins
   in general: it helps only keys derived from a seed as its statement says, and its proof system has
   had no external review.
-- Describe M4-T as: "a drill of disabling ML-DSA-44 checks inside one experimental P2MR leaf version,
-  `0xe2`, on the Ark-0 test signet: from height 55000, from the block after one of three designated
-  outputs is missing, ML-DSA-44 signature checks in those leaves stop working, and SLH-DSA checks keep
-  working". It is not part of BIP-360, it is not a proposal for Bitcoin, and it does not show that
-  ML-DSA-44 is broken, or that it is not.
+- Describe M4-T as: "a drill of disabling ML-DSA-44 checks in one experimental P2MR leaf version, `0xe2`, on
+  the Ark-0 test signet: from height 55000, from the block after one of three designated outputs is spent,
+  ML-DSA-44 signature checks in those leaves stop working while SLH-DSA checks keep working". It is not part
+  of BIP-360 or a proposal for Bitcoin, and it says nothing about whether ML-DSA-44 is broken.
 - Describe M4-B as: "an experimental SLH-DSA-SHA2-128s block signature, required on the Ark-0 test
   signet from height 55000, next to M2's ML-DSA-44 one". It is not part of BIP 325, it is not a
   proposal for Bitcoin, and it does not make Ark-0 a quantum-resistant network: blocks still need the
@@ -854,24 +851,23 @@ the extended tests were not run. With an earlier set of tests, on the same code,
 de1 passed `test_bitcoin` (814 of 820), 23 P2MR functional runs and the default functional suite (284
 passed, none failed).
 
-Review status: M4-T and M4-B share one design. Codex (gpt-6.1-sol at maximum effort) reviewed it in
-five rounds, then its revision v0.6 in two more, before it was frozen. The series was reviewed in two
-rounds. Round 1 found one Medium and three Low. The Medium, that a depth-0 `0xe2` spend with an 81-byte
-element is standard on the released node and refused by this one at every height, is kept, as rule
-4T-4 requires: a limit that started at the height would leave a mempool boundary there, and
-`doc/p2mr-lattice-tripwire.md` says so in its Policy section. The three Low were fixed: regtest's default
-`H4T` now follows the height of `OP_CHECKMLDSA44` too, and a node refuses to start with `H4T` below any of
-the heights it needs; `-signetlatticetripwire` refuses an outpoint with a null txid, which had made every
-coinbase log a false spend; and the Ark-0 constants are one array whose consistency a `static_assert`
-checks, where the old check passed with no creation height. Tests were added for the two flags' bits, for
-no ML-DSA-44 verification once disabled, both tripwires in one block and in adjacent blocks, an output
-missing before activation, outputs moved and confirmed again, and the options' edge values. Round 2
-passed the series. Patch 113, the Ark-0 values, was reviewed by gpt-6.1-sol (maximum effort), which found
-one Low, a statement on how `H4T` was chosen, since corrected. gpt-6-astra (extra-high effort) then gated
-the release build of both series with patch 113: no Critical, High or Medium finding, and one Low, kept:
-the M4-S startup line lists `0xe2` among the leaf versions with `OP_CHECKSLHDSA128S` from height 32000,
-and the help of `gettripwireinfo` applies `ec_disabled_next_block` to `0xe2`, though leaves of that
-version run only from height 55000.
+Review status: M4-T and M4-B share one design. Codex (gpt-6.1-sol at maximum effort) reviewed it in five
+rounds, then its revision v0.6 in two more, before it was frozen. The series was reviewed in two rounds.
+Round 1 found one Medium and three Low. The Medium, that a depth-0 `0xe2` spend with an 81-byte element is
+standard on the released node and refused by this one at every height, is kept, as rule 4T-4 requires: a
+limit that started at the height would leave a mempool boundary there, and `doc/p2mr-lattice-tripwire.md`
+says so in its Policy section. The three Low were fixed: regtest's default `H4T` now follows the height of
+`OP_CHECKMLDSA44` too, and a node refuses to start with `H4T` below any of the heights it needs;
+`-signetlatticetripwire` refuses an outpoint with a null txid, which had made every coinbase log a false
+spend; and the Ark-0 constants are one array whose consistency a `static_assert` checks, where the old check
+passed with no creation height. Tests were added for the two flags' bits, for no ML-DSA-44 verification once
+disabled, both tripwires in one block and in adjacent blocks, an output missing before activation, outputs
+moved and confirmed again, and the options' edge values. Round 2 passed the series. gpt-6.1-sol (maximum
+effort) reviewed patch 113, the Ark-0 values, and found one Low, a statement on how `H4T` was chosen, since
+corrected. gpt-6-astra (extra-high effort) then gated the release build of both series with patch 113: no
+Critical, High or Medium finding, and one Low, left as it is: the M4-S startup line lists `0xe2` among the
+leaf versions with `OP_CHECKSLHDSA128S` from height 32000, and the help of `gettripwireinfo` applies
+`ec_disabled_next_block` to `0xe2`, though leaves of that version run only from height 55000.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \
@@ -978,19 +974,19 @@ statements corrected, on how `H4T` was chosen (its message, `doc/p2mr-lattice-tr
 `src/kernel/chainparams.h`); its code and tests are the ones these runs passed.
 
 M4-T and M4-B were released on [RELEASE DATE], with patch 113, as the release `ark0-node-m4tb` of this
-repository ("Prebuilt node", below). Verification record of that build (2026-11-02, the release
-pipeline of `contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 8 CPUs, the files as published
-here): from a fresh clone of v31.1 with the 112 patches of the ten sets, `test_bitcoin` passed 814 of 820
-test cases and one more with a warning, and skipped 5; 24 P2MR, signet and related functional scripts passed, 25 runs with
-`rpc_blockchain.py` over both transports (`feature_p2mr_rescue.py` with the M4-S release's `bitcoind` as
-the late node); the default functional suite passed, 286 passed and 17 skipped. A second build from a
-fresh clone with an empty compiler cache (503 compilations, no cache hit) produced the same five
-binaries and `signet-slh-sign`, byte for byte, and passed the unit tests and five functional scripts of
-the two series. An Ark-0 node of the build with no peers logged the two start-up lines of
-`ark0/NETWORK.md`, "Rule change at height 55000 (M4-T and M4-B)", listed `p2mr_lattice_tripwire` as
-buried at 55000, and gave the `lattice` object of `gettripwireinfo`. The four binaries with the Rust
-library need glibc 2.39, `bitcoin-cli` 2.34, as for M4-R; `signet-slh-sign`, the producer's signer, which is not in the release, is static. Their
-SHA-256:
+repository ("Prebuilt node", below). Verification record of that build (2026-11-02, the release pipeline of
+`contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 8 CPUs, the files as published here): from a fresh
+clone of v31.1 with the 112 patches of the ten sets, `test_bitcoin` passed 814 of 820 test cases and one
+more with a warning, and skipped 5; 24 P2MR, signet and related functional scripts passed, 25 runs with
+`rpc_blockchain.py` over both transports (`feature_p2mr_rescue.py` with the M4-S release's `bitcoind` as the
+late node); the default functional suite passed, 286 passed and 17 skipped. A second build from a fresh
+clone with an empty compiler cache (503 compilations, no cache hit) produced the same five binaries and
+`signet-slh-sign`, byte for byte, and passed the unit tests and five functional scripts of the two series.
+Run without peers, an Ark-0 node of this build logged both start-up lines of `ark0/NETWORK.md`, "Rule change
+at height 55000 (M4-T and M4-B)", listed `p2mr_lattice_tripwire` as buried at 55000, and returned the
+`lattice` object of `gettripwireinfo`. As for M4-R, the four binaries with the Rust library need glibc 2.39
+and `bitcoin-cli` needs 2.34. The producer's signer, `signet-slh-sign`, is static and not in the release.
+Their SHA-256:
 
 | Binary | SHA-256 |
 |---|---|
@@ -1012,10 +1008,10 @@ in `ark0/release-signing-key.asc`. `ark0/JOIN.md`, section 1, says how to check 
 binaries need from the system.
 
 The release before, `ark0-node-m4r`, carries the build with the first eight patch sets, which the Ark-0
-nodes run until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It
-was first published on 2026-10-30 with a build that set the lane's height at 63000, and replaced the
-same day, under the same tag, with the build with 51000; a node that runs the first build has to be
-replaced as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").
+nodes run until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It was
+first published on 2026-10-30 with a build that set the lane's height at 63000, and replaced the same day,
+under the same tag, with a build that sets it at 51000; a node that runs the first build has to be replaced
+as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").
 
 The binaries are reproducible, on two conditions. In the build image that `contrib/k3s` uses, the
 release build and a second build from a fresh clone, with an empty compiler cache and the files in

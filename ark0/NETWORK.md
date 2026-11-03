@@ -93,15 +93,14 @@ describes how to follow the live chain with a node of your own.
   its Schnorr keys; its proof system has had no external review; and it relaxes
   the rules: an M3 or M4-S node stops at the first block that uses it. See
   "Rule change at height 51000 (M4-R)" below.
-- **Not evidence that ML-DSA-44 is broken, or that it is not (M4-T and
-  M4-B).** From height 55000 the nodes built with `patches-m4t/` and
-  `patches-m4b/` also run P2MR leaves of an experimental leaf version,
-  `0xe2`, and refuse ML-DSA-44 signatures in them from the block after one of
-  three designated outputs is missing; the operator holds the key of one of
-  them, for a drill. From the same height they also require an
-  SLH-DSA-SHA2-128s signature by one fixed key on every block, next to M2's.
-  Outputs without leaves of version `0xe2` are unchanged. See "Rule change at
-  height 55000 (M4-T and M4-B)" below.
+- **Not evidence that ML-DSA-44 is broken, or that it is not (M4-T and M4-B).**
+  From height 55000, nodes built with `patches-m4t/` and `patches-m4b/` also
+  run P2MR leaves of an experimental version, `0xe2`, and refuse ML-DSA-44
+  signatures in them from the block after any of three designated outputs is
+  missing; the operator holds the key of one of them, for a drill. From the
+  same height they also require an SLH-DSA-SHA2-128s signature by one fixed key
+  on every block, next to M2's. Outputs without leaves of version `0xe2` are
+  unchanged. See "Rule change at height 55000 (M4-T and M4-B)" below.
 
 ### What the evidence does not prove
 
@@ -754,23 +753,23 @@ cannot be rescued.
 
 ## Rule change at height 55000 (M4-T and M4-B)
 
-From height 55000 Ark-0 has two more experimental rules, called milestones
-M4-T and M4-B here. They start at the same block, and both are soft forks.
-The nodes built with `patches-m4t/` and `patches-m4b/` enforce them, and
-`doc/p2mr-lattice-tripwire.md` and `doc/signet-slhblock.md` in the patched
-tree specify them. The height was announced on [RELEASE DATE], with the
-release of the build, at least seven days ahead. Counted from height [H] at
-[HH:MM] UTC that day, at about [N] blocks a day, the rate of the two weeks
-before, the chain reaches height 55000 around [DATE TIME] UTC. It cannot do
-so before [EARLIEST DATE TIME] UTC, even if blocks came every 90 seconds, the
-producer's configured pause. The operator's nodes and block producer stay on
-the M4-R build until the chain is past height 51000, where M4-R's rescue lane
-opens, and move to the new build on [ROLL DATE].
+From height 55000 Ark-0 has two more experimental rules, called milestones M4-T
+and M4-B here. They start at the same block, and both are soft forks. The nodes
+built with `patches-m4t/` and `patches-m4b/` enforce them, and
+`doc/p2mr-lattice-tripwire.md` and `doc/signet-slhblock.md` in the patched tree
+specify them. The height was announced on [RELEASE DATE], with the release of
+the build, at least seven days ahead. From height [H] at [HH:MM] UTC that day,
+at the rate of the two weeks before, about [N] blocks a day, the chain reaches
+height 55000 around [DATE TIME] UTC. It cannot do so before [EARLIEST DATE
+TIME] UTC, even if blocks came every 90 seconds, the producer's configured
+pause. The operator's nodes and block producer stay on the M4-R build until the
+chain is past height 51000, where M4-R's rescue lane opens, and move to the new
+build on [ROLL DATE].
 
 ### M4-T: leaf version `0xe2` and the lattice tripwires
 
 From height 55000, a P2MR leaf of version `0xe2` at depth one or more (its
-control block starts with `0xe3`) is executed as a leaf of version `0xc0` is,
+control block starts with `0xe3`) executes like a leaf of version `0xc0`,
 `OP_CHECKMLDSA44` and `OP_CHECKSLHDSA128S` included, with two differences:
 
 - its elliptic curve signature checks follow the tripwire of leaf version
@@ -809,35 +808,36 @@ library alone.
 
 - **What the rule does with them.** An output whose tree holds an ML-DSA-44
   leaf S1 and an SLH-DSA leaf SLH1, both of version `0xe2` at depth one (the
-  pq2 template), can be spent through either. If any of the three is spent
-  (L3 in the drill, below), from the next block the S1 path of every such
-  output fails and the SLH1 path still works. A spend of L1 or L2 does not show that ML-DSA-44 is broken, and their
-  staying unspent does not show that it is not: someone who could forge
-  signatures in secret would not spend them, and on a network with one block
-  producer the operator could keep such a spend out of the chain or, had it
-  kept L2's key against its statement, spend L2 itself. General progress against lattice problems would reach L1 and L2 at
-  about the same cost, so neither is an earlier warning than the other.
-- **Below height 55000, no rule changes.** Until then a leaf of version
-  `0xe2` at depth one or more is of an unknown leaf version: a spend through
-  it succeeds without running it, and nodes do not relay it. No coins should
+  pq2 template), can be spent through either. If any of the three is spent (L3
+  in the drill, below), from the next block the S1 path of every such output
+  fails and the SLH1 path still works. Spending L1 or L2 does not show that
+  ML-DSA-44 is broken, and leaving them unspent does not show that it is not:
+  someone who could forge signatures in secret would not spend them, and on a
+  network with one block producer the operator could keep such a spend out of
+  the chain or, had it kept L2's key against its statement, spend L2 itself.
+  General progress against lattice problems would reach L1 and L2 at about the
+  same cost, so neither is an earlier warning than the other.
+- **Below height 55000, no rule changes.** Until then a leaf of version `0xe2`
+  at depth one or more has an unknown leaf version: spending it succeeds
+  without running the leaf, and nodes do not relay the spend. No coins should
   be paid to `0xe2` leaves before the chain is past height 55000.
 - **At depth zero.** A single leaf sits at depth zero and is spent without
-  being executed, at any height. Its spends follow, at every height, the
-  standardness limit of `0xc0` and `0xe0` leaves, stack elements of at most
-  80 bytes with S1 and SLH1 excepted; a node without these series does not
-  apply that limit and relays such spends.
+  being executed, at any height. At every height its spends follow the
+  standardness limit of `0xc0` and `0xe0` leaves, at most 80 bytes per stack
+  element except in S1 and SLH1; a node without these series does not apply
+  that limit and relays such spends.
 - **What is relayed from the height.** Spends of leaves of version `0xe2` at
   depth one or more follow the same standardness rules as those of `0xc0`
   and `0xe0`: S1 and SLH1 are relayed. S2, which needs both an ML-DSA-44 and
   a Schnorr signature, is not relayed in `0xe2`, and neither is a rescue
   (template R1 is of version `0xe0` only).
-- **The drill.** The operator will spend L3 at an announced time, announced at
-  least two weeks ahead and no earlier than seven days after a wallet offers
-  pq2 outputs. From the next block, ML-DSA-44 checks in `0xe2` fail and SLH1
-  spends of pq2 outputs keep working; ML-DSA-44 in leaf versions `0xc0` and
-  `0xe0` and the block signatures are not affected. A leaf of version `0xe2`
-  whose only path is an ML-DSA-44 check can no longer be spent after that,
-  and no rescue covers it: the rescue lane covers elliptic curve checks only.
+- **The drill.** The operator will spend L3 at a time announced at least two
+  weeks ahead, and no earlier than seven days after a wallet offers pq2
+  outputs. From the next block, ML-DSA-44 checks in `0xe2` fail and SLH1 spends
+  of pq2 outputs keep working; ML-DSA-44 in leaf versions `0xc0` and `0xe0` and
+  the block signatures are not affected. A leaf of version `0xe2` whose only
+  path is an ML-DSA-44 check can no longer be spent after that, and no rescue
+  covers it: the rescue lane covers elliptic curve checks only.
 
 ### M4-B: an SLH-DSA block signature
 
@@ -853,10 +853,10 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
 
 - **The order of the signatures.** The SLH-DSA signature covers what the
   ML-DSA-44 one covers, less the SLH signature itself: the block's version,
-  previous block and time, every transaction, and the whole coinbase except
-  the ML-DSA-44 push, the signet solution push and the SLH signature. A block
-  is signed with SLH-DSA first, then with ML-DSA-44 over the block that holds
-  the SLH output, then the signet solution is made. Like the other two, the
+  previous block and time, every transaction, and the whole coinbase except the
+  ML-DSA-44 push, the signet solution push and the SLH signature. A block is
+  signed first with SLH-DSA, then with ML-DSA-44 over the block that holds the
+  SLH output, and then the signet solution is made. Like the other two, the
   signature does not cover `nNonce` or `nBits`.
 - **Three signatures, one party.** From height 55000 a node with the rule
   accepts a block only if the signet solution under the challenge's elliptic
@@ -865,8 +865,8 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
 - **Below height 55000, M4-B rejects no block.** The operator's block producer
   will put the SLH output in every block from height [SLH FROM] on, at least
   1,920 blocks before height 55000 (48 hours at its fastest rate of 960 blocks
-  a day). A node started with `-debug=validation` logs, for each block below
-  55000 that it validates other than the genesis block, whether its SLH-DSA
+  a day). With `-debug=validation`, a node logs for each block below height
+  55000 that it validates, the genesis block aside, whether its SLH-DSA
   signature is valid, invalid, or absent or not in the required form. So the
   signatures can be checked on the chain before they are enforced.
 - **Cost:** 7,876 bytes more in every block (31,504 weight units), which a
@@ -897,24 +897,22 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   `<H>` is `N + 1`, or 55000 if the spend comes before that height; the line
   ends `is already disabled` when the checks were off before the block.
   `bitcoin-cli getdeploymentinfo` lists `p2mr_lattice_tripwire` as a buried
-  deployment with height 55000, and from that height
-  `P2MR_LATTICE_TRIPWIRE` among the script flags. `gettripwireinfo` has a
-  `lattice` object: the height the rules start at, the leaf version `e2`, each
-  output with its
-  `state`, `unspent` or `missing`, its key's SHA256 and its label, and
-  `mldsa_disabled_next_block`. A node that has not yet synced past height
-  39971 reports all three as `missing`; that is expected, and matters only
-  from height 55000.
+  deployment with height 55000, and from that height `P2MR_LATTICE_TRIPWIRE`
+  among the script flags. `gettripwireinfo` has a `lattice` object with the
+  height the rules start at, the leaf version `e2`,
+  `mldsa_disabled_next_block`, and for each output its `state` (`unspent` or
+  `missing`), its key's SHA256 and its label. A node that has not yet synced
+  past height 39971 reports all three as `missing`; that is expected, and
+  matters only from height 55000.
 - **Wallets.** Bitcoin Core's wallet does not make or sign leaves of version
   `0xe2`. [PQ2 WALLET: WHEN AND WHICH]
-- **They are soft forks.** A node without these series (an M4-R build)
-  accepts every block a node with them accepts and keeps following the chain,
-  but does not run leaves of version `0xe2`, does not check the SLH-DSA block
-  signature, and does not relay spends of `0xe2` leaves at depth one or more.
-  A node that accepted blocks at or above height 55000 before it upgraded has
-  not checked them; one start with `-reindex-chainstate` (`-reindex` on a
-  pruned node) checks them, and a node set with `-assumevalid` drops that
-  setting first.
+- **They are soft forks.** A node without these series (an M4-R build) accepts
+  every block a node with them accepts and keeps following the chain, but does
+  not run leaves of version `0xe2`, does not check the SLH-DSA block signature,
+  and does not relay spends of `0xe2` leaves at depth one or more. A node that
+  accepted blocks at or above height 55000 before upgrading has not checked
+  them; one start with `-reindex-chainstate` (`-reindex` on a pruned node),
+  after removing any `-assumevalid` setting, checks them.
 - **They are not part of BIP-360 or BIP 325**, and they are not a proposal
   for Bitcoin.
 - **The height, the three outputs and the key are rules of this network and

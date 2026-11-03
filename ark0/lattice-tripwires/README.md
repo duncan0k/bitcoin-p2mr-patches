@@ -1,19 +1,19 @@
 # Lattice tripwires: keys and scripts fixed before the outputs existed
 
-M4-T is a rule of Ark-0 from height 55000 (`../NETWORK.md`, "Rule change at
-height 55000 (M4-T and M4-B)"): P2MR leaves of a new version, `0xe2`, whose ML-DSA-44 checks stop working from the block after any
-one of three designated outputs is spent, and not before height 55000; from then on a non-empty ML-DSA-44
-signature in such a leaf makes the script fail. Their SLH-DSA checks keep
-working, and their elliptic curve checks follow the M3 tripwire, as in leaves
-of version `0xe0` (`../NETWORK.md`, "Rule change at height 30000 (M3)"). The
-three designated outputs are the lattice tripwires. This directory fixed them
-before they existed: their keys, their scripts, their addresses and how each
-key was made. The outputs were created after this directory was published, at height
-39971, by transaction
-`aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c`: L1 is
-its output 0, L2 output 1 and L3 output 2. Patch 113, in `../../patches-m4b/`,
-puts these outpoints, that height and the activation height, 55000, into the
-build; nodes with that build enforce the rule from height 55000.
+M4-T takes effect on Ark-0 at height 55000 (`../NETWORK.md`, "Rule change at height
+55000 (M4-T and M4-B)"). It adds P2MR leaf version `0xe2`, whose ML-DSA-44 checks
+stop working from the block after any of three designated outputs is spent, and not
+before height 55000; from then on a non-empty ML-DSA-44 signature in such a leaf
+makes the script fail. Their SLH-DSA checks keep working, and their elliptic curve
+checks follow the M3 tripwire, as in leaves of version `0xe0` (`../NETWORK.md`, "Rule
+change at height 30000 (M3)"). The three designated outputs are the lattice
+tripwires. This directory fixed their keys, scripts and addresses, and how each key
+was made, before the outputs existed. Transaction
+`aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c` created the
+outputs at height 39971, after this directory was published: L1 is output 0, L2
+output 1 and L3 output 2. Patch 113 in `../../patches-m4b/` puts these outpoints,
+height 39971 and the activation height 55000 into the build; nodes with that build
+enforce the rule from height 55000.
 
 | File | What it is |
 |---|---|

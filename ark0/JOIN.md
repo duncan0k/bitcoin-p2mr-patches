@@ -15,29 +15,28 @@ Before you start:
   <https://explorer.ark0.si> shows blocks and transactions, with P2MR spends taken
   apart, and a faucet at <https://faucet.ark0.si> gives out coins to try P2MR with
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
-- **Rule changes are announced in this repository before they apply.** The latest ones, milestones
-  M4-T and M4-B, apply from height 55000 ("Rule change at height 55000 (M4-T and M4-B)" in
-  `NETWORK.md`), expected around [DATE TIME] UTC and not before [EARLIEST DATE TIME] UTC. From there
-  nodes run P2MR leaves of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of
-  three designated outputs is spent, and require an SLH-DSA signature on every block. Both are soft
-  forks: a node built with `patches-m4r/` but without `patches-m4t/` and `patches-m4b/` keeps
-  following the chain but checks neither rule. The one before, M4-R, applies from height 51000
-  ("Rule change at height 51000 (M4-R)"), expected around 2026-11-15 05:00 UTC and not before
-  2026-11-14 00:00 UTC. From there nodes accept, in P2MR leaves of version `0xe0`, a zero-knowledge
-  proof that the spender knows the seed behind a key in place of an elliptic curve signature. **It is
-  a hard fork:** a node built with `patches-m3/` but without `patches-m4r/` stops following the chain
-  at the first block that uses it, so upgrade before height 51000 (section 1). M4-S applies from
-  height 32000 ("Rule change at height 32000 (M4-S)"). From there nodes check `OP_CHECKSLHDSA128S`,
-  an SLH-DSA signature check in P2MR leaves. M3 applies from height 30000 ("Rule change at height 30000 (M3)"). From there nodes
-  run P2MR leaves of version `0xe0`, whose elliptic curve signature checks stop working once one of
-  two designated outputs is spent; the operator spent one of them in a drill on 2026-10-30. M2 and
-  M1 have applied since heights 20000 and 8600. Those four are soft forks: a node built without
-  `patches-m4/` keeps following the chain (an M3 build only up to the first rescue spend of M4-R)
-  but does not check the SLH-DSA signatures or relay the spends that use them, a node without
-  `patches-m3/` does not run those leaves or check their rule, a node without `patches-m2/` does not
-  check the block signatures, and a node without `patches-m1/` does not enforce M1 and does not
-  relay the spends that use it. A new challenge would be a new network, and everyone would start
-  again.
+- **Rule changes are announced in this repository before they apply.** The latest ones, milestones M4-T
+  and M4-B, apply from height 55000 ("Rule change at height 55000 (M4-T and M4-B)" in `NETWORK.md`),
+  expected around [DATE TIME] UTC and not before [EARLIEST DATE TIME] UTC. From there nodes run P2MR
+  leaves of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of three designated
+  outputs is spent, and require an SLH-DSA signature on every block. Both are soft forks: a node built
+  with `patches-m4r/` but without `patches-m4t/` and `patches-m4b/` keeps following the chain but checks
+  neither rule. The one before, M4-R, applies from height 51000 ("Rule change at height 51000 (M4-R)"),
+  expected around 2026-11-15 05:00 UTC and not before 2026-11-14 00:00 UTC. From there, in P2MR leaves of
+  version `0xe0`, nodes accept a zero-knowledge proof that the spender knows the seed behind a key in
+  place of an elliptic curve signature. **It is a hard fork:** a node built with `patches-m3/` but
+  without `patches-m4r/` stops following the chain at the first block that uses it, so upgrade before
+  height 51000 (section 1). M4-S applies from height 32000 ("Rule change at height 32000 (M4-S)"). From
+  there nodes check `OP_CHECKSLHDSA128S`, an SLH-DSA signature check in P2MR leaves. M3 applies from
+  height 30000 ("Rule change at height 30000 (M3)"). From there nodes run P2MR leaves of version `0xe0`,
+  whose elliptic curve signature checks stop working once one of two designated outputs is spent; the
+  operator spent one of them in a drill on 2026-10-30. M2 and M1 have applied since heights 20000 and
+  8600. Those four are soft forks: a node built without `patches-m4/` keeps following the chain (an M3
+  build only up to the first rescue spend of M4-R) but does not check the SLH-DSA signatures or relay the
+  spends that use them, a node without `patches-m3/` does not run those leaves or check their rule, a
+  node without `patches-m2/` does not check the block signatures, and a node without `patches-m1/` does
+  not enforce M1 and does not relay the spends that use it. A new challenge would be a new network, and
+  everyone would start again.
 
 ## 1. Get the node
 
@@ -162,18 +161,18 @@ the series and downloads nothing.
 `git am` needs a committer identity; if git has none, run it as
 `git -c user.name=you -c user.email=you@example.com am ...`.
 
-`patches/` and `patches-spacing/` alone, the build this guide described before M1, still follow
-Ark-0, but such a node does not check the M1 signatures, and it has no P2MR wallet for section 4. A
-node built without `patches-m2/`, as this guide described before M2, follows Ark-0 too, but does not
-check the block signatures from height 20000 on. One built without `patches-m3/`, as this guide
-described before M3, follows it as well, but does not run leaves of version `0xe0` or check their
-rule from height 30000 on. One built without `patches-m4/`, as this guide described before M4-S,
-follows it too (up to the first rescue spend, below), but does not check `OP_CHECKSLHDSA128S` from
-height 32000 on. But one built without `patches-m4r/`, as this guide described before M4-R, stops at
-the first block with a rescue spend, which can come from height 51000 on (section 5). One built
-without `patches-m4t/` and `patches-m4b/`, as this guide described before M4-T and M4-B, follows it
-too, but does not run leaves of version `0xe2` or check the SLH-DSA block signature from height
-55000 on. `patches-m4b/` applies only right after `patches-m4t/`.
+`patches/` and `patches-spacing/` alone, the build this guide described before M1, still follow Ark-0,
+but such a node does not check the M1 signatures, and it has no P2MR wallet for section 4. A node built
+without `patches-m2/`, as this guide described before M2, follows Ark-0 too, but does not check the block
+signatures from height 20000 on. One built without `patches-m3/`, as this guide described before M3,
+follows it as well, but does not run leaves of version `0xe0` or check their rule from height 30000 on.
+One built without `patches-m4/`, as this guide described before M4-S, follows it too (up to the first
+rescue spend, below), but does not check `OP_CHECKSLHDSA128S` from height 32000 on. But one built without
+`patches-m4r/`, as this guide described before M4-R, stops at the first block with a rescue spend, which
+can come from height 51000 on (section 5). One built without `patches-m4t/` and `patches-m4b/`, as this
+guide described before M4-T and M4-B, follows it too, but from height 55000 on it does not run leaves of
+version `0xe2` or check the SLH-DSA block signature. `patches-m4b/` applies only right after
+`patches-m4t/`.
 
 ## 2. Configure it
 
@@ -239,18 +238,17 @@ The chain is small, so the first sync takes minutes rather than hours.
   51000 and `p2mr_lattice_tripwire` as one with height 55000, and `P2MR` and `P2MR_MLDSA44` among
   the script flags (`P2MR_TRIPWIRE` too, from height 30000, `P2MR_SLHDSA128S` from height 32000,
   `P2MR_NO_RESCUE` below height 51000, and `P2MR_LATTICE_TRIPWIRE` from height 55000).
-- `./build/bin/bitcoin-cli gettripwireinfo` reports `height` 30000, `leaf_version` `e0`, the two
-  tripwire outputs of "Rule change at height 30000 (M3)" in `NETWORK.md`, each `unspent`, and
-  `ec_disabled_next_block` false. After the drill described there, the drill output is `missing`
-  and `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network
-  id of the startup line. Its `lattice` object reports `height` 55000, `leaf_version` `e2`, the
-  three lattice tripwire outputs of the startup line, each with its `key_sha256`, its `label` and
-  `state` `unspent`, and `mldsa_disabled_next_block` false. After the drill of M4-T, once the
-  operator's spend of the drill key's output is in a block, that output is `missing`, and
-  `mldsa_disabled_next_block` is true whenever the next block is at height 55000 or above. A node that has not yet synced past
-  height 15748, where both tripwire outputs were created, reports both as `missing`, and one not yet
-  past height 39971 reports the three lattice tripwire outputs so, and logs so at startup; that is
-  expected.
+- `./build/bin/bitcoin-cli gettripwireinfo` reports `height` 30000, `leaf_version` `e0`, the two tripwire
+  outputs of "Rule change at height 30000 (M3)" in `NETWORK.md`, each `unspent`, and
+  `ec_disabled_next_block` false. After the drill described there, the drill output is `missing` and
+  `ec_disabled_next_block` is true. Its `rescue` object reports `height` 51000 and the network id of the
+  startup line. Its `lattice` object reports `height` 55000, `leaf_version` `e2`, the three lattice
+  tripwire outputs of the startup line, each with its `key_sha256`, its `label` and `state` `unspent`,
+  and `mldsa_disabled_next_block` false. After the M4-T drill, once a block holds the operator's spend of
+  the drill key's output, that output is `missing` and `mldsa_disabled_next_block` is true whenever the
+  next block is at height 55000 or above. A node not yet synced past height 15748, where both tripwire
+  outputs were created, reports both as `missing`, and one not yet past height 39971 reports the three
+  lattice tripwire outputs as `missing` and logs that at startup; both are expected.
 - `./build/bin/bitcoin-cli getpeerinfo` lists `node.ark0.si`, `node2.ark0.si` or both, and once `getblockchaininfo`
   shows `blocks` equal to `headers` and `initialblockdownload` false, your node has caught up.
 
@@ -339,9 +337,9 @@ not build them yet. Pay nothing to such leaves before height 32000: until then t
 `OP_SUCCESS241`, and anyone who knows the leaf and its path in the tree can spend the output
 through it.
 
-Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T). [PQ2 WALLET: WHEN AND WHICH]
-Pay nothing to such leaves before height 55000: until then they are not executed, and anyone who
-knows a leaf and its path in the tree can spend the output through it.
+Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T). [PQ2 WALLET: WHEN AND WHICH] Do
+not pay to such leaves before height 55000: until then they are not executed, so anyone who knows a leaf
+and its path in the tree can spend the output through it.
 
 Nor does the node's wallet make rescue spends (M4-R). The proofs are made off the node, with the
 prover of [ark0-rescue](https://github.com/duncan0k/ark0-rescue), and a rescue gives away the key it
@@ -386,12 +384,12 @@ do first.
   it, and let it continue with `./build/bin/bitcoin-cli reconsiderblock <hash of that block>`; the
   hash is in `debug.log`, in the line `InvalidChainFound: invalid block=`.
 - **`debug.log` has no `Signet P2MR lattice tripwire rules` or no `Signet SLH-DSA block signature
-  required` line, `getdeploymentinfo` does not list `p2mr_lattice_tripwire`, or `gettripwireinfo` has
-  no `lattice` object:** the node was built without `patches-m4t/` and `patches-m4b/`, or still runs
-  the binary from before (the `ark0-node-m4r` release, say). It follows the chain but does not run
-  leaves of version `0xe2` or check the SLH-DSA block signature; rebuild it (section 1) and restart
-  it. If it accepted blocks at or above height 55000 before it was upgraded, start it once with
-  `-reindex-chainstate` so that it checks them (`-reindex` on a pruned node).
+  required` line, `getdeploymentinfo` does not list `p2mr_lattice_tripwire`, or `gettripwireinfo` has no
+  `lattice` object:** the node was built without `patches-m4t/` and `patches-m4b/`, or still runs the
+  binary from before (the `ark0-node-m4r` release, say). It follows the chain but does not run leaves of
+  version `0xe2` or check the SLH-DSA block signature; rebuild it (section 1) and restart it. If it
+  accepted blocks at or above height 55000 before upgrading, start it once with `-reindex-chainstate`
+  (`-reindex` on a pruned node) so that it checks them.
 - **`git am` stops in `patches-m4b/`:** apply `patches-m4t/` right before it, as section 1 does.
 - **A prebuilt binary does not start**, saying that `GLIBC_2.39` or `GLIBCXX_3.4.32` is not found or
   that `libevent_core-2.1.so.7` cannot be opened: the system is older than the binaries need, or the
