@@ -52,12 +52,12 @@ build with all ten prebuilt, as binaries or as a container image, or build it yo
 guide works the same with either.
 
 On Windows, macOS and Linux there is a way without commands: the witness program of the release
-[`ark0-witness-0.3.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.3.0)
-runs a build of the node with the eight patch sets up to `patches-m4r/`, and shows what it reports
-(`witness/README.md`). That build keeps following Ark-0 past height 55000, but checks neither M4-T
-nor M4-B. Earlier releases of the witness program run a build with the six patch sets
-up to `patches-m3/`, which stops following Ark-0 at the first block with a rescue spend, from height
-51000 on. This guide does not cover the witness program.
+[`ark0-witness-0.4.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.4.0)
+runs a build of the node with all ten patch sets, up to `patches-m4b/`, and shows what that node reports
+(`witness/README.md`). Release 0.3.0 runs a build with the eight patch sets up to `patches-m4r/`, which
+keeps following Ark-0 past height 55000 but checks neither M4-T nor M4-B. Earlier releases run a build
+with the six patch sets up to `patches-m3/`, which stops following Ark-0 at the first block with a rescue
+spend, from height 51000 on. This guide does not cover the witness program.
 
 ### Prebuilt binaries or image
 
