@@ -1128,6 +1128,23 @@ func TestLatticeStatusAndReport(t *testing.T) {
 		!strings.Contains(r, "Lattice tripwire drill key "+latticeTxid+":2: missing") {
 		t.Errorf("lattice after: %+v\n%s", s, r)
 	}
+
+	// The chain went back between the two calls: getblockchaininfo said 55000, the lattice states are of 54998.
+	// M4-T follows the block its states are of.
+	k := newFakeNode(t)
+	k.ark0(55000, "missing", true)
+	inner := k.answers["gettripwireinfo"]
+	k.answers["gettripwireinfo"] = func(p []json.RawMessage) (any, *rpcError) {
+		info, _ := inner(p)
+		info.(map[string]any)["tip_height"] = int64(54998)
+		return info, nil
+	}
+	k.withLattice(latticeObject("unspent", false))
+	s = (&collector{node: k.node(), dataDir: k.dataDir}).collect()
+	if r = witnessReport(s, nil); s.LatticeInfo != latticeOK || s.ReachedH4T ||
+		!strings.Contains(r, "Block 55000 (M4-T): not reached yet\n") || strings.Contains(r, "mldsa") {
+		t.Errorf("lattice after the chain went back: %+v\n%s", s, r)
+	}
 }
 
 func TestLatticeEdges(t *testing.T) {
@@ -1146,6 +1163,17 @@ func TestLatticeEdges(t *testing.T) {
 		func(int64) any { return map[string]any{"height": 55000, "mldsa_disabled_next_block": false} }, // no tripwires
 		func(int64) any {
 			return map[string]any{"height": 55000, "mldsa_disabled_next_block": false, "tripwires": []any{"x"}}
+		},
+		func(int64) any {
+			return map[string]any{"height": 55000, "mldsa_disabled_next_block": false, "tripwires": []any{nil, nil, nil}}
+		},
+		func(int64) any {
+			return map[string]any{"height": 55000, "mldsa_disabled_next_block": false,
+				"tripwires": []any{map[string]any{"outpoint": latticeTxid + ":2", "state": "spent"}}}
+		},
+		func(int64) any {
+			return map[string]any{"height": 55000, "mldsa_disabled_next_block": false,
+				"tripwires": []any{map[string]any{"state": "unspent", "label": "drill key"}}}
 		},
 	}
 	for i, lattice := range malformed {

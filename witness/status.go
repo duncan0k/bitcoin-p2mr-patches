@@ -154,8 +154,9 @@ func (c *collector) collect() status {
 	if s.ReachedH3 = tip >= s.H3; s.ReachedH3 {
 		_ = rpc.call("getblockhash", []any{s.H3}, &s.BlockH3)
 	}
+	// M4-T follows the block its states are of, whatever getblockchaininfo said a moment before.
 	if s.LatticeInfo == latticeOK {
-		s.ReachedH4T = tip >= s.H4T
+		s.ReachedH4T = s.TripwireTip >= s.H4T
 	}
 	if c.subversion == "" {
 		var network struct {
@@ -182,6 +183,7 @@ func (c *collector) readLattice(s *status, raw json.RawMessage) {
 	case s.TripwireInfo == "ok" && len(raw) == 0:
 		c.lattice = false
 	case s.TripwireInfo == "ok" && json.Unmarshal(raw, &lattice) == nil && lattice.Height > 0 && lattice.Tripwires != nil &&
+		latticeTripwiresValid(lattice.Tripwires) &&
 		lattice.MLDSADisable != nil:
 		c.lattice = true
 		s.LatticeInfo, s.H4T = latticeOK, lattice.Height
@@ -193,6 +195,17 @@ func (c *collector) readLattice(s *status, raw json.RawMessage) {
 	if c.lattice {
 		s.LatticeInfo = latticeUnknown
 	}
+}
+
+// latticeTripwiresValid: every entry names an output and has one of the two states the node gives (a null entry
+// decodes to an empty one).
+func latticeTripwiresValid(wires []tripwire) bool {
+	for _, w := range wires {
+		if w.Outpoint == "" || (w.State != "unspent" && w.State != "missing") {
+			return false
+		}
+	}
+	return true
 }
 
 func nowUTC() string {

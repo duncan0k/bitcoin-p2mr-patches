@@ -171,7 +171,7 @@
     } else if (s.reachedH4T) {
       setText('m4t', t('m4t_after', { h4t: number(h4t) }));
     } else {
-      setText('m4t', t('m3_before', { n: number(Math.max(0, h4t - Math.max(s.blocks, s.tripwireTip))) }));
+      setText('m4t', t('m3_before', { n: number(Math.max(0, h4t - s.tripwireTip)) }));
     }
     fillTripwires($('ltw'), known ? s.latticeTripwires : []);
     // The flag speaks of the next block; before a next block under M4-T, leaves of version 0xe2 are not run at all.
