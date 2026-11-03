@@ -1,5 +1,5 @@
 #!/bin/sh
-# End-to-end check of the Linux build against a real Ark-0 node that syncs from node.ark0.si:
+# End-to-end check of the Linux build against a real Ark-0 node that syncs from the public nodes:
 #   sh e2e-linux.sh <ark0-witness> <bitcoind> <bitcoin-cli>
 # Needs curl and python3, and network access. Uses a fresh data folder under /tmp and removes it at the end.
 set -u
