@@ -866,7 +866,12 @@ coinbase log a false spend; and the Ark-0 constants are one array whose consiste
 checks, where the old check passed with no creation height. Tests were added for the two flags' bits, for
 no ML-DSA-44 verification once disabled, both tripwires in one block and in adjacent blocks, an output
 missing before activation, outputs moved and confirmed again, and the options' edge values. Round 2
-passed the series.
+passed the series. Patch 113, the Ark-0 values, was reviewed by gpt-6.1-sol (maximum effort), which found
+one Low, a statement on how `H4T` was chosen, since corrected. gpt-6-astra (extra-high effort) then gated
+the release build of both series with patch 113: no Critical, High or Medium finding, and one Low, kept:
+the M4-S startup line lists `0xe2` among the leaf versions with `OP_CHECKSLHDSA128S` from height 32000,
+and the help of `gettripwireinfo` applies `ec_disabled_next_block` to `0xe2`, though leaves of that
+version run only from height 55000.
 
 ```bash
 git am ../bitcoin-p2mr-patches/patches/*.patch ../bitcoin-p2mr-patches/patches-m05/*.patch \

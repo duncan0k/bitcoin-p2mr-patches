@@ -883,7 +883,9 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   ```
 
   The M4-S line names the new leaf version too: `P2MR SLH-DSA-SHA2-128s rules
-  active from height 32000 (leaf versions 0xc0, 0xe0, 0xe2)`. The node also
+  active from height 32000 (leaf versions 0xc0, 0xe0, 0xe2)`. It lists the
+  leaf versions that have the check, not when each starts: leaves of version
+  `0xe2` run only from height 55000. The node also
   logs the state of the three outputs at startup and when the chain reaches
   height 55000, and each spend of one of them once the block that spends it
   is in its active chain:
