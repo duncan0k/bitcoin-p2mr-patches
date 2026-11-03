@@ -20,9 +20,9 @@ stops at the first block with a rescue spend, from height 51000 on.
    closing it stops the node.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, block 55000 where M4-T applies and its three lattice
-tripwires, and has your node judge a raw transaction you paste into it, which is never
-broadcast. All times are UTC.
+applies and the two tripwires, and block 55000 where M4-T applies and its three lattice
+tripwires. It can also have your node judge a raw transaction you paste in; the
+transaction is never broadcast. All times are UTC.
 
 To remove everything: close the console window, wait a few seconds, then delete this folder
 and the folder %LOCALAPPDATA%\Ark0Witness, where the node keeps its data.

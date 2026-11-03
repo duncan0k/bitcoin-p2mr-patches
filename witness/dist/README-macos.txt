@@ -22,9 +22,9 @@ For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
    closing it stops the node. Terminal asks first; click Terminate.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, block 55000 where M4-T applies and its three lattice
-tripwires, and has your node judge a raw transaction you paste into it, which is never
-broadcast. All times are UTC.
+applies and the two tripwires, and block 55000 where M4-T applies and its three lattice
+tripwires. It can also have your node judge a raw transaction you paste in; the
+transaction is never broadcast. All times are UTC.
 
 The node needs no approval of its own: the witness checks bitcoind against the SHA-256
 below and runs a copy of it that it keeps in its data folder.

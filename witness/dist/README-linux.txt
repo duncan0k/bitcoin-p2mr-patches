@@ -22,9 +22,9 @@ aarch64 download for 64-bit ARM, such as a Raspberry Pi with the 64-bit system.
    open: closing it, or pressing Ctrl+C, stops the node.
 
 The page shows how far your node has synced, whether it is on Ark-0, block 30000 where M3
-applies and the two tripwires, block 55000 where M4-T applies and its three lattice
-tripwires, and has your node judge a raw transaction you paste into it, which is never
-broadcast. All times are UTC.
+applies and the two tripwires, and block 55000 where M4-T applies and its three lattice
+tripwires. It can also have your node judge a raw transaction you paste in; the
+transaction is never broadcast. All times are UTC.
 
 The page answers on this computer only. To see it from another computer, forward the same
 port number over SSH. For example, if the program printed http://127.0.0.1:41234/..., run
