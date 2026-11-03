@@ -5,7 +5,7 @@
 
 Platforms: windows (zip), macos (universal binaries, zip), linux-x86_64 and linux-aarch64 (tar.gz).
 The witness must be built with the SHA-256 of the supplied node (build.sh). <licenses> is a folder of the
-node's licenses: COPYING, LICENSE-mldsa-native and LICENSE-slhdsa-c as the M4-R release has them,
+node's licenses: COPYING, LICENSE-mldsa-native and LICENSE-slhdsa-c as the M4-T/M4-B release has them,
 LICENSE-rust for the Rust code compiled into that platform's build, and COPYRIGHT-rust-library.html as the
 Rust toolchain ships it. Each platform has its own README template.
 File names, order, modes and timestamps are fixed. Windows text files get CRLF line ends, zip attributes

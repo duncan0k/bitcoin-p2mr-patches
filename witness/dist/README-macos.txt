@@ -3,8 +3,10 @@ Ark0Witness {version} for macOS
 Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
 things out; it may be reset at any time.
 
-This version's node follows Ark-0 past height 51000, where milestone M4-R opens a rescue
-lane; the node of version 0.2.0 and earlier stops at the first block that uses it.
+This version's node checks the rules that apply from height 55000, milestones M4-T and M4-B:
+P2MR leaves of version 0xe2 and the SLH-DSA signature on every block. The node of version
+0.3.0 follows Ark-0 past that height without checking them; the node of 0.2.0 and earlier
+stops at the first block with a rescue spend, from height 51000 on.
 
 For macOS 14 (Sonoma) or later, on Apple silicon and Intel Macs alike.
 
@@ -33,9 +35,9 @@ keeps its data (in the Finder, choose Go > Go to Folder and paste that path).
 Files
   Ark0Witness               the witness program: witness/ in
                             https://github.com/duncan0k/bitcoin-p2mr-patches
-  bitcoind                  the Ark-0 node, milestone M4-R: Bitcoin Core v31.1 with the patch
-                            sets of that repository (tag ark0-node-m4r), for macOS 14 and
-                            later
+  bitcoind                  the Ark-0 node, milestones M4-T and M4-B: Bitcoin Core v31.1 with
+                            the patch sets of that repository (tag ark0-node-m4tb), for
+                            macOS 14 and later
   COPYING.txt               Bitcoin Core's license (MIT)
   LICENSE-mldsa-native.txt  license of the ML-DSA-44 verifier in bitcoind
                             (Apache-2.0 OR ISC OR MIT)

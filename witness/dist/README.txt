@@ -3,8 +3,10 @@ Ark0Witness {version} for Windows
 Watch Ark-0 and its M3 tripwires with a node of your own. Ark-0 is a test network for trying
 things out; it may be reset at any time.
 
-This version's node follows Ark-0 past height 51000, where milestone M4-R opens a rescue
-lane; the node of version 0.2.0 and earlier stops at the first block that uses it.
+This version's node checks the rules that apply from height 55000, milestones M4-T and M4-B:
+P2MR leaves of version 0xe2 and the SLH-DSA signature on every block. The node of version
+0.3.0 follows Ark-0 past that height without checking them; the node of 0.2.0 and earlier
+stops at the first block with a rescue spend, from height 51000 on.
 
 1. Unzip the whole download into a folder on the computer's own drive (right-click,
    Extract All), then double-click Ark0Witness.exe in that folder. From a FAT32 or exFAT
@@ -27,9 +29,9 @@ and the folder %LOCALAPPDATA%\Ark0Witness, where the node keeps its data.
 Files
   Ark0Witness.exe           the witness program: witness/ in
                             https://github.com/duncan0k/bitcoin-p2mr-patches
-  bitcoind.exe              the Ark-0 node, milestone M4-R: Bitcoin Core v31.1 with the patch
-                            sets of that repository (tag ark0-node-m4r), for 64-bit Windows
-                            10 and 11
+  bitcoind.exe              the Ark-0 node, milestones M4-T and M4-B: Bitcoin Core v31.1 with
+                            the patch sets of that repository (tag ark0-node-m4tb), for
+                            64-bit Windows 10 and 11
   COPYING.txt               Bitcoin Core's license (MIT)
   LICENSE-mldsa-native.txt  license of the ML-DSA-44 verifier in bitcoind.exe
                             (Apache-2.0 OR ISC OR MIT)
