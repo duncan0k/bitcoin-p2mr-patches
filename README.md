@@ -973,7 +973,7 @@ functional suite, the extended tests and fuzzing were not run. 0113 was exported
 statements corrected, on how `H4T` was chosen (its message, `doc/p2mr-lattice-tripwire.md` and a comment in
 `src/kernel/chainparams.h`); its code and tests are the ones these runs passed.
 
-M4-T and M4-B were released on [RELEASE DATE], with patch 113, as the release `ark0-node-m4tb` of this
+M4-T and M4-B were released on 2026-11-03, with patch 113, as the release `ark0-node-m4tb` of this
 repository ("Prebuilt node", below). Verification record of that build (2026-11-02, the release pipeline of
 `contrib/k3s`: Ubuntu 24.04 / g++ 13.3 / Rust 1.97.0 / 8 CPUs, the files as published here): from a fresh
 clone of v31.1 with the 112 patches of the ten sets, `test_bitcoin` passed 814 of 820 test cases and one
@@ -999,13 +999,13 @@ Their SHA-256:
 
 ## Prebuilt node
 
-The release `ark0-node-m4tb` of this repository carries the build with all ten patch sets, to which
-the Ark-0 nodes move on [ROLL DATE]: the five binaries for x86_64 Linux in an archive,
+The release `ark0-node-m4tb` of this repository carries the build with all ten patch sets, to which the
+Ark-0 nodes move after height 51000: the five binaries for x86_64 Linux in an archive,
 `ark0-node-m4tb-x86_64-linux-gnu.tar.gz`, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node:m4tb`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
-manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key
-in `ark0/release-signing-key.asc`. `ark0/JOIN.md`, section 1, says how to check both and what the
-binaries need from the system.
+manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key in
+`ark0/release-signing-key.asc`. `ark0/JOIN.md`, section 1, says how to check both and what the binaries need
+from the system.
 
 The release before, `ark0-node-m4r`, carries the build with the first eight patch sets, which the Ark-0
 nodes run until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It was

@@ -2,29 +2,28 @@
 
 Ark-0 is an experimental **custom signet** whose nodes run the BIP-360
 Pay-to-Merkle-Root (P2MR) spending rules, enforced in block validation, on
-Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Every
-node the operator runs also carries the one patch in `patches-spacing/` (the
-first two since 2026-09-22), which sets how the chain retargets from height
-8064 on; see "Parameters" below. Since 2026-09-25 they also carry the wallet
-series in `patches-m05/` and the M1 series in `patches-m1/`, which adds one
-experimental rule from height 8600; see "Rule change at height 8600 (M1)".
-Since 2026-09-30 they also carry the M2 series in `patches-m2/`, which from
-height 20000 requires an ML-DSA-44 signature on every block; see "Rule change
-at height 20000 (M2)". Since 2026-10-12 they also carry the M3 series in
-`patches-m3/`, which from height 30000 runs P2MR leaves of version `0xe0`,
-whose elliptic curve signature checks stop working once one of two
-designated outputs is spent; see "Rule change at height 30000 (M3)". Since
-2026-10-19 they also carry the M4-S series in `patches-m4/`, which from
-height 32000 adds an SLH-DSA signature check to P2MR leaves; see "Rule
-change at height 32000 (M4-S)". Since 2026-10-30 they also carry the M4-R
-series in `patches-m4r/`, which from height 51000 opens a rescue lane in P2MR
-leaves of version `0xe0`, a hard fork; see "Rule change at height 51000
-(M4-R)". On [ROLL DATE] they move to a build that also carries the M4-T
-series in `patches-m4t/` and the M4-B series in `patches-m4b/`, which from
-height 55000 run P2MR leaves of version `0xe2`, whose ML-DSA-44 signature
-checks stop working once one of three designated outputs is spent, and
-require an SLH-DSA signature on every block; see "Rule change at height
-55000 (M4-T and M4-B)".
+Bitcoin Core v31.1 patched with the ten-commit series in `patches/`. Every node
+the operator runs also carries the one patch in `patches-spacing/` (the first
+two since 2026-09-22), which sets how the chain retargets from height 8064 on;
+see "Parameters" below. Since 2026-09-25 they also carry the wallet series in
+`patches-m05/` and the M1 series in `patches-m1/`, which adds one experimental
+rule from height 8600; see "Rule change at height 8600 (M1)". Since 2026-09-30
+they also carry the M2 series in `patches-m2/`, which from height 20000
+requires an ML-DSA-44 signature on every block; see "Rule change at height
+20000 (M2)". Since 2026-10-12 they also carry the M3 series in `patches-m3/`,
+which from height 30000 runs P2MR leaves of version `0xe0`, whose elliptic
+curve signature checks stop working once one of two designated outputs is
+spent; see "Rule change at height 30000 (M3)". Since 2026-10-19 they also carry
+the M4-S series in `patches-m4/`, which from height 32000 adds an SLH-DSA
+signature check to P2MR leaves; see "Rule change at height 32000 (M4-S)". Since
+2026-10-30 they also carry the M4-R series in `patches-m4r/`, which from height
+51000 opens a rescue lane in P2MR leaves of version `0xe0`, a hard fork; see
+"Rule change at height 51000 (M4-R)". After height 51000, and before height
+55000, they move to a build that also carries the M4-T series in `patches-m4t/`
+and the M4-B series in `patches-m4b/`, which from height 55000 run P2MR leaves
+of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of
+three designated outputs is spent, and require an SLH-DSA signature on every
+block; see "Rule change at height 55000 (M4-T and M4-B)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -757,14 +756,14 @@ From height 55000 Ark-0 has two more experimental rules, called milestones M4-T
 and M4-B here. They start at the same block, and both are soft forks. The nodes
 built with `patches-m4t/` and `patches-m4b/` enforce them, and
 `doc/p2mr-lattice-tripwire.md` and `doc/signet-slhblock.md` in the patched tree
-specify them. The height was announced on [RELEASE DATE], with the release of
-the build, at least seven days ahead. From height [H] at [HH:MM] UTC that day,
-at the rate of the two weeks before, about [N] blocks a day, the chain reaches
-height 55000 around [DATE TIME] UTC. It cannot do so before [EARLIEST DATE
-TIME] UTC, even if blocks came every 90 seconds, the producer's configured
+specify them. The height was announced on 2026-11-03, with the release of the
+build, at least seven days ahead. From height 40383 at 04:33 UTC that day, at
+the rate of the two weeks before, about 896 blocks a day, the chain reaches
+height 55000 around 2026-11-19 12:00 UTC. It cannot do so before 2026-11-18
+09:00 UTC, even if blocks came every 90 seconds, the producer's configured
 pause. The operator's nodes and block producer stay on the M4-R build until the
 chain is past height 51000, where M4-R's rescue lane opens, and move to the new
-build on [ROLL DATE].
+build after that; this section will give the date.
 
 ### M4-T: leaf version `0xe2` and the lattice tripwires
 
@@ -863,10 +862,10 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   curve key, the ML-DSA-44 block signature and the SLH-DSA block signature
   all hold. The operator holds all three keys.
 - **Below height 55000, M4-B rejects no block.** The operator's block producer
-  will put the SLH output in every block from height [SLH FROM] on, at least
-  1,920 blocks before height 55000 (48 hours at its fastest rate of 960 blocks
-  a day). With `-debug=validation`, a node logs for each block below height
-  55000 that it validates, the genesis block aside, whether its SLH-DSA
+  will put the SLH output in every block from a height of at most 53080 on, at
+  least 1,920 blocks before height 55000 (48 hours at its fastest rate of 960
+  blocks a day). With `-debug=validation`, a node logs for each block below
+  height 55000 that it validates, the genesis block aside, whether its SLH-DSA
   signature is valid, invalid, or absent or not in the required form. So the
   signatures can be checked on the chain before they are enforced.
 - **Cost:** 7,876 bytes more in every block (31,504 weight units), which a
@@ -905,7 +904,8 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   past height 39971 reports all three as `missing`; that is expected, and
   matters only from height 55000.
 - **Wallets.** Bitcoin Core's wallet does not make or sign leaves of version
-  `0xe2`. [PQ2 WALLET: WHEN AND WHICH]
+  `0xe2`, and no wallet offers pq2 outputs yet; this section will say when one
+  does.
 - **They are soft forks.** A node without these series (an M4-R build) accepts
   every block a node with them accepts and keeps following the chain, but does
   not run leaves of version `0xe2`, does not check the SLH-DSA block signature,

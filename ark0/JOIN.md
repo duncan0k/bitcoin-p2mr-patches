@@ -17,7 +17,7 @@ Before you start:
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest ones, milestones M4-T
   and M4-B, apply from height 55000 ("Rule change at height 55000 (M4-T and M4-B)" in `NETWORK.md`),
-  expected around [DATE TIME] UTC and not before [EARLIEST DATE TIME] UTC. From there nodes run P2MR
+  expected around 2026-11-19 12:00 UTC and not before 2026-11-18 09:00 UTC. From there nodes run P2MR
   leaves of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of three designated
   outputs is spent, and require an SLH-DSA signature on every block. Both are soft forks: a node built
   with `patches-m4r/` but without `patches-m4t/` and `patches-m4b/` keeps following the chain but checks
@@ -40,17 +40,16 @@ Before you start:
 
 ## 1. Get the node
 
-A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects
-the block at height 8064, because from that height Ark-0 retargets its difficulty against 90
-seconds per block (see "Parameters" in `NETWORK.md`). The node this guide describes is Bitcoin Core
-v31.1 with ten patch sets: the consensus series in `patches/`, the wallet series in `patches-m05/`
-(section 4 uses it), the retarget patch in `patches-spacing/`, the M1 series in `patches-m1/`, the
-M2 series in `patches-m2/`, the M3 series in `patches-m3/`, the M4-S series in `patches-m4/`, the
-M4-R series in `patches-m4r/`, the M4-T series in `patches-m4t/` and the M4-B series in
-`patches-m4b/`, applied in that order. Since 2026-10-30 the operator's nodes have run the first
-eight; they move to all ten on [ROLL DATE], after height 51000. You can take the build with all ten
-prebuilt, as binaries or as a container image, or build it yourself; the rest of this guide works
-the same with either.
+A stock Bitcoin Core cannot follow Ark-0. It does not enforce the P2MR rules, and it rejects the block at
+height 8064, because from that height Ark-0 retargets its difficulty against 90 seconds per block (see
+"Parameters" in `NETWORK.md`). The node this guide describes is Bitcoin Core v31.1 with ten patch sets:
+the consensus series in `patches/`, the wallet series in `patches-m05/` (section 4 uses it), the retarget
+patch in `patches-spacing/`, the M1 series in `patches-m1/`, the M2 series in `patches-m2/`, the M3
+series in `patches-m3/`, the M4-S series in `patches-m4/`, the M4-R series in `patches-m4r/`, the M4-T
+series in `patches-m4t/` and the M4-B series in `patches-m4b/`, applied in that order. Since 2026-10-30
+the operator's nodes have run the first eight; they move to all ten after height 51000. You can take the
+build with all ten prebuilt, as binaries or as a container image, or build it yourself; the rest of this
+guide works the same with either.
 
 On Windows, macOS and Linux there is a way without commands: the witness program of the release
 [`ark0-witness-0.3.0`](https://github.com/duncan0k/bitcoin-p2mr-patches/releases/tag/ark0-witness-0.3.0)
@@ -337,9 +336,10 @@ not build them yet. Pay nothing to such leaves before height 32000: until then t
 `OP_SUCCESS241`, and anyone who knows the leaf and its path in the tree can spend the output
 through it.
 
-Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T). [PQ2 WALLET: WHEN AND WHICH] Do
-not pay to such leaves before height 55000: until then they are not executed, so anyone who knows a leaf
-and its path in the tree can spend the output through it.
+Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T), and no wallet offers pq2 outputs
+yet (`NETWORK.md`, "Rule change at height 55000 (M4-T and M4-B)", says when one does). Do not pay to such
+leaves before height 55000: until then they are not executed, so anyone who knows a leaf and its path in
+the tree can spend the output through it.
 
 Nor does the node's wallet make rescue spends (M4-R). The proofs are made off the node, with the
 prover of [ark0-rescue](https://github.com/duncan0k/ark0-rescue), and a rescue gives away the key it
