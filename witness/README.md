@@ -9,8 +9,9 @@ terminal) and it:
 - opens a page in your browser, served on 127.0.0.1 only, that shows what that node reports: how far it has
   synced, whether it is on Ark-0 (the hash of block 1264), block 30000 where M3 applies, the two tripwires,
   and whether elliptic curve signatures in leaves of version `0xe0` are still accepted; then block 55000
-  where M4-T applies, its three lattice tripwires, and whether ML-DSA-44 signatures in leaves of version
-  `0xe2` are still accepted. A node that does not report the lattice tripwires gets no M4-T part;
+  where M4-T applies, its three lattice tripwires and, once the next block is under M4-T, whether ML-DSA-44
+  signatures in leaves of version `0xe2` are still accepted. A node that does not report the lattice
+  tripwires gets no M4-T part;
 - lets you paste a raw transaction for the node to judge with `testmempoolaccept`. It is never broadcast;
 - gives a short witness report to share. It holds no IP address and no folder name.
 

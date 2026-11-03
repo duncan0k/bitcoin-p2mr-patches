@@ -259,7 +259,10 @@ func witnessReport(s status, last *checkResult) string {
 		for _, w := range s.LatticeTripwires {
 			fmt.Fprintf(&b, "Lattice tripwire %s %s: %s\n", w.Label, w.Outpoint, w.State)
 		}
-		fmt.Fprintf(&b, "mldsa_disabled_next_block: %t\n", s.MLDSADisabledNextBlock)
+		// The flag speaks of the next block. Before a next block under M4-T, leaves of version 0xe2 are not run at all.
+		if s.TripwireTip+1 >= s.H4T {
+			fmt.Fprintf(&b, "mldsa_disabled_next_block: %t\n", s.MLDSADisabledNextBlock)
+		}
 	case latticeUnknown:
 		b.WriteString("Lattice tripwires (M4-T): unknown, the node did not answer just now\n")
 	}

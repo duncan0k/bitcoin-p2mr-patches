@@ -174,7 +174,10 @@
       setText('m4t', t('m3_before', { n: number(Math.max(0, h4t - Math.max(s.blocks, s.tripwireTip))) }));
     }
     fillTripwires($('ltw'), known ? s.latticeTripwires : []);
-    if (known) {
+    // The flag speaks of the next block; before a next block under M4-T, leaves of version 0xe2 are not run at all.
+    const inForce = known && s.tripwireTip + 1 >= h4t;
+    $('mldsa-line').hidden = !inForce;
+    if (inForce) {
       setText('mldsa', s.mldsaDisabledNextBlock ? t('ec_off') : t('ec_on'));
       setText('mldsa-raw', '(mldsa_disabled_next_block: ' + String(Boolean(s.mldsaDisabledNextBlock)) + ')');
     } else {

@@ -1091,14 +1091,24 @@ func TestLatticeStatusAndReport(t *testing.T) {
 	for _, want := range []string{"Block 55000 (M4-T): not reached yet",
 		"Lattice tripwire NUMS ML-DSA-44 " + latticeTxid + ":0: unspent",
 		"Lattice tripwire destroyed key " + latticeTxid + ":1: unspent",
-		"Lattice tripwire drill key " + latticeTxid + ":2: unspent", "mldsa_disabled_next_block: false"} {
+		"Lattice tripwire drill key " + latticeTxid + ":2: unspent"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("report lacks %q:\n%s", want, r)
 		}
 	}
-	// The M4-T lines come after the M3 lines.
-	if strings.Index(r, "Block 55000") < strings.Index(r, "ec_disabled_next_block") {
-		t.Errorf("M4-T before M3:\n%s", r)
+	// The M4-T lines come after the M3 lines. The flag speaks of the next block: not before one under M4-T.
+	if strings.Index(r, "Block 55000") < strings.Index(r, "ec_disabled_next_block") || strings.Contains(r, "mldsa") {
+		t.Errorf("M4-T before M3, or the flag below 54999:\n%s", r)
+	}
+
+	// At 54999 the next block is under M4-T: the flag is shown.
+	h := newFakeNode(t)
+	h.ark0(54999, "missing", true)
+	h.withLattice(latticeObject("unspent", false))
+	s = (&collector{node: h.node(), dataDir: h.dataDir}).collect()
+	if r = witnessReport(s, nil); s.ReachedH4T || !strings.Contains(r, "Block 55000 (M4-T): not reached yet\n") ||
+		!strings.Contains(r, "mldsa_disabled_next_block: false\n") {
+		t.Errorf("lattice at 54999: %+v\n%s", s, r)
 	}
 
 	// Past 55000, after the drill: the drill key missing and the flag set. The tip of gettripwireinfo counts.
