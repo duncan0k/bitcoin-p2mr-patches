@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Cross-compile the Ark-0 node for Windows (x86_64-w64-mingw32), as root in a fresh ubuntu:24.04 container
-# or machine: Bitcoin Core v31.1 (9be056a) with the eight patch sets up to the M4-R series (patches-m4r)
+# or machine: Bitcoin Core v31.1 (9be056a) with the ten patch sets up to the M4-B series (patches-m4b)
 # applied as JOIN.md applies them, built with Core's own depends system and its CMake toolchain file
 # (doc/build-windows.md), and the rescue verifier of patches-m4r with the Rust toolchain that series pins.
-# The patch repository is at the published tag ark0-node-m4r. No GUI, wallet, ZMQ, IPC or USDT: the
+# The patch repository is at the published tag ark0-node-m4tb. No GUI, wallet, ZMQ, IPC or USDT: the
 # witness program only talks RPC.
 #
 # PHASE=full  also runs test_bitcoin.exe and an end-to-end sync of bitcoind.exe under Wine.
@@ -23,11 +23,11 @@ SRC=$W/src
 CORE_TAG=v31.1
 CORE_COMMIT=9be056a8a72b624dae9623b2f7bded92c2a21c91
 PATCH_REPO=https://github.com/duncan0k/bitcoin-p2mr-patches.git
-PATCH_TAG=ark0-node-m4r
-PATCH_COMMIT=bbef27e63bf8322f158800fe735d691da5112b2e
-PATCH_SETS=(patches patches-m05 patches-spacing patches-m1 patches-m2 patches-m3 patches-m4 patches-m4r)
-# The tree the patch sets give on top of CORE_COMMIT: the reviewed series (0001-0094).
-SERIES_TREE=923a66ca465f3ec9ae9d9d8e3bf4c1af9f660f69
+PATCH_TAG=ark0-node-m4tb
+PATCH_COMMIT=fd159ed2dec6f2b6df88f6706980c8ded48911aa
+PATCH_SETS=(patches patches-m05 patches-spacing patches-m1 patches-m2 patches-m3 patches-m4 patches-m4r patches-m4t patches-m4b)
+# The tree the patch sets give on top of CORE_COMMIT: the reviewed series (0001-0094 and 0096-0113).
+SERIES_TREE=901a83bcdb3db448d2a63a2aa7fe92f5b53bbf67
 HOST_TRIPLET=x86_64-w64-mingw32
 RUST_VERSION=1.97.0
 RUST_TARGET=x86_64-pc-windows-gnu
