@@ -836,7 +836,10 @@ library alone.
   of pq2 outputs keep working; ML-DSA-44 in leaf versions `0xc0` and `0xe0` and
   the block signatures are not affected. A leaf of version `0xe2` whose only
   path is an ML-DSA-44 check can no longer be spent after that, and no rescue
-  covers it: the rescue lane covers elliptic curve checks only.
+  covers it: the rescue lane covers elliptic curve checks only. The drill is
+  scheduled for 2026-11-27 08:00 UTC (announced on 2026-11-04). If no wallet
+  offers pq2 outputs by 2026-11-20 08:00 UTC, it moves to the first 08:00 UTC
+  at least seven days after one does, and this section will give that time.
 
 ### M4-B: an SLH-DSA block signature
 
