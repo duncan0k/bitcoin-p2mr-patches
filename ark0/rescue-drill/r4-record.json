@@ -1,0 +1,573 @@
+{
+ "step": "record",
+ "passed": true,
+ "recorded": "2026-11-16T19:16:57Z",
+ "network": {
+  "name": "ark0",
+  "fingerprint": "ark0"
+ },
+ "profile": {
+  "challenge": "5121026fc5d8e79a9fbc8bc3dea07d82641d16717ce0b000c13c512d8e8c1788c6e5da51ae",
+  "xonly": "907f297a12351f4a15126bd44dfc810baae2d7485871415bf5066419de480dd0",
+  "statement": {
+   "sid": "01",
+   "k": "ark0-wallet v1 schnorr",
+   "suffix": 0,
+   "y": "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e"
+  },
+  "rescueHeight": 51000,
+  "outpoints": [
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 0,
+    "sats": 100000
+   },
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 1,
+    "sats": 100000
+   }
+  ]
+ },
+ "planFingerprint": "b9820453622b62e5a69ba5a7431af0b088608d43b786a3bb7ee8aa2114829c1b",
+ "plan": {
+  "inputs": [
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 0,
+    "sats": 100000,
+    "scriptPubKey": "52203feeddd6b03d4b8af084fb96248a6f15799dc8665b45e3b3177687c24dc3bfc0",
+    "outpoint": {
+     "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+     "vout": 0
+    },
+    "leafScript": "20907f297a12351f4a15126bd44dfc810baae2d7485871415bf5066419de480dd0ac",
+    "controlBlock": "e152e908c96e49e4bdd4a9a5cd975173f05101b0d874a2afa662ca1474523c4400",
+    "m": "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d"
+   },
+   {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 1,
+    "sats": 100000,
+    "scriptPubKey": "52203feeddd6b03d4b8af084fb96248a6f15799dc8665b45e3b3177687c24dc3bfc0",
+    "outpoint": {
+     "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+     "vout": 1
+    },
+    "leafScript": "20907f297a12351f4a15126bd44dfc810baae2d7485871415bf5066419de480dd0ac",
+    "controlBlock": "e152e908c96e49e4bdd4a9a5cd975173f05101b0d874a2afa662ca1474523c4400",
+    "m": "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d"
+   }
+  ],
+  "output": {
+   "address": "tb1ztx4crn374cl2r6u9yya4tk3634vxk8aet2h5ul3uf04du3up98ksvf4dya",
+   "scriptPubKey": "522059ab81ce3eae3ea1eb85213b55da3a8d586b1fb95aaf4e7e3c4beade478129ed",
+   "sats": 193468
+  },
+  "feeRateSatPerKvB": 100,
+  "fee": 6532,
+  "vsize": 65313,
+  "weight": 261250
+ },
+ "locktime": 51000,
+ "txid": "b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4",
+ "wtxid": "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91",
+ "block": {
+  "hash": "000000e57ab651bcf4d83328fbfa4011a4b37c7d57efc2cd5a21a885daff5eb0",
+  "height": 52805
+ },
+ "confirmations": {
+  "node A": 23,
+  "node B": 23,
+  "public node": 23,
+  "relay": 23
+ },
+ "statement": {
+  "sid": "01",
+  "k": "ark0-wallet v1 schnorr",
+  "suffix": 0,
+  "y": "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e"
+ },
+ "network_id": "afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38e",
+ "proofs": [
+  {
+   "inputIndex": 0,
+   "outpoint": {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 0
+   },
+   "size": 130218,
+   "sha256": "36a1d48c8ef08a1be580e3ae3af2f23bee9ff0f855d5201751b911638a188221"
+  },
+  {
+   "inputIndex": 1,
+   "outpoint": {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 1
+   },
+   "size": 130218,
+   "sha256": "607eea218088cd69d2ca05e2dd5b4172f62a9478c5d1db1f92d1966767968faa"
+  }
+ ],
+ "prover": {
+  "sha256": "4828a2054e7f4f71fb262970c343b6ac2fe98b33adbea7fba2601242d5f8a546"
+ },
+ "verifier": {
+  "sha256": "d67ceec30efb33f2fcbdedaef1a2f5d09c642a7753205815197ee9173a1663f8"
+ },
+ "rescue_commit": "71b34baec9f3655733175881a4358284ffa18fe2",
+ "validators": [
+  {
+   "inputIndex": 0,
+   "outpoint": {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 0
+   },
+   "sha256": "36a1d48c8ef08a1be580e3ae3af2f23bee9ff0f855d5201751b911638a188221",
+   "validators": {
+    "rust": {
+     "cwd": "<ark0-rescue>",
+     "positive": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 0,
+      "stdout": "valid",
+      "stderr": ""
+     },
+     "negative": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     },
+     "cross_1": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     }
+    },
+    "python": {
+     "cwd": "<ark0-rescue>",
+     "positive": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 0,
+      "stdout": "valid",
+      "stderr": ""
+     },
+     "negative": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     },
+     "cross_1": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-0.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     }
+    },
+    "go": {
+     "inputIndex": 0,
+     "outpoint": {
+      "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+      "vout": 0
+     },
+     "sha256": "36a1d48c8ef08a1be580e3ae3af2f23bee9ff0f855d5201751b911638a188221",
+     "positive": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "/work/r4-proof-0.bin"
+      ],
+      "exit": 0,
+      "stdout": "valid"
+     },
+     "negative": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "/work/r4-proof-0.bin"
+      ],
+      "exit": 1,
+      "stdout": "invalid"
+     },
+     "cross_1": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "/work/r4-proof-0.bin"
+      ],
+      "exit": 1,
+      "stdout": "invalid"
+     }
+    }
+   }
+  },
+  {
+   "inputIndex": 1,
+   "outpoint": {
+    "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+    "vout": 1
+   },
+   "sha256": "607eea218088cd69d2ca05e2dd5b4172f62a9478c5d1db1f92d1966767968faa",
+   "validators": {
+    "rust": {
+     "cwd": "<ark0-rescue>",
+     "positive": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 0,
+      "stdout": "valid",
+      "stderr": ""
+     },
+     "negative": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     },
+     "cross_0": {
+      "command": [
+       "<voleith-verify.exe>",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     }
+    },
+    "python": {
+     "cwd": "<ark0-rescue>",
+     "positive": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 0,
+      "stdout": "valid",
+      "stderr": ""
+     },
+     "negative": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     },
+     "cross_0": {
+      "command": [
+       "<python>",
+       "-I",
+       "<ark0-rescue>/python/tools/verify_cli.py",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "<r4-proof-1.bin>"
+      ],
+      "exit": 1,
+      "stdout": "invalid",
+      "stderr": ""
+     }
+    },
+    "go": {
+     "inputIndex": 1,
+     "outpoint": {
+      "txid": "12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753",
+      "vout": 1
+     },
+     "sha256": "607eea218088cd69d2ca05e2dd5b4172f62a9478c5d1db1f92d1966767968faa",
+     "positive": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "/work/r4-proof-1.bin"
+      ],
+      "exit": 0,
+      "stdout": "valid"
+     },
+     "negative": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "54ea525ec4c2acd627e975e24ab3a029090eb64158d1e6a23b0425cfeba04ef8afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f62",
+       "--proof",
+       "/work/r4-proof-1.bin"
+      ],
+      "exit": 1,
+      "stdout": "invalid"
+     },
+     "cross_0": {
+      "command": [
+       "go",
+       "-C",
+       "go",
+       "run",
+       "./cmd/voleith-verify",
+       "--k",
+       "ark0-wallet v1 schnorr",
+       "--suffix",
+       "0",
+       "--y-hex",
+       "52955b5022ed72de5b5fb8b63b8d2a3627ae71bdfb764acc209e0fca7f430a7e",
+       "--msg-hex",
+       "ce78589dea32e1323ccace1fecc437df2c8af266e34a0d6ad3fc539e6f321a91afd1fcbb77d445f14e06eb1a7dff52807c71d7765c311e6181e698734337b38eb506cfd491d80bac701c7ae6c6722887b89ea90963432bd87ce7092b33a12f9d",
+       "--proof",
+       "/work/r4-proof-1.bin"
+      ],
+      "exit": 1,
+      "stdout": "invalid"
+     }
+    }
+   }
+  }
+ ],
+ "testmempoolaccept": {
+  "node A": {
+   "txid": "b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4",
+   "wtxid": "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91",
+   "allowed": true,
+   "fees": {
+    "base": "0.00006532",
+    "effective-feerate": "0.00000100",
+    "effective-includes": [
+     "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91"
+    ]
+   }
+  },
+  "node B": {
+   "txid": "b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4",
+   "wtxid": "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91",
+   "allowed": true,
+   "fees": {
+    "base": "0.00006532",
+    "effective-feerate": "0.00000100",
+    "effective-includes": [
+     "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91"
+    ]
+   }
+  },
+  "public node": {
+   "txid": "b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4",
+   "wtxid": "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91",
+   "allowed": true,
+   "fees": {
+    "base": "0.00006532",
+    "effective-feerate": "0.00000100",
+    "effective-includes": [
+     "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91"
+    ]
+   }
+  },
+  "relay": {
+   "txid": "b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4",
+   "wtxid": "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91",
+   "allowed": true,
+   "fees": {
+    "base": "0.00006532",
+    "effective-feerate": "0.00000100",
+    "effective-includes": [
+     "233ed1345642d659599675e84edee4adb4dec4229460dd3f04346c24f1529e91"
+    ]
+   }
+  }
+ }
+}

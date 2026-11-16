@@ -624,10 +624,8 @@ zero knowledge that they know the seed the key was derived from. The nodes
 built with `patches-m4r/` enforce it, the operator's among them, and
 `doc/p2mr-rescue.md` in the patched tree specifies it. The height was
 announced on 2026-10-30, with the release of the build, about two weeks
-ahead. Counted from height 37096, at 13:22 UTC that day, at about 890 blocks
-a day, the rate of the two weeks before, the chain reaches height 51000
-around 2026-11-15 05:00 UTC. It cannot do so before 2026-11-14 00:00 UTC,
-even if blocks came every 90 seconds, the producer's configured pause. A
+ahead. The chain reached height 51000 on 2026-11-14; block 51000 has the
+header time 19:21:48 UTC ("What the chain shows" below). A
 first build of the series, which set the lane's height at 63000, four weeks
 ahead, was published on 2026-10-30 and replaced the same day, before it was
 announced; a node that runs it stops at the first rescue spend from height
@@ -652,11 +650,12 @@ cannot be rescued.
   OP_CHECKSIG` has no valid witness under the earlier rules; the lane makes
   some valid. A node built with `patches-m3/` but without `patches-m4r/` (an
   M3 or M4-S build) refuses the first block that contains a rescue spend, marks
-  it invalid and stops following the chain there. Once upgraded, it continues
+  it invalid and stops following the chain there: block 52805 ("What the
+  chain shows" below). Once upgraded, it continues
   after `bitcoin-cli reconsiderblock <hash of that block>`. A build without
   `patches-m3/` does not run these leaves; it takes the block and keeps
   following, checking less. Every M3 or M4-S node that is to follow Ark-0 past
-  that block needs this build; upgrade before height 51000.
+  that block needs this build.
 - **Below height 51000, and outside such leaves, nothing changes.** Below the
   height a token is a signature like any other, which can never be valid, so
   a node with this build checks every block below it as an M4-S node does, and
@@ -713,19 +712,20 @@ cannot be rescued.
   one transaction; more than three need a transaction that the block
   producer includes directly. It never reuses the key, its secret key or the
   seed on another network or protocol. And it pays nothing more to the key.
-- **The rescue drill.** The operator holds two outputs of 100,000 sats, each
+- **The rescue drill.** The operator held two outputs of 100,000 sats, each
   with two leaves of version `0xe0`, `<R> OP_CHECKSIG` and `OP_RETURN`,
   created for it at height 30068
   (`12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0` and
   `:1`). The tripwire drill in block 36897 froze them. On 2026-10-30 the
   operator proved off the chain, for a public message, that it knows the
-  seed of `R`; `rescue-drill/README.md` has the proof, the operator's record
-  of it and how to check it. The proof's statement includes `y`, the secret
-  key of `R`, so `y` is now public: until the rescue, the two outputs are
-  safe only while the elliptic curve checks in their leaves stay disabled,
-  that is, while the block producer signs no branch that leaves out the
-  tripwire spend. After height 51000 the operator will rescue both in one
-  transaction, with a new proof.
+  seed of `R`. The proof's statement includes `y`, the secret key of `R`, so
+  `y` became public: until the rescue, the two outputs were safe only while
+  the elliptic curve checks in their leaves stayed disabled, that is, while
+  the block producer signed no branch that left out the tripwire spend. On
+  2026-11-16 the operator rescued both in one transaction, with a new proof
+  for each input, in block 52805 ("What the chain shows" below).
+  `rescue-drill/README.md` has the proofs, the operator's records of both
+  steps and how to check them.
 - **What a node logs and reports.** A node built with `patches-m4r/` logs
   this line when it starts:
 
@@ -749,6 +749,38 @@ cannot be rescued.
   height with the soft fork in `patches-m4r-killswitch/`, prepared and tested
   for that case; rescues already in the chain stay valid. The series is in
   `patches-m4r/` (`README.md`, "Experimental M4-R series").
+
+### What the chain shows
+
+Block 51000,
+`000000c9abd1d74d745881b5af553e98d1aac563add104476f0c0e1367853fb2`, has the
+header time 2026-11-14 19:21:48 UTC. It holds no rescue spend, and nodes log
+nothing when the chain reaches the height. On each of the five nodes the
+operator runs, `bitcoin-cli getdeploymentinfo` at block 50999 reports
+`p2mr_rescue` as active, and at block 50998 it does not: `active` is for the
+next block.
+
+The rescue drill's last step took place on 2026-11-16. It had been announced
+for 2026-11-15 08:00 UTC and was moved to 2026-11-16 18:00 UTC; the operator
+sent the transaction at 18:40:43 UTC.
+
+| Height | Block | What happened |
+|---|---|---|
+| 52805 | `000000e57ab651bcf4d83328fbfa4011a4b37c7d57efc2cd5a21a885daff5eb0` | Transaction `b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4` spends both drill outputs through the lane, with a proof in each input's annex, and pays 193,468 sats to an SLH1 address of a new seed; header time 18:41:49 UTC. |
+
+Each of the five nodes logged both rescues at 18:41:51 or 18:41:53 UTC, when
+the block joined its active chain; for the first input:
+
+```
+P2MR rescue of 12875980e1cd709e3bf930fce984089b580790683eed05d3d03112447f0f3753:0 by b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4 in block 000000e57ab651bcf4d83328fbfa4011a4b37c7d57efc2cd5a21a885daff5eb0 (height 52805): statement 01, key 907f297a12351f4a15126bd44dfc810baae2d7485871415bf5066419de480dd0
+```
+
+A node of the M4-S release, which the operator ran for the drill, refused the
+block: it held 52805 as an `invalid` chain tip and stayed at 52804, with
+`block-script-verify-flag-failed (Elliptic curve signature checks are
+disabled in this leaf)` in its log. `rescue-drill/README.md` has the
+proofs, the messages they are bound to, the operator's record and how to
+check them.
 
 ## Rule change at height 55000 (M4-T and M4-B)
 

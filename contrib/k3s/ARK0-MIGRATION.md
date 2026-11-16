@@ -3518,3 +3518,45 @@ that each public node gets every block straight from the cluster while the other
 Nothing about the blocks changed. To undo it, remove the two lines, render and apply as above, take the
 `connect=node2.ark0.si:38433` line out of the relay's configuration, and run
 `addnode node2.ark0.si:38433 remove` on the two cluster nodes and the relay.
+
+## Height 51000: the rescue lane opens (2026-11-14)
+
+From height 51000 a node built with `patches-m4r/` accepts rescue spends (`ark0/NETWORK.md` "Rule change
+at height 51000 (M4-R)"). The blocks around it, header times in UTC:
+
+| height | hash | header time | |
+|---|---|---|---|
+| 50999 | `00000335e3c8ae49ec4264520632cf85d446cd3a49a808b011e4dffc45d4b49b` | 19:20:13 | the last block below the rule |
+| 51000 | `000000c9abd1d74d745881b5af553e98d1aac563add104476f0c0e1367853fb2` | 19:21:48 | the first block under it |
+| 51006 | `00000191d12f225b4606244ff8ba8d739f66dc6db95583910d24b5eaed199317` | 19:31:16 | six blocks past it |
+
+A node logs nothing when the chain reaches the height; it logs the rescue lane's line at startup. Each of
+the five nodes the operator runs had logged that line at its last start before the height, and each
+reached 51000 at 19:21:50. On each node, `getdeploymentinfo` at block 50999 listed `p2mr_rescue` as
+active, and at block 50998 it did not, as `active` is for the next block. None had another chain tip near
+the height.
+
+### The rescue drill, step R4 (2026-11-16)
+
+The rescue was announced for 2026-11-15 08:00 UTC. The operator could not run it then and moved it to
+2026-11-16 18:00 UTC. The steps, in UTC on 2026-11-16:
+
+1. **The monitor.** At 17:37 the operator removed the job that had checked the two drill outputs every ten
+   minutes since step R3, so that the rescue would not raise its alert.
+2. **The scan.** Three scans with the producer running did not finish: in two, a connection to one of the
+   remote nodes stalled, and the operator's machine stopped the third. As in step R3, the operator then
+   stopped the producer's loop for the scan: from 18:27 to 18:35 for a scan that ran out of time, and
+   from 18:37:20 to 18:40:04 for one that went through. That scan read four of the five nodes; all four
+   were at height 52803, each held both outputs unspent, and no transaction in their mempools spent them
+   or paid to one of the five addresses of the drill seed.
+3. **The test.** At 18:40 `testmempoolaccept` on the same four nodes allowed the transaction.
+4. **The send.** At 18:40:43 the operator sent it to node A, which took it; node A's own check of the
+   blocks after the scan covered one block, 52804. Block 52805, header time 18:41:49, holds it, and the
+   five nodes logged the rescue at 18:41:51 or 18:41:53 (`ark0/NETWORK.md` "What the chain shows" under
+   M4-R). A node of the M4-S release that the operator ran for the drill, connected to node A only,
+   refused the block and stayed at 52804.
+5. **The record.** At 19:16:57, with 23 confirmations on those four nodes, the operator wrote the record
+   that `ark0/rescue-drill/` now holds alongside the two proofs.
+
+The transaction is `b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4`; it pays 193,468 sats
+to an SLH1 address of a new seed and 6,532 sats of fee.
