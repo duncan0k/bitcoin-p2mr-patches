@@ -3560,3 +3560,136 @@ The rescue was announced for 2026-11-15 08:00 UTC. The operator could not run it
 
 The transaction is `b60bc54fe4a1e911bd1bef58c32e17d3f47de0e65674a497f6c320b45f2d46d4`; it pays 193,468 sats
 to an SLH1 address of a new seed and 6,532 sats of fee.
+
+## Executed on 2026-11-16 (M4-T and M4-B roll)
+
+All five nodes moved onto the build of the release `ark0-node-m4tb`, which also carries
+`patches-m4t/` and `patches-m4b/`: from height 55000, P2MR leaves of version `0xe2` and an SLH-DSA
+signature on every block (`ark0/NETWORK.md` "Rule change at height 55000 (M4-T and M4-B)"). As in the M2
+roll, the producer moved too. Its new image also signs each block with the SLH-DSA key in the Secret
+`ark0-slh-signer`, from a height set at the roll: 52860. The observe and soak jobs moved to the same
+image. Node A's templates now reserve 48000 weight units for the coinbase in place of 16000, so that a
+full template still fits once the producer adds the SLH output (`10-configmap.yaml`).
+
+One script carried out the steps in the cluster between 19:06:46 and 19:08:42 UTC, and went through at
+its first attempt. The three external nodes followed one at a time between 20:10 and 20:30, and at 20:37
+all five nodes had 52822, the first block mined after the roll, in their active chain.
+
+### Images
+
+| Workload | Tag | containerd manifest digest |
+|---|---|---|
+| `nodea-0`, `nodeb-0` | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-m4t-m4b-f012913c9e22`, new | `sha256:633d8eb8c0a2d90174460a497be0fa370ac123d532e85b45e640ab51ea4e82cb` |
+| producer, observe, soak | `p2mr-miner:v31.1-p2mr-f012913c9e22`, new | `sha256:485fe856977ff51509606126abd517171eebf130867534102651e632455fc654` |
+| nothing | `p2mr-node:v31.1-p2mr-m05-spacing-m1-m2-m3-m4-m4r-28f575daf92f`, kept | `sha256:39850fb22d45a0b9f82b4d98593d6b2d6cdeda7e26e7b55792f6d64733715245` |
+| nothing | `p2mr-miner:v31.1-p2mr-0954c5cca219`, kept | `sha256:299cb73b8842da748b30881e53c798fa3bc4be70e04fac604e0307daafec9409` |
+
+After the roll the kubelet reported the digests of the two new images for the pods of both nodes and of
+the producer. The external nodes run the release's `bitcoind` and `bitcoin-cli`, which hash to
+`a352d945fce8498b81b2d9406eb3258bbcada73613630db6cff101507430a246` and
+`977c1ab17d4330bcde6c595784197f3ab7eaf402833c0fd50651847f24703551`. `README.md` has the build's
+verification record, at the end of "Experimental M4-B series".
+
+### The sequence
+
+All times UTC, on 2026-11-16.
+
+1. **19:06:16.** Node A was at 52820. The operator set `ARK0_SLH_BLOCK_FROM` to 52860, 40 blocks ahead,
+   in a copy of this tree's `50-miner.yaml` with its three `ARK0_SLH_BLOCK_*` lines put in. The copy
+   differs from this tree's file in those three lines only.
+2. **19:06:46.** The script started, with both nodes at 52820. By 19:07:08 its first checks had passed.
+   Both nodes were on the same tip, by then 52821. On both, block 52805, which holds the rescue of step
+   R4, was in the active chain at least six blocks deep, with the rescue transaction in it. The script
+   suspended the soak job.
+3. **19:07:40.** The producer, scaled to zero, was gone. The frozen tip, on both nodes: 52821,
+   `0000000cc6b1df5f8a9c8f748a1d430410856f67e58ff0ce95354c694c4b94a3`.
+4. **The configuration.** The ConfigMap, rendered from this tree's `10-configmap.yaml` with
+   `render-config.sh --from-live`, differed from the live one only in node A's `blockreservedweight`,
+   16000 to 48000, and its comment. It was applied.
+5. **The images.** The three tags in `kustomization.yaml` moved to the new build; the rest of the file
+   was this tree's. The maintenance overlay changed the image of the five workloads and kept the producer
+   at zero. Node B started on the new image at 19:07:56 and node A at 19:07:57; both were ready at
+   19:08:17.
+6. **Checks on the frozen tip**, both nodes: the new image; the two startup lines of M4-T and M4-B as
+   `ark0/NETWORK.md` gives them, with the M4-R line as before; `getchaintips` the same as in step 3;
+   `gettripwireinfo` the same but for one more object, `lattice`, with `height` 55000, `leaf_version`
+   `e2`, the three outputs `unspent` and `mldsa_disabled_next_block` false; `getdeploymentinfo` the same
+   but for `p2mr_lattice_tripwire`, buried at 55000, not yet active. Node A had `blockreservedweight`
+   48000 in effect. Both mempools had been empty when production stopped, so no transaction had to be
+   sent again. The script also made sure both nodes log the `validation` category, so that they log
+   their verdict on the SLH-DSA signature of each block below height 55000.
+7. **The producer.** The base started it; its `kubectl diff -k` had been `replicas` from 0 to 1, the four
+   `ARK0_SLH_*` settings and the volume for `ark0-slh-signer`. The node pods did not roll again. The
+   producer's pod ran the new image, with `ARK0_SLH_BLOCK_FROM` 52860 and the key SHA256 that the nodes
+   log at startup, and mined 52822. The script checked block 52805 on both nodes again and set the soak
+   job back as it was.
+8. **19:08:42.** The script finished. Both nodes held 52822 on top of the frozen tip.
+
+### Blocks after the roll
+
+| height | hash | header time | |
+|---|---|---|---|
+| 52821 | `0000000cc6b1df5f8a9c8f748a1d430410856f67e58ff0ce95354c694c4b94a3` | 19:06:51 | the frozen tip |
+| 52822 | `0000007647bb3b9a208f6243c1be83dd365472898d49f6206dc24d8d15c073ab` | 19:08:37 | the first block after the roll |
+| 52823 | `000001ecdb3215803d21ca9728ebbcf36a5b04c30c0cce54feb31700a21ca2ff` | 19:10:08 | |
+| 52824 | `000000a59ee533cc0267fc1cd7c67bf80de4eaed5b655085f85f8dd24b547364` | 19:11:47 | |
+
+The header times of 52821 and 52822 are 1 minute 46 seconds apart; the producer's pause is 90 seconds. At
+19:11:57 both nodes held 52824. At 19:12 the three external nodes, still on the M4-R build, held it too.
+
+### Blocks 52860 and 52861
+
+The operator checked the first two blocks from the start height, each once both nodes had it and agreed
+on its hash. In each, the coinbase holds exactly one SLH output, with amount 0
+and a script of 7,865 bytes (`OP_RETURN` and the push of 7,861 bytes), right before the witness
+commitment output. Both nodes had logged the block's signature as valid (`ark0/NETWORK.md`, "What the
+chain shows" under "Rule change at height 55000 (M4-T and M4-B)").
+
+| height | hash | checked |
+|---|---|---|
+| 52860 | `000002644ba9fc596ea41ea4a0eb07eb7b49e1c08ea3526071ec762a823b70cd` | 20:08:25 |
+| 52861 | `00000249c0569587e7d3730203d7d44657190cd62b4f66b97dc8353b1e07ae07` | 20:09:56 |
+
+### The three external nodes
+
+The first public node, the relay and the second public node moved one at a time, with the producer
+running, onto the `bitcoind` and `bitcoin-cli` of the release package `ark0-node-m4tb`, checked against
+its `SHA256SUMS`. The M4-R binaries are kept beside them as `*.m4r`. On each node a script saved the
+mempool, stopped the node, put the two files in place and started it again. Each node then logged the
+three startup lines, gave the same `lattice` object and `p2mr_lattice_tripwire` entry as nodes A and B,
+had peers again, and still had its tip from before the stop in its active chain.
+
+| node | tip before | restarted | script done | at node A's height |
+|---|---|---|---|---|
+| the first public node | 52861 | 20:10:40 | 20:10:44 | 52862, at 20:11:43 |
+| the relay | 52872 | 20:28:06 | 20:28:25 | 52873, at 20:28:50 |
+| the second public node | 52873 | 20:29:18 | 20:29:20 | 52874, at 20:30:15 |
+
+### The mempools
+
+Before its restart the first public node held one transaction; the relay and the second public node held
+none. Between 20:30:38 and 20:30:47 each of the three held one, the same one. With the one from before
+the restart, that makes two distinct transactions. At 20:36:28 both were offered to node A, which
+refused them as already confirmed (`-27`, outputs already in the UTXO set); neither had to be sent again.
+
+### All five nodes
+
+Between 20:36:55 and 20:37:10 each of the five nodes was asked for block 52822. Each had
+`0000007647bb3b9a208f6243c1be83dd365472898d49f6206dc24d8d15c073ab` at that height in its active chain,
+with 57 confirmations, so its tip was at 52878.
+
+At 20:38 the copy of `10-configmap.yaml` on the host got the same change as the live ConfigMap in step 4.
+It was then this tree's file, byte for byte. A render from it with `--from-live` matched the live
+ConfigMap exactly; nothing was applied.
+
+### What this roll does not show yet
+
+The rules apply from height 55000. From there a node with them will refuse a block without a valid
+SLH-DSA signature and will run P2MR leaves of version `0xe2` at depth one or more. Until then neither
+rule refuses a block.
+
+### Rolling back this roll
+
+The images from before the roll stay in the cluster ("Images" above), and the roll kept copies of the
+ConfigMap, `kustomization.yaml` and `50-miner.yaml` as they were before it. The external nodes keep their
+`*.m4r` binaries.

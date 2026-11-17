@@ -793,9 +793,10 @@ build, at least seven days ahead. From height 40383 at 04:33 UTC that day, at
 the rate of the two weeks before, about 896 blocks a day, the chain reaches
 height 55000 around 2026-11-19 12:00 UTC. It cannot do so before 2026-11-18
 09:00 UTC, even if blocks came every 90 seconds, the producer's configured
-pause. The operator's nodes and block producer stay on the M4-R build until the
-chain is past height 51000, where M4-R's rescue lane opens, and move to the new
-build after that; this section will give the date.
+pause. The operator's nodes and block producer stayed on the M4-R build until
+the chain was past height 51000, where M4-R's rescue lane opens. They moved to
+the new build on 2026-11-16 (`contrib/k3s/ARK0-MIGRATION.md`, "Executed on
+2026-11-16 (M4-T and M4-B roll)").
 
 ### M4-T: leaf version `0xe2` and the lattice tripwires
 
@@ -896,13 +897,16 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   accepts a block only if the signet solution under the challenge's elliptic
   curve key, the ML-DSA-44 block signature and the SLH-DSA block signature
   all hold. The operator holds all three keys.
-- **Below height 55000, M4-B rejects no block.** The operator's block producer
-  will put the SLH output in every block from a height of at most 53080 on, at
-  least 1,920 blocks before height 55000 (48 hours at its fastest rate of 960
-  blocks a day). With `-debug=validation`, a node logs for each block below
-  height 55000 that it validates, the genesis block aside, whether its SLH-DSA
-  signature is valid, invalid, or absent or not in the required form. So the
-  signatures can be checked on the chain before they are enforced.
+- **Below height 55000, M4-B rejects no block.** The operator announced that
+  its block producer would put the SLH output in every block from a height of
+  at most 53080 on, at least 1,920 blocks before height 55000 (48 hours at its
+  fastest rate of 960 blocks a day). At the roll on 2026-11-16 the operator set
+  the producer to put the SLH output in from height 52860 on, 220 blocks before
+  53080 and 2,140 blocks before 55000 ("What the chain shows" below). With
+  `-debug=validation`, a node logs for each block below height 55000 that it
+  validates, the genesis block aside, whether its SLH-DSA signature is valid,
+  invalid, or absent or not in the required form. So the signatures can be
+  checked on the chain before they are enforced.
 - **Cost:** 7,876 bytes more in every block (31,504 weight units), which a
   compact block carries too, as it carries the coinbase in full.
 
@@ -953,6 +957,31 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
 - **The height, the three outputs and the key are rules of this network and
   will not change.** The series are in `patches-m4t/` and `patches-m4b/`
   (`README.md`, "Experimental M4-T series" and "Experimental M4-B series").
+
+### What the chain shows
+
+The block producer is set to put the SLH output in every block from height
+52860 on. On 2026-11-16 the operator checked the first two, 52860 and 52861,
+on nodes A and B, the two it runs in its cluster. In each, the coinbase holds
+exactly one SLH output, with amount 0, right before the witness commitment
+output, and both nodes logged:
+
+```
+CheckSignetSLHBlock: block <hash> below height 55000, SLH-DSA block signature valid
+```
+
+| Height | Block |
+|---|---|
+| 52860 | `000002644ba9fc596ea41ea4a0eb07eb7b49e1c08ea3526071ec762a823b70cd` |
+| 52861 | `00000249c0569587e7d3730203d7d44657190cd62b4f66b97dc8353b1e07ae07` |
+
+To look at one of them, run `bitcoin-cli getblock <hash> 2`. Among the
+coinbase outputs, the witness commitment's script starts with `6a24aa21a9ed`.
+The output right before it is the SLH output, and its script starts with
+`6a4db51e5051483101`: `OP_RETURN`, a push of 7,861 bytes, the tag `PQH1` and
+the version byte `01`. A node with these series also checks the signature:
+started with `-debug=validation`, it logs a line like the one above for each
+block below height 55000 that it validates.
 
 ## Parameters
 
