@@ -336,10 +336,10 @@ not build them yet. Pay nothing to such leaves before height 32000: until then t
 `OP_SUCCESS241`, and anyone who knows the leaf and its path in the tree can spend the output
 through it.
 
-Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T), and no wallet offers pq2 outputs
-yet (`NETWORK.md`, "Rule change at height 55000 (M4-T and M4-B)", says when one does). Do not pay to such
-leaves before height 55000: until then they are not executed, so anyone who knows a leaf and its path in
-the tree can spend the output through it.
+Nor does the node's wallet make or sign leaves of version `0xe2` (M4-T). Ark-0 Wallet offers pq2 outputs
+from height 55006, in version 0.2.0 and later (`NETWORK.md`, "Rule change at height 55000 (M4-T and
+M4-B)"). Do not pay to leaves of version `0xe2` before height 55000: until then they are not executed, so
+anyone who knows a leaf and its path in the tree can spend the output through it.
 
 Nor does the node's wallet make rescue spends (M4-R). The proofs are made off the node, with the
 prover of [ark0-rescue](https://github.com/duncan0k/ark0-rescue), and a rescue gives away the key it

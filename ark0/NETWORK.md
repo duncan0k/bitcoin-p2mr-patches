@@ -943,8 +943,9 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   past height 39971 reports all three as `missing`; that is expected, and
   matters only from height 55000.
 - **Wallets.** Bitcoin Core's wallet does not make or sign leaves of version
-  `0xe2`, and no wallet offers pq2 outputs yet; this section will say when one
-  does.
+  `0xe2`. Ark-0 Wallet offers pq2 outputs from height 55006, in version 0.2.0
+  (released on 2026-11-17,
+  <https://github.com/duncan0k/ark0-wallet/releases/tag/v0.2.0>) and later.
 - **They are soft forks.** A node without these series (an M4-R build) accepts
   every block a node with them accepts and keeps following the chain, but does
   not run leaves of version `0xe2`, does not check the SLH-DSA block signature,
