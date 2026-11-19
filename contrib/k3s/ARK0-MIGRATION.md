@@ -3693,3 +3693,23 @@ rule refuses a block.
 The images from before the roll stay in the cluster ("Images" above), and the roll kept copies of the
 ConfigMap, `kustomization.yaml` and `50-miner.yaml` as they were before it. The external nodes keep their
 `*.m4r` binaries.
+
+## Height 55000: the M4-T and M4-B rules apply (2026-11-19)
+
+From height 55000 a node built with `patches-m4t/` and `patches-m4b/` runs P2MR leaves of version `0xe2`
+under the lattice tripwire rule and requires the SLH-DSA block signature (`ark0/NETWORK.md` "Rule change
+at height 55000 (M4-T and M4-B)"). The blocks around it, header times in UTC:
+
+| height | hash | header time | |
+|---|---|---|---|
+| 54999 | `000001c9e9ced908cefd03a823f5f5b455fcdf0c9072e022ff9ee4500faa46fa` | 04:41:34 | the last block below the rules |
+| 55000 | `000002e1521fdf374b3ffa93448284bb83e6a1f0af4bcfdab9f7ba769fd588d5` | 04:43:06 | the first block under them |
+| 55006 | `000000dac588c7e0935fcf89d10bb5d49f65410102cc5eef09f94922a4c32c25` | 04:52:36 | six blocks past it, from which Ark-0 Wallet 0.2.0 offers pq2 outputs |
+
+Block 55000 holds one SLH output in its coinbase. Each of the five nodes the operator runs reached
+55000 at 04:43:14 and logged the state of the three lattice tripwire outputs at that height: all three
+unspent, ML-DSA-44 checks in leaf version `0xe2` enabled for the next block (`ark0/NETWORK.md` "What the
+chain shows" under M4-T and M4-B). On each node, `getdeploymentinfo` at block 54999 listed
+`p2mr_lattice_tripwire` as active, and at block 54998 it did not, as `active` is for the next block.
+Asked at heights 55000 and 55006, no node reported a chain tip above height 36900 other than the
+active one.

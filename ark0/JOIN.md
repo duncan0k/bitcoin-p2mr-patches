@@ -17,16 +17,17 @@ Before you start:
   (section 4). You need neither of them to follow the chain or to check its P2MR rules.
 - **Rule changes are announced in this repository before they apply.** The latest ones, milestones M4-T
   and M4-B, apply from height 55000 ("Rule change at height 55000 (M4-T and M4-B)" in `NETWORK.md`),
-  expected around 2026-11-19 12:00 UTC and not before 2026-11-18 09:00 UTC. From there nodes run P2MR
+  which the chain reached on 2026-11-19. From there nodes run P2MR
   leaves of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of three designated
   outputs is spent, and require an SLH-DSA signature on every block. Both are soft forks: a node built
   with `patches-m4r/` but without `patches-m4t/` and `patches-m4b/` keeps following the chain but checks
   neither rule. The one before, M4-R, applies from height 51000 ("Rule change at height 51000 (M4-R)"),
-  expected around 2026-11-15 05:00 UTC and not before 2026-11-14 00:00 UTC. From there, in P2MR leaves of
+  which the chain reached on 2026-11-14. From there, in P2MR leaves of
   version `0xe0`, nodes accept a zero-knowledge proof that the spender knows the seed behind a key in
   place of an elliptic curve signature. **It is a hard fork:** a node built with `patches-m3/` but
-  without `patches-m4r/` stops following the chain at the first block that uses it, so upgrade before
-  height 51000 (section 1). M4-S applies from height 32000 ("Rule change at height 32000 (M4-S)"). From
+  without `patches-m4r/` stops following the chain at the first block that uses it, block 52805, so
+  upgrade it (section 1; section 5 has the steps for a node that has already stopped). M4-S applies
+  from height 32000 ("Rule change at height 32000 (M4-S)"). From
   there nodes check `OP_CHECKSLHDSA128S`, an SLH-DSA signature check in P2MR leaves. M3 applies from
   height 30000 ("Rule change at height 30000 (M3)"). From there nodes run P2MR leaves of version `0xe0`,
   whose elliptic curve signature checks stop working once one of two designated outputs is spent; the
@@ -46,8 +47,8 @@ height 8064, because from that height Ark-0 retargets its difficulty against 90 
 the consensus series in `patches/`, the wallet series in `patches-m05/` (section 4 uses it), the retarget
 patch in `patches-spacing/`, the M1 series in `patches-m1/`, the M2 series in `patches-m2/`, the M3
 series in `patches-m3/`, the M4-S series in `patches-m4/`, the M4-R series in `patches-m4r/`, the M4-T
-series in `patches-m4t/` and the M4-B series in `patches-m4b/`, applied in that order. Since 2026-10-30
-the operator's nodes have run the first eight; they move to all ten after height 51000. You can take the
+series in `patches-m4t/` and the M4-B series in `patches-m4b/`, applied in that order. Since 2026-11-16
+the operator's nodes have run all ten. You can take the
 build with all ten prebuilt, as binaries or as a container image, or build it yourself; the rest of this
 guide works the same with either.
 
@@ -375,9 +376,9 @@ do first.
   once with `-reindex-chainstate` so that it checks them (`-reindex` on a pruned node).
 - **`debug.log` has no `Signet P2MR rescue lane` line, or `getdeploymentinfo` does not list
   `p2mr_rescue`:** the node was built without `patches-m4r/`, or still runs the binary from before.
-  Rebuild it (section 1) and restart it before height 51000: from there a node built with
-  `patches-m3/` but without `patches-m4r/` stops following the chain at the first block with a
-  rescue spend. An M4-S node needs no reindex for this; an M3 node also needs one start with
+  Rebuild it (section 1) and restart it: a node built with `patches-m3/` but without
+  `patches-m4r/` stops following the chain at the first block with a rescue spend, block 52805.
+  An M4-S node needs no reindex for this; an M3 node also needs one start with
   `-reindex-chainstate`, as in the previous item.
 - **Stuck at height 50999 or above, with the next block marked invalid:** the node ran without
   `patches-m4r/` when that block came and refused its rescue spend. Rebuild it (section 1), restart

@@ -999,8 +999,8 @@ Their SHA-256:
 
 ## Prebuilt node
 
-The release `ark0-node-m4tb` of this repository carries the build with all ten patch sets, to which the
-Ark-0 nodes move after height 51000: the five binaries for x86_64 Linux in an archive,
+The release `ark0-node-m4tb` of this repository carries the build with all ten patch sets, which the
+Ark-0 nodes have run since 2026-11-16: the five binaries for x86_64 Linux in an archive,
 `ark0-node-m4tb-x86_64-linux-gnu.tar.gz`, and the same build as a container image,
 `ghcr.io/duncan0k/ark0-node:m4tb`. Its `SHA256SUMS` lists the archive, the binaries in it and the image
 manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that file with the release key in
@@ -1008,7 +1008,7 @@ manifest, whose SHA-256 is the image digest, and `SHA256SUMS.asc` signs that fil
 from the system.
 
 The release before, `ark0-node-m4r`, carries the build with the first eight patch sets, which the Ark-0
-nodes run until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It was
+nodes ran until then. It keeps following Ark-0 past height 55000, but checks neither M4-T nor M4-B. It was
 first published on 2026-10-30 with a build that set the lane's height at 63000, and replaced the same day,
 under the same tag, with a build that sets it at 51000; a node that runs the first build has to be replaced
 as well (`ark0/NETWORK.md`, "Rule change at height 51000 (M4-R)").

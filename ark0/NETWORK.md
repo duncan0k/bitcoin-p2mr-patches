@@ -18,12 +18,12 @@ the M4-S series in `patches-m4/`, which from height 32000 adds an SLH-DSA
 signature check to P2MR leaves; see "Rule change at height 32000 (M4-S)". Since
 2026-10-30 they also carry the M4-R series in `patches-m4r/`, which from height
 51000 opens a rescue lane in P2MR leaves of version `0xe0`, a hard fork; see
-"Rule change at height 51000 (M4-R)". After height 51000, and before height
-55000, they move to a build that also carries the M4-T series in `patches-m4t/`
-and the M4-B series in `patches-m4b/`, which from height 55000 run P2MR leaves
-of version `0xe2`, whose ML-DSA-44 signature checks stop working once one of
-three designated outputs is spent, and require an SLH-DSA signature on every
-block; see "Rule change at height 55000 (M4-T and M4-B)".
+"Rule change at height 51000 (M4-R)". Since 2026-11-16 they also carry the M4-T
+series in `patches-m4t/` and the M4-B series in `patches-m4b/`, which from
+height 55000 run P2MR leaves of version `0xe2`, whose ML-DSA-44 signature
+checks stop working once one of three designated outputs is spent, and require
+an SLH-DSA signature on every block; see "Rule change at height 55000 (M4-T and
+M4-B)".
 
 It exists to answer one question with evidence rather than assertion: *do these
 rules actually hold on a running chain?* The material in this directory lets
@@ -789,14 +789,12 @@ and M4-B here. They start at the same block, and both are soft forks. The nodes
 built with `patches-m4t/` and `patches-m4b/` enforce them, and
 `doc/p2mr-lattice-tripwire.md` and `doc/signet-slhblock.md` in the patched tree
 specify them. The height was announced on 2026-11-03, with the release of the
-build, at least seven days ahead. From height 40383 at 04:33 UTC that day, at
-the rate of the two weeks before, about 896 blocks a day, the chain reaches
-height 55000 around 2026-11-19 12:00 UTC. It cannot do so before 2026-11-18
-09:00 UTC, even if blocks came every 90 seconds, the producer's configured
-pause. The operator's nodes and block producer stayed on the M4-R build until
-the chain was past height 51000, where M4-R's rescue lane opens. They moved to
-the new build on 2026-11-16 (`contrib/k3s/ARK0-MIGRATION.md`, "Executed on
-2026-11-16 (M4-T and M4-B roll)").
+build, at least seven days ahead. The operator's nodes and block producer
+stayed on the M4-R build until the chain was past height 51000, where M4-R's
+rescue lane opens. They moved to the new build on 2026-11-16
+(`contrib/k3s/ARK0-MIGRATION.md`, "Executed on 2026-11-16 (M4-T and M4-B
+roll)"). The chain reached height 55000 on 2026-11-19; block 55000 has the
+header time 04:43:06 UTC ("What the chain shows" below).
 
 ### M4-T: leaf version `0xe2` and the lattice tripwires
 
@@ -983,6 +981,26 @@ The output right before it is the SLH output, and its script starts with
 the version byte `01`. A node with these series also checks the signature:
 started with `-debug=validation`, it logs a line like the one above for each
 block below height 55000 that it validates.
+
+Block 55000,
+`000002e1521fdf374b3ffa93448284bb83e6a1f0af4bcfdab9f7ba769fd588d5`, has the
+header time 2026-11-19 04:43:06 UTC. Like 52860 and 52861, it holds exactly one
+SLH output in its coinbase, right before the witness commitment output. On
+each of the five nodes the operator runs, `bitcoin-cli getdeploymentinfo` at
+block 54999 reports `p2mr_lattice_tripwire` as active, and at block 54998 it
+does not: `active` is for the next block. Each node logged at 04:43:14 UTC,
+when block 55000 joined its active chain:
+
+```
+P2MR lattice tripwire rules active from height 55000, reached by block 000002e1521fdf374b3ffa93448284bb83e6a1f0af4bcfdab9f7ba769fd588d5: lattice tripwire outputs aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:0 unspent, aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:1 unspent, aac5a1fef01545c338de92bceda520684a49682f2ec546900a4dbe99eba8827c:2 unspent; ML-DSA-44 checks in leaf version 0xe2 are enabled for the next block
+```
+
+Asked at heights 55000 and 55006, the `lattice` object of `bitcoin-cli
+gettripwireinfo` on each of them reported the three outputs `unspent` and
+`mldsa_disabled_next_block` `false`. Block 55006,
+`000000dac588c7e0935fcf89d10bb5d49f65410102cc5eef09f94922a4c32c25`, has the
+header time 04:52:36 UTC; it is the height from which Ark-0 Wallet 0.2.0
+offers pq2 outputs ("Both" above).
 
 ## Parameters
 
