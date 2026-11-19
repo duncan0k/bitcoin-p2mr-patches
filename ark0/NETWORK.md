@@ -868,9 +868,10 @@ library alone.
   the block signatures are not affected. A leaf of version `0xe2` whose only
   path is an ML-DSA-44 check can no longer be spent after that, and no rescue
   covers it: the rescue lane covers elliptic curve checks only. The drill is
-  scheduled for 2026-11-27 08:00 UTC (announced on 2026-11-04). If no wallet
-  offers pq2 outputs by 2026-11-20 08:00 UTC, it moves to the first 08:00 UTC
-  at least seven days after one does, and this section will give that time.
+  scheduled for 2026-11-27 08:00 UTC (announced on 2026-11-04). It would have
+  moved to a later time if no wallet had offered pq2 outputs by 2026-11-20
+  08:00 UTC. Ark-0 Wallet 0.2.0 was already offering them on 2026-11-19
+  ("Both" below), so the scheduled time stands.
 
 ### M4-B: an SLH-DSA block signature
 
@@ -944,6 +945,9 @@ byte `01` and the 7,856-byte signature. A block without it, or with a wrong one,
   `0xe2`. Ark-0 Wallet offers pq2 outputs from height 55006, in version 0.2.0
   (released on 2026-11-17,
   <https://github.com/duncan0k/ark0-wallet/releases/tag/v0.2.0>) and later.
+  On 2026-11-19 at 05:19 UTC, with the chain at height 55022, the operator
+  ran that release's Windows build, made a new wallet in it and asked for a
+  pq2 address; the wallet showed one.
 - **They are soft forks.** A node without these series (an M4-R build) accepts
   every block a node with them accepts and keeps following the chain, but does
   not run leaves of version `0xe2`, does not check the SLH-DSA block signature,
